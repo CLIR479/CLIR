@@ -8,7 +8,7 @@ use crate::isa::riscv64::lower::isle::generated_code::{
 };
 use crate::machinst::isle::WritableReg;
 
-use std::fmt::Result;
+use core::fmt::Result;
 
 /// A macro for defining a newtype of `Reg` that enforces some invariant about
 /// the wrapped `Reg` (such as that it is of a particular register class).
@@ -38,11 +38,7 @@ macro_rules! newtype_of_reg {
             /// Create this newtype from the given register, or return `None` if the register
             /// is not a valid instance of this newtype.
             pub fn new($check_reg: Reg) -> Option<Self> {
-                if $check {
-                    Some(Self($check_reg))
-                } else {
-                    None
-                }
+                if $check { Some(Self($check_reg)) } else { None }
             }
 
             /// Get this newtype's underlying `Reg`.
@@ -57,7 +53,7 @@ macro_rules! newtype_of_reg {
         // NB: We cannot implement `DerefMut` because that would let people do
         // nasty stuff like `*my_xreg.deref_mut() = some_freg`, breaking the
         // invariants that `XReg` provides.
-        impl std::ops::Deref for $newtype_reg {
+        impl core::ops::Deref for $newtype_reg {
             type Target = Reg;
 
             fn deref(&self) -> &Reg {
@@ -202,9 +198,9 @@ impl Display for AMode {
     }
 }
 
-impl Into<AMode> for StackAMode {
-    fn into(self) -> AMode {
-        match self {
+impl From<StackAMode> for AMode {
+    fn from(stack: StackAMode) -> AMode {
+        match stack {
             StackAMode::IncomingArg(offset, stack_args_size) => {
                 AMode::IncomingArg(i64::from(stack_args_size) - offset)
             }
@@ -329,6 +325,35 @@ impl FliConstant {
         // Convert the value into an F64, this allows us to represent
         // values from both f32 and f64 in the same value.
         let value = match ty {
+            F16 => {
+                // FIXME(#8312): Use `f16` once it has been stabilised.
+                // Handle special/non-normal values first.
+                match imm {
+                    // `f16::MIN_POSITIVE`
+                    0x0400 => return Some(Self::new(1)),
+                    // 2 pow -16
+                    0x0100 => return Some(Self::new(2)),
+                    // 2 pow -15
+                    0x0200 => return Some(Self::new(3)),
+                    // `f16::INFINITY`
+                    0x7c00 => return Some(Self::new(30)),
+                    // Canonical NaN
+                    0x7e00 => return Some(Self::new(31)),
+                    _ => {
+                        let exponent_bits = imm & 0x7c00;
+                        if exponent_bits == 0 || exponent_bits == 0x7c00 {
+                            // All non-normal values are handled above.
+                            return None;
+                        }
+                        let sign = (imm & 0x8000) << 48;
+                        // Adjust the exponent for the difference between the `f16` exponent bias
+                        // and the `f64` exponent bias.
+                        let exponent = (exponent_bits + ((1023 - 15) << 10)) << 42;
+                        let significand = (imm & 0x3ff) << 42;
+                        f64::from_bits(sign | exponent | significand)
+                    }
+                }
+            }
             F32 => f32::from_bits(imm as u32) as f64,
             F64 => f64::from_bits(imm),
             _ => unimplemented!(),
@@ -626,7 +651,7 @@ impl Display for FpuOPWidth {
 impl TryFrom<Type> for FpuOPWidth {
     type Error = &'static str;
 
-    fn try_from(value: Type) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: Type) -> core::result::Result<Self, Self::Error> {
         match value {
             F16 => Ok(FpuOPWidth::H),
             F32 => Ok(FpuOPWidth::S),
@@ -1148,7 +1173,7 @@ impl FRM {
 
 impl FFlagsException {
     #[inline]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "here for future use")]
     pub(crate) fn mask(self) -> u32 {
         match self {
             FFlagsException::NV => 1 << 4,
@@ -1275,7 +1300,6 @@ impl StoreOP {
     }
 }
 
-#[allow(dead_code)]
 impl FClassResult {
     pub(crate) const fn bit(self) -> u32 {
         match self {
@@ -1293,15 +1317,18 @@ impl FClassResult {
     }
 
     #[inline]
+    #[expect(dead_code, reason = "here for future use")]
     pub(crate) const fn is_nan_bits() -> u32 {
         Self::SNaN.bit() | Self::QNaN.bit()
     }
     #[inline]
+    #[expect(dead_code, reason = "here for future use")]
     pub(crate) fn is_zero_bits() -> u32 {
         Self::NegZero.bit() | Self::PosZero.bit()
     }
 
     #[inline]
+    #[expect(dead_code, reason = "here for future use")]
     pub(crate) fn is_infinite_bits() -> u32 {
         Self::PosInfinite.bit() | Self::NegInfinite.bit()
     }
@@ -1409,18 +1436,10 @@ impl AtomicOP {
     }
 
     pub(crate) fn load_op(t: Type) -> Self {
-        if t.bits() <= 32 {
-            Self::LrW
-        } else {
-            Self::LrD
-        }
+        if t.bits() <= 32 { Self::LrW } else { Self::LrD }
     }
     pub(crate) fn store_op(t: Type) -> Self {
-        if t.bits() <= 32 {
-            Self::ScW
-        } else {
-            Self::ScD
-        }
+        if t.bits() <= 32 { Self::ScW } else { Self::ScD }
     }
 
     /// extract
@@ -1428,13 +1447,13 @@ impl AtomicOP {
         let mut insts = SmallInstVec::new();
         insts.push(Inst::AluRRR {
             alu_op: AluOPRRR::Srl,
-            rd: rd,
+            rd,
             rs1: rs,
             rs2: offset,
         });
         //
         insts.push(Inst::Extend {
-            rd: rd,
+            rd,
             rn: rd.to_reg(),
             signed: false,
             from_bits: ty.bits() as u8,
@@ -1454,13 +1473,13 @@ impl AtomicOP {
         let mut insts = SmallInstVec::new();
         insts.push(Inst::AluRRR {
             alu_op: AluOPRRR::Srl,
-            rd: rd,
+            rd,
             rs1: rs,
             rs2: offset,
         });
         //
         insts.push(Inst::Extend {
-            rd: rd,
+            rd,
             rn: rd.to_reg(),
             signed: true,
             from_bits: ty.bits() as u8,
@@ -1487,7 +1506,7 @@ impl AtomicOP {
         insts.push(Inst::construct_bit_not(tmp, tmp.to_reg()));
         insts.push(Inst::AluRRR {
             alu_op: AluOPRRR::And,
-            rd: rd,
+            rd,
             rs1: rd.to_reg(),
             rs2: tmp.to_reg(),
         });
@@ -1519,7 +1538,7 @@ impl AtomicOP {
         });
         insts.push(Inst::AluRRR {
             alu_op: AluOPRRR::Or,
-            rd: rd,
+            rd,
             rs1: rd.to_reg(),
             rs2: tmp.to_reg(),
         });
@@ -1546,7 +1565,7 @@ impl AtomicOP {
 pub enum AMO {
     Relax = 0b00,
     Release = 0b01,
-    Aquire = 0b10,
+    Acquire = 0b10,
     SeqCst = 0b11,
 }
 
@@ -1555,7 +1574,7 @@ impl AMO {
         match self {
             AMO::Relax => "",
             AMO::Release => ".rl",
-            AMO::Aquire => ".aq",
+            AMO::Acquire => ".aq",
             AMO::SeqCst => ".aqrl",
         }
     }
@@ -1585,34 +1604,6 @@ impl Inst {
             s.push_str("w");
         }
         s
-    }
-}
-
-pub(crate) fn f32_cvt_to_int_bounds(signed: bool, out_bits: u32) -> (f32, f32) {
-    match (signed, out_bits) {
-        (true, 8) => (i8::min_value() as f32 - 1., i8::max_value() as f32 + 1.),
-        (true, 16) => (i16::min_value() as f32 - 1., i16::max_value() as f32 + 1.),
-        (true, 32) => (-2147483904.0, 2147483648.0),
-        (true, 64) => (-9223373136366403584.0, 9223372036854775808.0),
-        (false, 8) => (-1., u8::max_value() as f32 + 1.),
-        (false, 16) => (-1., u16::max_value() as f32 + 1.),
-        (false, 32) => (-1., 4294967296.0),
-        (false, 64) => (-1., 18446744073709551616.0),
-        _ => unreachable!(),
-    }
-}
-
-pub(crate) fn f64_cvt_to_int_bounds(signed: bool, out_bits: u32) -> (f64, f64) {
-    match (signed, out_bits) {
-        (true, 8) => (i8::min_value() as f64 - 1., i8::max_value() as f64 + 1.),
-        (true, 16) => (i16::min_value() as f64 - 1., i16::max_value() as f64 + 1.),
-        (true, 32) => (-2147483649.0, 2147483648.0),
-        (true, 64) => (-9223372036854777856.0, 9223372036854775808.0),
-        (false, 8) => (-1., u8::max_value() as f64 + 1.),
-        (false, 16) => (-1., u16::max_value() as f64 + 1.),
-        (false, 32) => (-1., 4294967296.0),
-        (false, 64) => (-1., 18446744073709551616.0),
-        _ => unreachable!(),
     }
 }
 

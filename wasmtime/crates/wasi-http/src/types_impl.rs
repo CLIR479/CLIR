@@ -1,23 +1,17 @@
 //! Implementation for the `wasi:http/types` interface.
 
-use crate::{
-    bindings::http::types::{self, Headers, Method, Scheme, StatusCode, Trailers},
-    body::{HostFutureTrailers, HostIncomingBody, HostOutgoingBody, StreamContext},
-    types::{
-        is_forbidden_header, remove_forbidden_headers, FieldMap, HostFields,
-        HostFutureIncomingResponse, HostIncomingRequest, HostIncomingResponse, HostOutgoingRequest,
-        HostOutgoingResponse, HostResponseOutparam,
-    },
-    WasiHttpImpl, WasiHttpView,
+use crate::bindings::http::types::{self, Headers, Method, Scheme, StatusCode, Trailers};
+use crate::body::{HostFutureTrailers, HostIncomingBody, HostOutgoingBody, StreamContext};
+use crate::types::{
+    FieldMap, HostFields, HostFutureIncomingResponse, HostIncomingRequest, HostIncomingResponse,
+    HostOutgoingRequest, HostOutgoingResponse, HostResponseOutparam, remove_forbidden_headers,
 };
-use anyhow::Context;
+use crate::{HttpError, HttpResult, WasiHttpImpl, WasiHttpView, get_content_length};
 use std::any::Any;
 use std::str::FromStr;
-use wasmtime::component::{Resource, ResourceTable};
-use wasmtime_wasi::{
-    bindings::io::streams::{InputStream, OutputStream},
-    Pollable, ResourceTableError,
-};
+use wasmtime::component::{Resource, ResourceTable, ResourceTableError};
+use wasmtime::{error::Context as _, format_err};
+use wasmtime_wasi::p2::{DynInputStream, DynOutputStream, DynPollable};
 
 impl<T> crate::bindings::http::types::Host for WasiHttpImpl<T>
 where
@@ -33,26 +27,6 @@ where
     ) -> wasmtime::Result<Option<types::ErrorCode>> {
         let e = self.table().get(&err)?;
         Ok(e.downcast_ref::<types::ErrorCode>().cloned())
-    }
-}
-
-/// Extract the `Content-Length` header value from a [`FieldMap`], returning `None` if it's not
-/// present. This function will return `Err` if it's not possible to parse the `Content-Length`
-/// header.
-fn get_content_length(fields: &FieldMap) -> Result<Option<u64>, ()> {
-    let header_val = match fields.get(hyper::header::CONTENT_LENGTH) {
-        Some(val) => val,
-        None => return Ok(None),
-    };
-
-    let header_str = match header_val.to_str() {
-        Ok(val) => val,
-        Err(_) => return Err(()),
-    };
-
-    match header_str.parse() {
-        Ok(len) => Ok(Some(len)),
-        Err(_) => Err(()),
     }
 }
 
@@ -128,7 +102,7 @@ where
                 Err(_) => return Ok(Err(types::HeaderError::InvalidSyntax)),
             };
 
-            if is_forbidden_header(self, &header) {
+            if self.is_forbidden_header(&header) {
                 return Ok(Err(types::HeaderError::Forbidden));
             }
 
@@ -199,7 +173,7 @@ where
             Err(_) => return Ok(Err(types::HeaderError::InvalidSyntax)),
         };
 
-        if is_forbidden_header(self, &header) {
+        if self.is_forbidden_header(&header) {
             return Ok(Err(types::HeaderError::Forbidden));
         }
 
@@ -231,7 +205,7 @@ where
             Err(_) => return Ok(Err(types::HeaderError::InvalidSyntax)),
         };
 
-        if is_forbidden_header(self, &header) {
+        if self.is_forbidden_header(&header) {
             return Ok(Err(types::HeaderError::Forbidden));
         }
 
@@ -251,7 +225,7 @@ where
             Err(_) => return Ok(Err(types::HeaderError::InvalidSyntax)),
         };
 
-        if is_forbidden_header(self, &header) {
+        if self.is_forbidden_header(&header) {
             return Ok(Err(types::HeaderError::Forbidden));
         }
 
@@ -391,6 +365,8 @@ where
         &mut self,
         request: Resource<HostOutgoingRequest>,
     ) -> wasmtime::Result<Result<Resource<HostOutgoingBody>, ()>> {
+        let buffer_chunks = self.outgoing_body_buffer_chunks();
+        let chunk_size = self.outgoing_body_chunk_size();
         let req = self
             .table()
             .get_mut(&request)
@@ -402,10 +378,11 @@ where
 
         let size = match get_content_length(&req.headers) {
             Ok(size) => size,
-            Err(e) => return Ok(Err(e)),
+            Err(..) => return Ok(Err(())),
         };
 
-        let (host_body, hyper_body) = HostOutgoingBody::new(StreamContext::Request, size);
+        let (host_body, hyper_body) =
+            HostOutgoingBody::new(StreamContext::Request, size, buffer_chunks, chunk_size);
 
         req.body = Some(hyper_body);
 
@@ -425,7 +402,7 @@ where
         &mut self,
         request: wasmtime::component::Resource<types::OutgoingRequest>,
     ) -> wasmtime::Result<Method> {
-        Ok(self.table().get(&request)?.method.clone().try_into()?)
+        Ok(self.table().get(&request)?.method.clone())
     }
 
     fn set_method(
@@ -511,12 +488,7 @@ where
         let req = self.table().get_mut(&request)?;
 
         if let Some(s) = authority.as_ref() {
-            let auth = match http::uri::Authority::from_str(s.as_str()) {
-                Ok(auth) => auth,
-                Err(_) => return Ok(Err(())),
-            };
-
-            if s.contains(':') && auth.port_u16().is_none() {
+            if let Err(_) = http::uri::Authority::from_str(s.as_str()) {
                 return Ok(Err(()));
             }
         }
@@ -572,11 +544,22 @@ where
             Err(e) => Err(e),
         };
 
-        self.table()
-            .delete(id)?
-            .result
-            .send(val)
-            .map_err(|_| anyhow::anyhow!("failed to initialize response"))
+        let resp = self.table().delete(id)?;
+        // Giving the API doesn't return any error, it's probably
+        // better to ignore the error than trap the guest, in case of
+        // host timeout and dropped the receiver side of the channel.
+        // See also: #10784
+        let _ = resp.result.send(val);
+        Ok(())
+    }
+
+    fn send_informational(
+        &mut self,
+        _id: Resource<HostResponseOutparam>,
+        _status: u16,
+        _headers: Resource<Headers>,
+    ) -> HttpResult<()> {
+        Err(HttpError::trap(format_err!("not implemented")))
     }
 }
 
@@ -659,8 +642,8 @@ where
     fn subscribe(
         &mut self,
         index: Resource<HostFutureTrailers>,
-    ) -> wasmtime::Result<Resource<Pollable>> {
-        wasmtime_wasi::subscribe(self.table(), index)
+    ) -> wasmtime::Result<Resource<DynPollable>> {
+        wasmtime_wasi::p2::subscribe(self.table(), index)
     }
 
     fn get(
@@ -701,11 +684,11 @@ where
     fn stream(
         &mut self,
         id: Resource<HostIncomingBody>,
-    ) -> wasmtime::Result<Result<Resource<InputStream>, ()>> {
+    ) -> wasmtime::Result<Result<Resource<DynInputStream>, ()>> {
         let body = self.table().get_mut(&id)?;
 
         if let Some(stream) = body.take_stream() {
-            let stream: InputStream = Box::new(stream);
+            let stream: DynInputStream = Box::new(stream);
             let stream = self.table().push_child(stream, &id)?;
             return Ok(Ok(stream));
         }
@@ -751,6 +734,8 @@ where
         &mut self,
         id: Resource<HostOutgoingResponse>,
     ) -> wasmtime::Result<Result<Resource<HostOutgoingBody>, ()>> {
+        let buffer_chunks = self.outgoing_body_buffer_chunks();
+        let chunk_size = self.outgoing_body_chunk_size();
         let resp = self.table().get_mut(&id)?;
 
         if resp.body.is_some() {
@@ -759,10 +744,11 @@ where
 
         let size = match get_content_length(&resp.headers) {
             Ok(size) => size,
-            Err(e) => return Ok(Err(e)),
+            Err(..) => return Ok(Err(())),
         };
 
-        let (host, body) = HostOutgoingBody::new(StreamContext::Response, size);
+        let (host, body) =
+            HostOutgoingBody::new(StreamContext::Response, size, buffer_chunks, chunk_size);
 
         resp.body.replace(body);
 
@@ -877,8 +863,8 @@ where
     fn subscribe(
         &mut self,
         id: Resource<HostFutureIncomingResponse>,
-    ) -> wasmtime::Result<Resource<Pollable>> {
-        wasmtime_wasi::subscribe(self.table(), id)
+    ) -> wasmtime::Result<Resource<DynPollable>> {
+        wasmtime_wasi::p2::subscribe(self.table(), id)
     }
 }
 
@@ -889,7 +875,7 @@ where
     fn write(
         &mut self,
         id: Resource<HostOutgoingBody>,
-    ) -> wasmtime::Result<Result<Resource<OutputStream>, ()>> {
+    ) -> wasmtime::Result<Result<Resource<DynOutputStream>, ()>> {
         let body = self.table().get_mut(&id)?;
         if let Some(stream) = body.take_output_stream() {
             let id = self.table().push_child(stream, &id)?;

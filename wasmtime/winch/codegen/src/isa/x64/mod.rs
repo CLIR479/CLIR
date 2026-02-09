@@ -1,27 +1,23 @@
-use crate::{
-    abi::{wasm_sig, ABI},
-    codegen::{BuiltinFunctions, CodeGen, CodeGenContext, FuncEnv, TypeConverter},
-};
-
 use crate::frame::{DefinedLocals, Frame};
 use crate::isa::x64::masm::MacroAssembler as X64Masm;
+use crate::isa::{Builder, TargetIsa};
 use crate::masm::MacroAssembler;
 use crate::regalloc::RegAlloc;
 use crate::stack::Stack;
 use crate::{
-    isa::{Builder, TargetIsa},
-    regset::RegBitSet,
+    Result,
+    abi::{ABI, wasm_sig},
+    codegen::{BuiltinFunctions, CodeGen, CodeGenContext, FuncEnv, TypeConverter},
 };
-use anyhow::Result;
 use cranelift_codegen::settings::{self, Flags};
-use cranelift_codegen::{isa::x64::settings as x64_settings, Final, MachBufferFinalized};
+use cranelift_codegen::{Final, MachBufferFinalized, isa::x64::settings as x64_settings};
 use cranelift_codegen::{MachTextSectionBuilder, TextSectionBuilder};
 use target_lexicon::Triple;
 use wasmparser::{FuncValidator, FunctionBody, ValidatorResources};
 use wasmtime_cranelift::CompiledFunction;
-use wasmtime_environ::{ModuleTranslation, ModuleTypesBuilder, VMOffsets, WasmFuncType};
+use wasmtime_environ::{ModuleTranslation, ModuleTypesBuilder, Tunables, VMOffsets, WasmFuncType};
 
-use self::regs::{ALL_FPR, ALL_GPR, MAX_FPR, MAX_GPR, NON_ALLOCATABLE_FPR, NON_ALLOCATABLE_GPR};
+use self::regs::{fpr_bit_set, gpr_bit_set};
 
 mod abi;
 mod address;
@@ -30,7 +26,7 @@ mod masm;
 // Not all the fpr and gpr constructors are used at the moment;
 // in that sense, this directive is a temporary measure to avoid
 // dead code warnings.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "not everything used yet, will be in the future")]
 mod regs;
 
 /// Create an ISA builder.
@@ -94,6 +90,7 @@ impl TargetIsa for X64 {
         types: &ModuleTypesBuilder,
         builtins: &mut BuiltinFunctions,
         validator: &mut FuncValidator<ValidatorResources>,
+        tunables: &Tunables,
     ) -> Result<CompiledFunction> {
         let pointer_bytes = self.pointer_bytes();
         let vmoffsets = VMOffsets::new(pointer_bytes, &translation.module);
@@ -103,10 +100,10 @@ impl TargetIsa for X64 {
             pointer_bytes,
             self.shared_flags.clone(),
             self.isa_flags.clone(),
-        );
+        )?;
         let stack = Stack::new();
 
-        let abi_sig = wasm_sig::<abi::X64ABI>(sig);
+        let abi_sig = wasm_sig::<abi::X64ABI>(sig)?;
 
         let env = FuncEnv::new(
             &vmoffsets,
@@ -120,27 +117,18 @@ impl TargetIsa for X64 {
         let defined_locals =
             DefinedLocals::new::<abi::X64ABI>(&type_converter, &mut body, validator)?;
         let frame = Frame::new::<abi::X64ABI>(&abi_sig, &defined_locals)?;
-        let gpr = RegBitSet::int(
-            ALL_GPR.into(),
-            NON_ALLOCATABLE_GPR.into(),
-            usize::try_from(MAX_GPR).unwrap(),
-        );
-        let fpr = RegBitSet::float(
-            ALL_FPR.into(),
-            NON_ALLOCATABLE_FPR.into(),
-            usize::try_from(MAX_FPR).unwrap(),
-        );
-
-        let regalloc = RegAlloc::from(gpr, fpr);
+        let regalloc = RegAlloc::from(gpr_bit_set(), fpr_bit_set());
         let codegen_context = CodeGenContext::new(regalloc, stack, frame, &vmoffsets);
-        let mut codegen = CodeGen::new(&mut masm, codegen_context, env, abi_sig);
+        let codegen = CodeGen::new(tunables, &mut masm, codegen_context, env, abi_sig);
 
-        codegen.emit(&mut body, validator)?;
-        let base = codegen.source_location.base;
+        let mut body_codegen = codegen.emit_prologue()?;
 
-        let names = codegen.env.take_name_map();
+        body_codegen.emit(body, validator)?;
+        let base = body_codegen.source_location.base;
+
+        let names = body_codegen.env.take_name_map();
         Ok(CompiledFunction::new(
-            masm.finalize(base),
+            masm.finalize(base)?,
             names,
             self.function_alignment(),
         ))
@@ -165,5 +153,9 @@ impl TargetIsa for X64 {
 
     fn create_systemv_cie(&self) -> Option<gimli::write::CommonInformationEntry> {
         Some(cranelift_codegen::isa::x64::create_cie())
+    }
+
+    fn page_size_align_log2(&self) -> u8 {
+        12
     }
 }

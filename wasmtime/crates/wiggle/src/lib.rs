@@ -1,14 +1,14 @@
-use anyhow::{bail, Result};
 use std::borrow::Cow;
 use std::cell::UnsafeCell;
 use std::fmt;
 use std::mem;
 use std::ops::Range;
 use std::str;
+use wasmtime_environ::error::{Result, bail};
 
-pub use wiggle_macro::{async_trait, from_witx};
+pub use wiggle_macro::from_witx;
 
-pub use anyhow;
+pub use wasmtime_environ::error;
 pub use wiggle_macro::wasmtime_integration;
 
 pub use bitflags;
@@ -16,19 +16,15 @@ pub use bitflags;
 #[cfg(feature = "wiggle_metadata")]
 pub use witx;
 
-mod error;
+mod guest_error;
 mod guest_type;
 mod region;
 
 pub use tracing;
 
-pub use error::GuestError;
+pub use guest_error::GuestError;
 pub use guest_type::{GuestErrorType, GuestType, GuestTypeTransparent};
 pub use region::Region;
-
-pub mod async_trait_crate {
-    pub use async_trait::*;
-}
 
 #[cfg(feature = "wasmtime")]
 pub mod wasmtime_crate {
@@ -577,8 +573,9 @@ pub fn run_in_dummy_executor<F: std::future::Future>(future: F) -> Result<F::Out
     let mut cx = Context::from_waker(&waker);
     match f.as_mut().poll(&mut cx) {
         Poll::Ready(val) => return Ok(val),
-        Poll::Pending =>
-            bail!("Cannot wait on pending future: must enable wiggle \"async\" future and execute on an async Store"),
+        Poll::Pending => bail!(
+            "Cannot wait on pending future: must enable wiggle \"async\" future and execute on an async Store"
+        ),
     }
 
     fn dummy_waker() -> Waker {

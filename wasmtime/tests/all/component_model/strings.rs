@@ -1,7 +1,7 @@
 #![cfg(not(miri))]
 
 use super::REALLOC_AND_FREE;
-use anyhow::Result;
+use wasmtime::Result;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store, StoreContextMut, Trap};
 
@@ -86,7 +86,7 @@ static ENCODINGS: [&str; 3] = ["utf8", "utf16", "latin1+utf16"];
 #[test]
 fn roundtrip() -> Result<()> {
     for debug in [true, false] {
-        let mut config = component_test_util::config();
+        let mut config = wasmtime_test_util::component::config();
         config.debug_adapter_modules(debug);
         let engine = Engine::new(&config)?;
         for src in ENCODINGS {
@@ -188,14 +188,13 @@ fn test_roundtrip(engine: &Engine, src: &str, dst: &str) -> Result<()> {
         *store.data_mut() = string.to_string();
         let (ret,) = func.call(&mut store, (string.to_string(),))?;
         assert_eq!(ret, *string);
-        func.post_return(&mut store)?;
     }
     Ok(())
 }
 
 #[test]
 fn ptr_out_of_bounds() -> Result<()> {
-    let engine = component_test_util::engine();
+    let engine = wasmtime_test_util::component::engine();
     for src in ENCODINGS {
         for dst in ENCODINGS {
             test_ptr_out_of_bounds(&engine, src, dst)?;
@@ -250,7 +249,7 @@ fn test_ptr_out_of_bounds(engine: &Engine, src: &str, dst: &str) -> Result<()> {
             .err()
             .unwrap()
             .downcast::<Trap>()?;
-        assert_eq!(trap, Trap::UnreachableCodeReached);
+        assert_eq!(trap, Trap::StringOutOfBounds);
         Ok(())
     };
 
@@ -264,7 +263,7 @@ fn test_ptr_out_of_bounds(engine: &Engine, src: &str, dst: &str) -> Result<()> {
 // happens.
 #[test]
 fn ptr_overflow() -> Result<()> {
-    let engine = component_test_util::engine();
+    let engine = wasmtime_test_util::component::engine();
     for src in ENCODINGS {
         for dst in ENCODINGS {
             test_ptr_overflow(&engine, src, dst)?;
@@ -314,17 +313,17 @@ fn test_ptr_overflow(engine: &Engine, src: &str, dst: &str) -> Result<()> {
     );
 
     let component = Component::new(engine, &component)?;
-    let mut store = Store::new(engine, ());
 
-    let mut test_overflow = |size: u32| -> Result<()> {
+    let test_overflow = |size: u32| -> Result<()> {
         println!("src={src} dst={dst} size={size:#x}");
+        let mut store = Store::new(engine, ());
         let instance = Linker::new(engine).instantiate(&mut store, &component)?;
         let func = instance.get_typed_func::<(u32,), ()>(&mut store, "f")?;
         let trap = func
             .call(&mut store, (size,))
             .unwrap_err()
             .downcast::<Trap>()?;
-        assert_eq!(trap, Trap::UnreachableCodeReached);
+        assert_eq!(trap, Trap::StringOutOfBounds);
         Ok(())
     };
 
@@ -369,7 +368,7 @@ fn test_ptr_overflow(engine: &Engine, src: &str, dst: &str) -> Result<()> {
 // Test that that the pointer returned from `realloc` is bounds-checked.
 #[test]
 fn realloc_oob() -> Result<()> {
-    let engine = component_test_util::engine();
+    let engine = wasmtime_test_util::component::engine();
     for src in ENCODINGS {
         for dst in ENCODINGS {
             test_realloc_oob(&engine, src, dst)?;
@@ -424,14 +423,14 @@ fn test_realloc_oob(engine: &Engine, src: &str, dst: &str) -> Result<()> {
     let instance = Linker::new(engine).instantiate(&mut store, &component)?;
     let func = instance.get_typed_func::<(), ()>(&mut store, "f")?;
     let trap = func.call(&mut store, ()).unwrap_err().downcast::<Trap>()?;
-    assert_eq!(trap, Trap::UnreachableCodeReached);
+    assert_eq!(trap, Trap::StringOutOfBounds);
     Ok(())
 }
 
 // Test that that the pointer returned from `realloc` is bounds-checked.
 #[test]
 fn raw_string_encodings() -> Result<()> {
-    let engine = component_test_util::engine();
+    let engine = wasmtime_test_util::component::engine();
     test_invalid_string_encoding(&engine, "utf8", "utf8", &[0xff], 1)?;
     let array = b"valid string until \xffthen valid again";
     test_invalid_string_encoding(&engine, "utf8", "utf8", array, array.len() as u32)?;
@@ -524,7 +523,7 @@ fn test_raw_when_encoded(
     dst: &str,
     bytes: &[u8],
     len: u32,
-) -> Result<Option<anyhow::Error>> {
+) -> Result<Option<wasmtime::Error>> {
     let component = format!(
         r#"
 (component

@@ -6,11 +6,15 @@
 //! option parsing is contained exclusively within this module.
 
 use crate::{KeyValuePair, WasiNnGraph};
-use anyhow::{bail, Result};
 use clap::builder::{StringValueParser, TypedValueParser, ValueParserFactory};
 use clap::error::{Error, ErrorKind};
-use std::marker;
+use serde::de::{self, Visitor};
 use std::time::Duration;
+use std::{fmt, marker};
+use wasmtime::{Result, bail};
+
+/// Characters which can be safely ignored while parsing numeric options to wasmtime
+const IGNORED_NUMBER_CHARS: [char; 1] = ['_'];
 
 #[macro_export]
 macro_rules! wasmtime_option_group {
@@ -19,12 +23,16 @@ macro_rules! wasmtime_option_group {
         pub struct $opts:ident {
             $(
                 $(#[doc = $doc:tt])*
+                $(#[doc($doc_attr:meta)])?
+                $(#[serde($serde_attr:meta)])*
                 pub $opt:ident: $container:ident<$payload:ty>,
             )+
 
             $(
                 #[prefixed = $prefix:tt]
+                $(#[serde($serde_attr2:meta)])*
                 $(#[doc = $prefixed_doc:tt])*
+                $(#[doc($prefixed_doc_attr:meta)])?
                 pub $prefixed:ident: Vec<(String, Option<String>)>,
             )?
         }
@@ -36,15 +44,18 @@ macro_rules! wasmtime_option_group {
         $(#[$attr])*
         pub struct $opts {
             $(
+                $(#[serde($serde_attr)])*
+                $(#[doc($doc_attr)])?
                 pub $opt: $container<$payload>,
             )+
             $(
+                $(#[serde($serde_attr2)])*
                 pub $prefixed: Vec<(String, Option<String>)>,
             )?
         }
 
-        #[derive(Clone, Debug,PartialEq)]
-        #[allow(non_camel_case_types)]
+        #[derive(Clone, PartialEq)]
+        #[expect(non_camel_case_types, reason = "macro-generated code")]
         enum $option {
             $(
                 $opt($payload),
@@ -84,14 +95,35 @@ macro_rules! wasmtime_option_group {
             ];
         }
 
+        impl core::fmt::Display for $option {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                match self {
+                    $(
+                        $option::$opt(val) => {
+                            write!(f, "{}=", stringify!($opt).replace('_', "-"))?;
+                            $crate::opt::WasmtimeOptionValue::display(val, f)
+                        }
+                    )+
+                    $(
+                        $option::$prefixed(key, val) => {
+                            write!(f, "{}-{key}", stringify!($prefixed))?;
+                            if let Some(val) = val {
+                                write!(f, "={val}")?;
+                            }
+                            Ok(())
+                        }
+                    )?
+                }
+            }
+        }
+
         impl $opts {
             fn configure_with(&mut self, opts: &[$crate::opt::CommaSeparated<$option>]) {
                 for opt in opts.iter().flat_map(|o| o.0.iter()) {
                     match opt {
                         $(
                             $option::$opt(val) => {
-                                let dst = &mut self.$opt;
-                                wasmtime_option_group!(@push $container dst val);
+                                $crate::opt::OptionContainer::push(&mut self.$opt, val.clone());
                             }
                         )+
                         $(
@@ -100,11 +132,23 @@ macro_rules! wasmtime_option_group {
                     }
                 }
             }
+
+            fn to_options(&self) -> Vec<$option> {
+                let mut ret = Vec::new();
+                $(
+                    for item in $crate::opt::OptionContainer::get(&self.$opt) {
+                        ret.push($option::$opt(item.clone()));
+                    }
+                )+
+                $(
+                    for (key,val) in self.$prefixed.iter() {
+                        ret.push($option::$prefixed(key.clone(), val.clone()));
+                    }
+                )?
+                ret
+            }
         }
     };
-
-    (@push Option $dst:ident $val:ident) => (*$dst = Some($val.clone()));
-    (@push Vec $dst:ident $val:ident) => ($dst.push($val.clone()));
 }
 
 /// Parser registered with clap which handles parsing the `...` in `-O ...`.
@@ -209,11 +253,7 @@ where
                 .filter_map(|d| match d.name {
                     OptName::Name(s) => {
                         let s = s.replace('_', "-");
-                        if s == key {
-                            Some((d, s))
-                        } else {
-                            None
-                        }
+                        if s == key { Some((d, s)) } else { None }
                     }
                     OptName::Prefix(s) => {
                         let name = key.strip_prefix(s)?.strip_prefix("-")?;
@@ -285,6 +325,9 @@ pub trait WasmtimeOptionValue: Sized {
 
     /// Parses the provided value, if given, returning an error on failure.
     fn parse(val: Option<&str>) -> Result<Self>;
+
+    /// Write the value to `f` that would parse to `self`.
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
 impl WasmtimeOptionValue for String {
@@ -295,38 +338,54 @@ impl WasmtimeOptionValue for String {
             None => bail!("value must be specified with `key=val` syntax"),
         }
     }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self)
+    }
 }
 
 impl WasmtimeOptionValue for u32 {
     const VAL_HELP: &'static str = "=N";
     fn parse(val: Option<&str>) -> Result<Self> {
-        let val = String::parse(val)?;
+        let val = String::parse(val)?.replace(IGNORED_NUMBER_CHARS, "");
         match val.strip_prefix("0x") {
             Some(hex) => Ok(u32::from_str_radix(hex, 16)?),
             None => Ok(val.parse()?),
         }
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
     }
 }
 
 impl WasmtimeOptionValue for u64 {
     const VAL_HELP: &'static str = "=N";
     fn parse(val: Option<&str>) -> Result<Self> {
-        let val = String::parse(val)?;
+        let val = String::parse(val)?.replace(IGNORED_NUMBER_CHARS, "");
         match val.strip_prefix("0x") {
             Some(hex) => Ok(u64::from_str_radix(hex, 16)?),
             None => Ok(val.parse()?),
         }
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
     }
 }
 
 impl WasmtimeOptionValue for usize {
     const VAL_HELP: &'static str = "=N";
     fn parse(val: Option<&str>) -> Result<Self> {
-        let val = String::parse(val)?;
+        let val = String::parse(val)?.replace(IGNORED_NUMBER_CHARS, "");
         match val.strip_prefix("0x") {
             Some(hex) => Ok(usize::from_str_radix(hex, 16)?),
             None => Ok(val.parse()?),
         }
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
     }
 }
 
@@ -339,6 +398,14 @@ impl WasmtimeOptionValue for bool {
             Some(s) => bail!("unknown boolean flag `{s}`, only yes,no,<nothing> accepted"),
         }
     }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self {
+            f.write_str("y")
+        } else {
+            f.write_str("n")
+        }
+    }
 }
 
 impl WasmtimeOptionValue for Duration {
@@ -349,9 +416,42 @@ impl WasmtimeOptionValue for Duration {
         if let Ok(val) = s.parse() {
             return Ok(Duration::from_secs(val));
         }
-        // ... otherwise try to parse it with units such as `3s` or `300ms`
-        let dur = humantime::parse_duration(&s)?;
-        Ok(dur)
+
+        if let Some(num) = s.strip_suffix("s") {
+            if let Ok(val) = num.parse() {
+                return Ok(Duration::from_secs(val));
+            }
+        }
+        if let Some(num) = s.strip_suffix("ms") {
+            if let Ok(val) = num.parse() {
+                return Ok(Duration::from_millis(val));
+            }
+        }
+        if let Some(num) = s.strip_suffix("us").or(s.strip_suffix("μs")) {
+            if let Ok(val) = num.parse() {
+                return Ok(Duration::from_micros(val));
+            }
+        }
+        if let Some(num) = s.strip_suffix("ns") {
+            if let Ok(val) = num.parse() {
+                return Ok(Duration::from_nanos(val));
+            }
+        }
+
+        bail!("failed to parse duration: {s}")
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let subsec = self.subsec_nanos();
+        if subsec == 0 {
+            write!(f, "{}s", self.as_secs())
+        } else if subsec % 1_000 == 0 {
+            write!(f, "{}μs", self.as_micros())
+        } else if subsec % 1_000_000 == 0 {
+            write!(f, "{}ms", self.as_millis())
+        } else {
+            write!(f, "{}ns", self.as_nanos())
+        }
     }
 }
 
@@ -363,10 +463,37 @@ impl WasmtimeOptionValue for wasmtime::OptLevel {
             "1" => Ok(wasmtime::OptLevel::Speed),
             "2" => Ok(wasmtime::OptLevel::Speed),
             "s" => Ok(wasmtime::OptLevel::SpeedAndSize),
-            other => bail!(
-                "unknown optimization level `{}`, only 0,1,2,s accepted",
-                other
-            ),
+            other => bail!("unknown optimization level `{other}`, only 0,1,2,s accepted"),
+        }
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            wasmtime::OptLevel::None => f.write_str("0"),
+            wasmtime::OptLevel::Speed => f.write_str("2"),
+            wasmtime::OptLevel::SpeedAndSize => f.write_str("s"),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl WasmtimeOptionValue for wasmtime::RegallocAlgorithm {
+    const VAL_HELP: &'static str = "=backtracking|single-pass";
+    fn parse(val: Option<&str>) -> Result<Self> {
+        match String::parse(val)?.as_str() {
+            "backtracking" => Ok(wasmtime::RegallocAlgorithm::Backtracking),
+            "single-pass" => Ok(wasmtime::RegallocAlgorithm::SinglePass),
+            other => {
+                bail!("unknown regalloc algorithm`{other}`, only backtracking,single-pass accepted")
+            }
+        }
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            wasmtime::RegallocAlgorithm::Backtracking => f.write_str("backtracking"),
+            wasmtime::RegallocAlgorithm::SinglePass => f.write_str("single-pass"),
+            _ => unreachable!(),
         }
     }
 }
@@ -378,6 +505,53 @@ impl WasmtimeOptionValue for wasmtime::Strategy {
             "cranelift" => Ok(wasmtime::Strategy::Cranelift),
             "winch" => Ok(wasmtime::Strategy::Winch),
             other => bail!("unknown compiler `{other}` only `cranelift` and `winch` accepted",),
+        }
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            wasmtime::Strategy::Cranelift => f.write_str("cranelift"),
+            wasmtime::Strategy::Winch => f.write_str("winch"),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl WasmtimeOptionValue for wasmtime::Collector {
+    const VAL_HELP: &'static str = "=drc|null";
+    fn parse(val: Option<&str>) -> Result<Self> {
+        match String::parse(val)?.as_str() {
+            "drc" => Ok(wasmtime::Collector::DeferredReferenceCounting),
+            "null" => Ok(wasmtime::Collector::Null),
+            other => bail!("unknown collector `{other}` only `drc` and `null` accepted",),
+        }
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            wasmtime::Collector::DeferredReferenceCounting => f.write_str("drc"),
+            wasmtime::Collector::Null => f.write_str("null"),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl WasmtimeOptionValue for wasmtime::Enabled {
+    const VAL_HELP: &'static str = "[=y|n|auto]";
+    fn parse(val: Option<&str>) -> Result<Self> {
+        match val {
+            None | Some("y") | Some("yes") | Some("true") => Ok(wasmtime::Enabled::Yes),
+            Some("n") | Some("no") | Some("false") => Ok(wasmtime::Enabled::No),
+            Some("auto") => Ok(wasmtime::Enabled::Auto),
+            Some(s) => bail!("unknown flag `{s}`, only yes,no,auto,<nothing> accepted"),
+        }
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            wasmtime::Enabled::Yes => f.write_str("y"),
+            wasmtime::Enabled::No => f.write_str("n"),
+            wasmtime::Enabled::Auto => f.write_str("auto"),
         }
     }
 }
@@ -395,6 +569,10 @@ impl WasmtimeOptionValue for WasiNnGraph {
             },
         })
     }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}::{}", self.format, self.dir)
+    }
 }
 
 impl WasmtimeOptionValue for KeyValuePair {
@@ -409,5 +587,105 @@ impl WasmtimeOptionValue for KeyValuePair {
                 None => "".to_string(),
             },
         })
+    }
+
+    fn display(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.key)?;
+        if !self.value.is_empty() {
+            f.write_str("=")?;
+            f.write_str(&self.value)?;
+        }
+        Ok(())
+    }
+}
+
+pub trait OptionContainer<T> {
+    fn push(&mut self, val: T);
+    fn get<'a>(&'a self) -> impl Iterator<Item = &'a T>
+    where
+        T: 'a;
+}
+
+impl<T> OptionContainer<T> for Option<T> {
+    fn push(&mut self, val: T) {
+        *self = Some(val);
+    }
+    fn get<'a>(&'a self) -> impl Iterator<Item = &'a T>
+    where
+        T: 'a,
+    {
+        self.iter()
+    }
+}
+
+impl<T> OptionContainer<T> for Vec<T> {
+    fn push(&mut self, val: T) {
+        Vec::push(self, val);
+    }
+    fn get<'a>(&'a self) -> impl Iterator<Item = &'a T>
+    where
+        T: 'a,
+    {
+        self.iter()
+    }
+}
+
+// Used to parse toml values into string so that we can reuse the `WasmtimeOptionValue::parse`
+// for parsing toml values the same way we parse command line values.
+//
+// Used for wasmtime::Strategy, wasmtime::Collector, wasmtime::OptLevel, wasmtime::RegallocAlgorithm
+struct ToStringVisitor {}
+
+impl<'de> Visitor<'de> for ToStringVisitor {
+    type Value = String;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "&str, u64, or i64")
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(s.to_owned())
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(v.to_string())
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(v.to_string())
+    }
+}
+
+// Deserializer that uses the `WasmtimeOptionValue::parse` to parse toml values
+pub(crate) fn cli_parse_wrapper<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: WasmtimeOptionValue,
+    D: serde::Deserializer<'de>,
+{
+    let to_string_visitor = ToStringVisitor {};
+    let str = deserializer.deserialize_any(to_string_visitor)?;
+
+    T::parse(Some(&str))
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WasmtimeOptionValue;
+
+    #[test]
+    fn numbers_with_underscores() {
+        assert!(<u32 as WasmtimeOptionValue>::parse(Some("123")).is_ok_and(|v| v == 123));
+        assert!(<u32 as WasmtimeOptionValue>::parse(Some("1_2_3")).is_ok_and(|v| v == 123));
     }
 }

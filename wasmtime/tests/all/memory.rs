@@ -94,15 +94,19 @@ fn test_traps(store: &mut Store<()>, funcs: &[TestFunc], addr: u32, mem: &Memory
 #[cfg_attr(miri, ignore)]
 fn offsets_static_dynamic_oh_my(config: &mut Config) -> Result<()> {
     const GB: u64 = 1 << 30;
+    const MB: u64 = 1 << 20;
 
     let mut engines = Vec::new();
-    let sizes = [0, 1 * GB, 4 * GB];
-    for &static_memory_maximum_size in sizes.iter() {
+    let sizes = if cfg!(target_pointer_width = "32") {
+        [0, 10 * MB, 20 * MB]
+    } else {
+        [0, 1 * GB, 4 * GB]
+    };
+    for &memory_reservation in sizes.iter() {
         for &guard_size in sizes.iter() {
             for &guard_before_linear_memory in [true, false].iter() {
-                config.static_memory_maximum_size(static_memory_maximum_size);
-                config.dynamic_memory_guard_size(guard_size);
-                config.static_memory_guard_size(guard_size);
+                config.memory_reservation(memory_reservation);
+                config.memory_guard_size(guard_size);
                 config.guard_before_linear_memory(guard_before_linear_memory);
                 config.cranelift_debug_verifier(true);
                 engines.push(Engine::new(&config)?);
@@ -110,8 +114,8 @@ fn offsets_static_dynamic_oh_my(config: &mut Config) -> Result<()> {
         }
     }
 
-    engines.par_iter().for_each(|engine| {
-        let module = module(&engine).unwrap();
+    engines.par_iter().try_for_each(|engine| {
+        let module = module(&engine)?;
 
         for (min, max) in [(1, Some(2)), (1, None)].iter() {
             let mut store = Store::new(&engine, ());
@@ -129,20 +133,21 @@ fn offsets_static_dynamic_oh_my(config: &mut Config) -> Result<()> {
             test_traps(&mut store, &funcs, 65536, &mem);
             test_traps(&mut store, &funcs, u32::MAX, &mem);
         }
-    });
+        Ok::<_, wasmtime::Error>(())
+    })?;
 
     Ok(())
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
+#[cfg_attr(asan, ignore)]
 fn guards_present() -> Result<()> {
     const GUARD_SIZE: u64 = 65536;
 
     let mut config = Config::new();
-    config.static_memory_maximum_size(1 << 20);
-    config.dynamic_memory_guard_size(GUARD_SIZE);
-    config.static_memory_guard_size(GUARD_SIZE);
+    config.memory_reservation(1 << 20);
+    config.memory_guard_size(GUARD_SIZE);
     config.guard_before_linear_memory(true);
     let engine = Engine::new(&config)?;
     let mut store = Store::new(&engine, ());
@@ -185,16 +190,16 @@ fn guards_present() -> Result<()> {
 
 #[wasmtime_test]
 #[cfg_attr(miri, ignore)]
+#[cfg_attr(asan, ignore)]
 fn guards_present_pooling(config: &mut Config) -> Result<()> {
     const GUARD_SIZE: u64 = 65536;
 
     let mut pool = crate::small_pool_config();
     pool.total_memories(2)
         .max_memory_size(10 << 16)
-        .memory_protection_keys(MpkEnabled::Disable);
-    config.static_memory_maximum_size(1 << 20);
-    config.dynamic_memory_guard_size(GUARD_SIZE);
-    config.static_memory_guard_size(GUARD_SIZE);
+        .memory_protection_keys(Enabled::No);
+    config.memory_reservation(1 << 20);
+    config.memory_guard_size(GUARD_SIZE);
     config.guard_before_linear_memory(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
     let engine = Engine::new(&config)?;
@@ -215,17 +220,19 @@ fn guards_present_pooling(config: &mut Config) -> Result<()> {
     };
 
     unsafe fn assert_guards(store: &Store<()>, mem: &Memory) {
-        // guards before
-        println!("check pre-mem");
-        assert_faults(mem.data_ptr(&store).offset(-(GUARD_SIZE as isize)));
+        unsafe {
+            // guards before
+            println!("check pre-mem");
+            assert_faults(mem.data_ptr(&store).offset(-(GUARD_SIZE as isize)));
 
-        // unmapped just after memory
-        println!("check mem");
-        assert_faults(mem.data_ptr(&store).add(mem.data_size(&store)));
+            // unmapped just after memory
+            println!("check mem");
+            assert_faults(mem.data_ptr(&store).add(mem.data_size(&store)));
 
-        // guards after memory
-        println!("check post-mem");
-        assert_faults(mem.data_ptr(&store).add(1 << 20));
+            // guards after memory
+            println!("check post-mem");
+            assert_faults(mem.data_ptr(&store).add(1 << 20));
+        }
     }
     unsafe {
         assert_guards(&store, &mem1);
@@ -242,6 +249,8 @@ fn guards_present_pooling(config: &mut Config) -> Result<()> {
 
 #[wasmtime_test]
 #[cfg_attr(miri, ignore)]
+#[cfg_attr(asan, ignore)]
+#[cfg(target_arch = "x86_64")] // only platform with mpk
 fn guards_present_pooling_mpk(config: &mut Config) -> Result<()> {
     if !wasmtime::PoolingAllocationConfig::are_memory_protection_keys_available() {
         println!("skipping `guards_present_pooling_mpk` test; mpk is not supported");
@@ -252,11 +261,10 @@ fn guards_present_pooling_mpk(config: &mut Config) -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.total_memories(4)
         .max_memory_size(10 << 16)
-        .memory_protection_keys(MpkEnabled::Enable)
+        .memory_protection_keys(Enabled::Yes)
         .max_memory_protection_keys(2);
-    config.static_memory_maximum_size(1 << 20);
-    config.dynamic_memory_guard_size(GUARD_SIZE);
-    config.static_memory_guard_size(GUARD_SIZE);
+    config.memory_reservation(1 << 20);
+    config.memory_guard_size(GUARD_SIZE);
     config.guard_before_linear_memory(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
     let engine = Engine::new(&config)?;
@@ -277,17 +285,19 @@ fn guards_present_pooling_mpk(config: &mut Config) -> Result<()> {
     };
 
     unsafe fn assert_guards(store: &Store<()>, mem: &Memory) {
-        // guards before
-        println!("check pre-mem");
-        assert_faults(mem.data_ptr(&store).offset(-(GUARD_SIZE as isize)));
+        unsafe {
+            // guards before
+            println!("check pre-mem");
+            assert_faults(mem.data_ptr(&store).offset(-(GUARD_SIZE as isize)));
 
-        // unmapped just after memory
-        println!("check mem");
-        assert_faults(mem.data_ptr(&store).add(mem.data_size(&store)));
+            // unmapped just after memory
+            println!("check mem");
+            assert_faults(mem.data_ptr(&store).add(mem.data_size(&store)));
 
-        // guards after memory
-        println!("check post-mem");
-        assert_faults(mem.data_ptr(&store).add(1 << 20));
+            // guards after memory
+            println!("check post-mem");
+            assert_faults(mem.data_ptr(&store).add(1 << 20));
+        }
     }
     unsafe {
         assert_guards(&store, &mem1);
@@ -305,11 +315,12 @@ fn guards_present_pooling_mpk(config: &mut Config) -> Result<()> {
 unsafe fn assert_faults(ptr: *mut u8) {
     use std::io::Error;
     #[cfg(unix)]
-    {
+    unsafe {
         // There's probably a faster way to do this here, but, uh, when in rome?
         match libc::fork() {
             0 => {
                 *ptr = 4;
+
                 std::process::exit(0);
             }
             -1 => panic!("failed to fork: {}", Error::last_os_error()),
@@ -325,7 +336,7 @@ unsafe fn assert_faults(ptr: *mut u8) {
         }
     }
     #[cfg(windows)]
-    {
+    unsafe {
         use windows_sys::Win32::System::Memory::*;
 
         let mut info = std::mem::MaybeUninit::uninit();
@@ -342,7 +353,10 @@ unsafe fn assert_faults(ptr: *mut u8) {
     }
 }
 
+// Disable test on s390x because the large allocation may actually succeed;
+// the whole 64-bit address space is available on this platform.
 #[test]
+#[cfg(not(target_arch = "s390x"))]
 fn massive_64_bit_still_limited() -> Result<()> {
     // Creating a 64-bit memory which exceeds the limits of the address space
     // should still send a request to the `ResourceLimiter` to ensure that it
@@ -375,9 +389,9 @@ fn massive_64_bit_still_limited() -> Result<()> {
         }
         fn table_growing(
             &mut self,
-            _current: u32,
-            _request: u32,
-            _max: Option<u32>,
+            _current: usize,
+            _request: usize,
+            _max: Option<usize>,
         ) -> Result<bool> {
             unreachable!()
         }
@@ -391,7 +405,7 @@ fn tiny_static_heap(config: &mut Config) -> Result<()> {
     // the static memory size limit in the configuration. This is intended to
     // specifically test that a load of all the valid addresses of the memory
     // all pass bounds-checks in cranelift to help weed out any off-by-one bugs.
-    config.static_memory_maximum_size(1 << 16);
+    config.memory_reservation(1 << 16);
     let engine = Engine::new(&config)?;
     let mut store = Store::new(&engine, ());
 
@@ -424,8 +438,8 @@ fn tiny_static_heap(config: &mut Config) -> Result<()> {
 #[test]
 fn static_forced_max() -> Result<()> {
     let mut config = Config::new();
-    config.static_memory_maximum_size(5 << 16);
-    config.static_memory_forced(true);
+    config.memory_reservation(5 << 16);
+    config.memory_may_move(false);
     let engine = Engine::new(&config)?;
     let mut store = Store::new(&engine, ());
 
@@ -438,9 +452,9 @@ fn static_forced_max() -> Result<()> {
 #[wasmtime_test]
 fn dynamic_extra_growth_unchanged_pointer(config: &mut Config) -> Result<()> {
     const EXTRA_PAGES: u64 = 5;
-    config.static_memory_maximum_size(0);
+    config.memory_reservation(0);
     // 5 wasm pages extra
-    config.dynamic_memory_reserved_for_growth(EXTRA_PAGES * (1 << 16));
+    config.memory_reservation_for_growth(EXTRA_PAGES * (1 << 16));
     let engine = Engine::new(&config)?;
     let mut store = Store::new(&engine, ());
 
@@ -499,11 +513,13 @@ fn memory64_maximum_minimum(config: &mut Config) -> Result<()> {
     let engine = Engine::new(&config)?;
     let mut store = Store::new(&engine, ());
 
-    assert!(MemoryTypeBuilder::default()
-        .memory64(true)
-        .min(1 << 48)
-        .build()
-        .is_err());
+    assert!(
+        MemoryTypeBuilder::default()
+            .memory64(true)
+            .min(1 << 48)
+            .build()
+            .is_err()
+    );
 
     let module = Module::new(
         &engine,
@@ -550,17 +566,21 @@ fn memory64_maximum_minimum(config: &mut Config) -> Result<()> {
 
 #[test]
 fn shared_memory_basics() -> Result<()> {
-    let engine = Engine::default();
+    let mut config = Config::new();
+    config.shared_memory(true);
+    let engine = Engine::new(&config)?;
     assert!(SharedMemory::new(&engine, MemoryType::new(1, None)).is_err());
     assert!(SharedMemory::new(&engine, MemoryType::new(1, Some(1))).is_err());
     assert!(SharedMemory::new(&engine, MemoryType::new64(1, None)).is_err());
     assert!(SharedMemory::new(&engine, MemoryType::new64(1, Some(1))).is_err());
-    assert!(MemoryTypeBuilder::default()
-        .shared(true)
-        .min(1)
-        .max(Some(0))
-        .build()
-        .is_err());
+    assert!(
+        MemoryTypeBuilder::default()
+            .shared(true)
+            .min(1)
+            .max(Some(0))
+            .build()
+            .is_err()
+    );
 
     let memory = SharedMemory::new(&engine, MemoryType::shared(1, 1))?;
     assert!(memory.ty().is_shared());
@@ -621,7 +641,9 @@ fn shared_memory_wait_notify() -> Result<()> {
     const THREADS: usize = 8;
     const COUNT: usize = 100_000;
 
-    let engine = Engine::default();
+    let mut config = Config::new();
+    config.shared_memory(true);
+    let engine = Engine::new(&config)?;
     let memory = SharedMemory::new(&engine, MemoryType::shared(1, 1))?;
     let data = unsafe { AtomicU32::from_ptr(memory.data().as_ptr().cast_mut().cast()) };
     let locked = unsafe { AtomicU32::from_ptr(memory.data().as_ptr().add(4).cast_mut().cast()) };
@@ -658,8 +680,9 @@ fn shared_memory_wait_notify() -> Result<()> {
 
 #[wasmtime_test]
 #[cfg_attr(miri, ignore)]
-fn init_with_negative_segment(_: &mut Config) -> Result<()> {
-    let engine = Engine::default();
+#[cfg(target_pointer_width = "64")] // requires large VM reservation
+fn init_with_negative_segment(cfg: &mut Config) -> Result<()> {
+    let engine = Engine::new(cfg)?;
     let module = Module::new(
         &engine,
         r#"
@@ -677,8 +700,8 @@ fn init_with_negative_segment(_: &mut Config) -> Result<()> {
 #[test]
 fn non_page_aligned_static_memory() -> Result<()> {
     let mut config = Config::new();
-    config.static_memory_maximum_size(100_000);
-    config.static_memory_forced(true);
+    config.memory_reservation(100_000);
+    config.memory_may_move(false);
     let engine = Engine::new(&config)?;
     let ty = MemoryType::new(1, None);
     Memory::new(&mut Store::new(&engine, ()), ty)?;
@@ -735,6 +758,22 @@ fn get_memory_type_with_custom_page_size_from_wasm(config: &mut Config) -> Resul
     assert_eq!(mem_ty.maximum(), Some(0xffffffff));
     assert_eq!(mem_ty.page_size(), 1);
     assert_eq!(mem_ty.page_size_log2(), 0);
+
+    Ok(())
+}
+
+#[wasmtime_test]
+fn configure_zero(config: &mut Config) -> Result<()> {
+    config.guard_before_linear_memory(false);
+    config.memory_guard_size(0);
+    config.memory_reservation(0);
+    config.memory_reservation_for_growth(0);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+
+    let ty = MemoryType::new(0, None);
+    let memory = Memory::new(&mut store, ty)?;
+    assert_eq!(memory.data_size(&store), 0);
 
     Ok(())
 }

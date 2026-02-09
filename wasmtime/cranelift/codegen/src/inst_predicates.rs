@@ -41,15 +41,15 @@ fn has_side_effect(func: &Function, inst: Inst) -> bool {
 /// Does the given instruction behave as a "pure" node with respect to
 /// aegraph semantics?
 ///
-/// - Actual pure nodes (arithmetic, etc)
-/// - Loads with the `readonly` flag set
+/// - Trivially pure nodes (bitwise arithmetic, etc)
+/// - Loads with the `readonly`, `notrap`, and `can_move` flags set
 pub fn is_pure_for_egraph(func: &Function, inst: Inst) -> bool {
-    let is_readonly_load = match func.dfg.insts[inst] {
+    let is_pure_load = match func.dfg.insts[inst] {
         InstructionData::Load {
             opcode: Opcode::Load,
             flags,
             ..
-        } => flags.readonly() && flags.notrap(),
+        } => flags.readonly() && flags.notrap() && flags.can_move(),
         _ => false,
     };
 
@@ -65,7 +65,7 @@ pub fn is_pure_for_egraph(func: &Function, inst: Inst) -> bool {
 
     let op = func.dfg.insts[inst].opcode();
 
-    has_one_result && (is_readonly_load || (!op.can_load() && !trivially_has_side_effects(op)))
+    has_one_result && (is_pure_load || (!op.can_load() && !trivially_has_side_effects(op)))
 }
 
 /// Can the given instruction be merged into another copy of itself?
@@ -75,10 +75,9 @@ pub fn is_pure_for_egraph(func: &Function, inst: Inst) -> bool {
 /// result.
 pub fn is_mergeable_for_egraph(func: &Function, inst: Inst) -> bool {
     let op = func.dfg.insts[inst].opcode();
-    // We can only merge one-result operators due to the way that GVN
+    // We can only merge zero- and one-result operators due to the way that GVN
     // is structured in the egraph implementation.
-    let has_one_result = func.dfg.inst_results(inst).len() == 1;
-    has_one_result
+    func.dfg.inst_results(inst).len() <= 1
         // Loads/stores are handled by alias analysis and not
         // otherwise mergeable.
         && !op.can_load()
@@ -148,8 +147,9 @@ pub fn has_memory_fence_semantics(op: Opcode) -> bool {
         | Opcode::AtomicLoad
         | Opcode::AtomicStore
         | Opcode::Fence
-        | Opcode::Debugtrap => true,
-        Opcode::Call | Opcode::CallIndirect => true,
+        | Opcode::Debugtrap
+        | Opcode::SequencePoint => true,
+        Opcode::Call | Opcode::CallIndirect | Opcode::TryCall | Opcode::TryCallIndirect => true,
         op if op.can_trap() => true,
         _ => false,
     }
@@ -198,6 +198,16 @@ pub(crate) fn visit_block_succs<F: FnMut(Inst, Block, bool)>(
 
                 for dest in table.as_slice() {
                     visit(inst, dest.block(pool), true);
+                }
+            }
+
+            ir::InstructionData::TryCall { exception, .. }
+            | ir::InstructionData::TryCallIndirect { exception, .. } => {
+                let pool = &f.dfg.value_lists;
+                let exdata = &f.stencil.dfg.exception_tables[*exception];
+
+                for dest in exdata.all_branches() {
+                    visit(inst, dest.block(pool), false);
                 }
             }
 

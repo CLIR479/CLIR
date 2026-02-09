@@ -1,8 +1,8 @@
-use wasmtime::{Config, Engine, Linker, Module, Store, Val};
+use wasmtime::{Engine, Linker, Module, Store, Val};
 use wiggle::GuestMemory;
 
 wiggle::from_witx!({
-    witx: ["$CARGO_MANIFEST_DIR/tests/atoms.witx"],
+    witx: ["tests/atoms.witx"],
     async: {
         atoms::{double_int_return_float}
     }
@@ -15,7 +15,6 @@ impl wiggle::GuestErrorType for types::Errno {
     }
 }
 
-#[wiggle::async_trait]
 impl atoms::Atoms for Ctx {
     fn int_float_args(
         &mut self,
@@ -41,7 +40,7 @@ impl atoms::Atoms for Ctx {
 #[tokio::test]
 async fn test_sync_host_func() {
     let mut store = async_store();
-    let mut linker = Linker::new(store.engine());
+    let mut linker = Linker::<Ctx>::new(store.engine());
     atoms::add_to_linker(&mut linker, |cx| cx).unwrap();
     let shim_mod = shim_module(linker.engine());
     let shim_inst = linker
@@ -67,7 +66,7 @@ async fn test_sync_host_func() {
 #[tokio::test]
 async fn test_async_host_func() {
     let mut store = async_store();
-    let mut linker = Linker::new(store.engine());
+    let mut linker = Linker::<Ctx>::new(store.engine());
     atoms::add_to_linker(&mut linker, |cx| cx).unwrap();
 
     let shim_mod = shim_module(linker.engine());
@@ -107,10 +106,7 @@ async fn test_async_host_func() {
 }
 
 fn async_store() -> Store<Ctx> {
-    Store::new(
-        &Engine::new(Config::new().async_support(true)).unwrap(),
-        Ctx,
-    )
+    Store::new(&Engine::default(), Ctx)
 }
 
 // Wiggle expects the caller to have an exported memory. Wasmtime can only

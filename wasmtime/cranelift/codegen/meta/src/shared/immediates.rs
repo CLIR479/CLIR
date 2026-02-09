@@ -14,18 +14,6 @@ pub(crate) struct Immediates {
     /// counts on shift instructions.
     pub uimm8: OperandKind,
 
-    /// An unsigned 128-bit immediate integer operand.
-    ///
-    /// This operand is used to pass entire 128-bit vectors as immediates to instructions like
-    /// const.
-    pub uimm128: OperandKind,
-
-    /// A constant stored in the constant pool.
-    ///
-    /// This operand is used to pass constants to instructions like vconst while storing the
-    /// actual bytes in the constant pool.
-    pub pool_constant: OperandKind,
-
     /// A 32-bit immediate signed offset.
     ///
     /// This is used to represent an immediate address offset in load/store instructions.
@@ -109,16 +97,6 @@ impl Immediates {
                 "ir::immediates::Uimm8",
                 "An 8-bit immediate unsigned integer.",
             ),
-            uimm128: new_imm(
-                "imm",
-                "ir::Immediate",
-                "A 128-bit immediate unsigned integer.",
-            ),
-            pool_constant: new_imm(
-                "constant_handle",
-                "ir::Constant",
-                "A constant stored in the constant pool.",
-            ),
             offset32: new_imm(
                 "offset",
                 "ir::immediates::Offset32",
@@ -187,11 +165,11 @@ impl Immediates {
 
             trapcode: {
                 let mut trapcode_values = HashMap::new();
-                trapcode_values.insert("stk_ovf", "StackOverflow");
-                trapcode_values.insert("heap_oob", "HeapOutOfBounds");
-                trapcode_values.insert("int_ovf", "IntegerOverflow");
-                trapcode_values.insert("int_divz", "IntegerDivisionByZero");
-                trapcode_values.insert("bad_toint", "BadConversionToInteger");
+                trapcode_values.insert("stk_ovf", "STACK_OVERFLOW");
+                trapcode_values.insert("heap_oob", "HEAP_OUT_OF_BOUNDS");
+                trapcode_values.insert("int_ovf", "INTEGER_OVERFLOW");
+                trapcode_values.insert("int_divz", "INTEGER_DIVISION_BY_ZERO");
+                trapcode_values.insert("bad_toint", "BAD_CONVERSION_TO_INTEGER");
                 new_enum(
                     "code",
                     "ir::TrapCode",

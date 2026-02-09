@@ -4,12 +4,12 @@ use crate::disasm::print_all;
 use crate::utils::read_to_string;
 use anyhow::{Context as _, Result};
 use clap::Parser;
+use cranelift_codegen::Context;
 use cranelift_codegen::print_errors::pretty_error;
 use cranelift_codegen::settings::FlagsOrIsa;
 use cranelift_codegen::timing;
-use cranelift_codegen::Context;
 use cranelift_reader::OwnedFlagsOrIsa;
-use cranelift_reader::{parse_sets_and_triple, parse_test, ParseOptions};
+use cranelift_reader::{ParseOptions, parse_sets_and_triple, parse_test};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -98,11 +98,10 @@ fn handle_module(
     for (func, _) in test_file.functions {
         let mut context = Context::new();
         context.func = func;
-        let mut mem = vec![];
 
         // Compile and encode the result to machine code.
         let compiled_code = context
-            .compile_and_emit(isa, &mut mem, &mut Default::default())
+            .compile(isa, &mut Default::default())
             .map_err(|err| anyhow::anyhow!("{}", pretty_error(&err.func, err.inner)))?;
         let code_info = compiled_code.code_info();
 
@@ -129,7 +128,7 @@ fn handle_module(
             print_all(
                 isa,
                 &context.func,
-                &mem,
+                context.compiled_code().unwrap().code_buffer(),
                 code_info.total_size,
                 options.print,
                 result.buffer.relocs(),

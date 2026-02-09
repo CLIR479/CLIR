@@ -1,5 +1,5 @@
 use crate::ir::types::*;
-use crate::ir::TrapCode;
+use crate::ir::{ExternalName, TrapCode};
 use crate::isa::aarch64::inst::*;
 
 use alloc::boxed::Box;
@@ -65,7 +65,7 @@ fn test_aarch64_binemit() {
     insns.push((Inst::Csdb, "9F2203D5", "csdb"));
     insns.push((
         Inst::Udf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
         },
         "1FC10000",
         "udf #0xc11f",
@@ -451,25 +451,25 @@ fn test_aarch64_binemit() {
 
     insns.push((
         Inst::AluRRR {
-            alu_op: ALUOp::RotR,
+            alu_op: ALUOp::Extr,
             size: OperandSize::Size32,
             rd: writable_xreg(4),
             rn: xreg(5),
             rm: xreg(6),
         },
         "A42CC61A",
-        "ror w4, w5, w6",
+        "extr w4, w5, w6",
     ));
     insns.push((
         Inst::AluRRR {
-            alu_op: ALUOp::RotR,
+            alu_op: ALUOp::Extr,
             size: OperandSize::Size64,
             rd: writable_xreg(4),
             rn: xreg(5),
             rm: xreg(6),
         },
         "A42CC69A",
-        "ror x4, x5, x6",
+        "extr x4, x5, x6",
     ));
     insns.push((
         Inst::AluRRR {
@@ -1130,25 +1130,25 @@ fn test_aarch64_binemit() {
 
     insns.push((
         Inst::AluRRImmShift {
-            alu_op: ALUOp::RotR,
+            alu_op: ALUOp::Extr,
             size: OperandSize::Size32,
             rd: writable_xreg(20),
             rn: xreg(21),
             immshift: ImmShift::maybe_from_u64(19).unwrap(),
         },
         "B44E9513",
-        "ror w20, w21, #19",
+        "extr w20, w21, #19",
     ));
     insns.push((
         Inst::AluRRImmShift {
-            alu_op: ALUOp::RotR,
+            alu_op: ALUOp::Extr,
             size: OperandSize::Size64,
             rd: writable_xreg(20),
             rn: xreg(21),
             immshift: ImmShift::maybe_from_u64(42).unwrap(),
         },
         "B4AAD593",
-        "ror x20, x21, #42",
+        "extr x20, x21, #42",
     ));
     insns.push((
         Inst::AluRRImmShift {
@@ -5901,147 +5901,147 @@ fn test_aarch64_binemit() {
 
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
-            kind: CondBrKind::NotZero(xreg(8)),
+            trap_code: TrapCode::STACK_OVERFLOW,
+            kind: CondBrKind::NotZero(xreg(8), OperandSize::Size64),
         },
         "280000B51FC10000",
-        "cbnz x8, #trap=interrupt",
+        "cbnz x8, #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
-            kind: CondBrKind::Zero(xreg(8)),
+            trap_code: TrapCode::STACK_OVERFLOW,
+            kind: CondBrKind::Zero(xreg(8), OperandSize::Size64),
         },
         "280000B41FC10000",
-        "cbz x8, #trap=interrupt",
+        "cbz x8, #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Ne),
         },
         "210000541FC10000",
-        "b.ne #trap=interrupt",
+        "b.ne #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Eq),
         },
         "200000541FC10000",
-        "b.eq #trap=interrupt",
+        "b.eq #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Lo),
         },
         "230000541FC10000",
-        "b.lo #trap=interrupt",
+        "b.lo #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Hs),
         },
         "220000541FC10000",
-        "b.hs #trap=interrupt",
+        "b.hs #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Pl),
         },
         "250000541FC10000",
-        "b.pl #trap=interrupt",
+        "b.pl #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Mi),
         },
         "240000541FC10000",
-        "b.mi #trap=interrupt",
+        "b.mi #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Vc),
         },
         "270000541FC10000",
-        "b.vc #trap=interrupt",
+        "b.vc #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Vs),
         },
         "260000541FC10000",
-        "b.vs #trap=interrupt",
+        "b.vs #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Ls),
         },
         "290000541FC10000",
-        "b.ls #trap=interrupt",
+        "b.ls #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Hi),
         },
         "280000541FC10000",
-        "b.hi #trap=interrupt",
+        "b.hi #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Lt),
         },
         "2B0000541FC10000",
-        "b.lt #trap=interrupt",
+        "b.lt #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Ge),
         },
         "2A0000541FC10000",
-        "b.ge #trap=interrupt",
+        "b.ge #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Le),
         },
         "2D0000541FC10000",
-        "b.le #trap=interrupt",
+        "b.le #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Gt),
         },
         "2C0000541FC10000",
-        "b.gt #trap=interrupt",
+        "b.gt #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Nv),
         },
         "2F0000541FC10000",
-        "b.nv #trap=interrupt",
+        "b.nv #trap=stk_ovf",
     ));
     insns.push((
         Inst::TrapIf {
-            trap_code: TrapCode::Interrupt,
+            trap_code: TrapCode::STACK_OVERFLOW,
             kind: CondBrKind::Cond(Cond::Al),
         },
         "2E0000541FC10000",
-        "b.al #trap=interrupt",
+        "b.al #trap=stk_ovf",
     ));
 
     insns.push((
@@ -6056,15 +6056,10 @@ fn test_aarch64_binemit() {
 
     insns.push((
         Inst::Call {
-            info: Box::new(CallInfo {
-                dest: ExternalName::testcase("test0"),
-                uses: smallvec![],
-                defs: smallvec![],
-                clobbers: PRegSet::empty(),
-                caller_callconv: CallConv::SystemV,
-                callee_callconv: CallConv::SystemV,
-                callee_pop_size: 0,
-            }),
+            info: Box::new(CallInfo::empty(
+                ExternalName::testcase("test0"),
+                CallConv::SystemV,
+            )),
         },
         "00000094",
         "bl 0",
@@ -6072,15 +6067,7 @@ fn test_aarch64_binemit() {
 
     insns.push((
         Inst::CallInd {
-            info: Box::new(CallIndInfo {
-                rn: xreg(10),
-                uses: smallvec![],
-                defs: smallvec![],
-                clobbers: PRegSet::empty(),
-                caller_callconv: CallConv::SystemV,
-                callee_callconv: CallConv::SystemV,
-                callee_pop_size: 0,
-            }),
+            info: Box::new(CallInfo::empty(xreg(10), CallConv::SystemV)),
         },
         "40013FD6",
         "blr x10",
@@ -6095,7 +6082,7 @@ fn test_aarch64_binemit() {
         "br x3",
     ));
 
-    insns.push((Inst::Brk, "000020D4", "brk #0"));
+    insns.push((Inst::Brk, "00003ED4", "brk #0xf000"));
 
     insns.push((
         Inst::Adr {

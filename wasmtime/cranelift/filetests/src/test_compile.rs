@@ -2,7 +2,7 @@
 //!
 //! The `compile` test command runs each function through the full code generator pipeline
 
-use crate::subtest::{check_precise_output, run_filecheck, Context, SubTest};
+use crate::subtest::{Context, SubTest, check_precise_output, run_filecheck};
 use anyhow::Result;
 use cranelift_codegen::ir;
 use cranelift_reader::{TestCommand, TestOption};
@@ -29,7 +29,7 @@ pub fn subtest(parsed: &TestCommand) -> Result<Box<dyn SubTest>> {
         match option {
             TestOption::Flag("precise-output") => test.precise_output = true,
             TestOption::Flag("expect-fail") => test.expect_fail = true,
-            _ => anyhow::bail!("unknown option on {}", parsed),
+            _ => anyhow::bail!("unknown option on {parsed}"),
         }
     }
     Ok(Box::new(test))
@@ -70,19 +70,22 @@ impl SubTest for TestCompile {
 
         let vcode = compiled_code.vcode.as_ref().unwrap();
 
-        info!("Generated {} bytes of code:\n{}", total_size, vcode);
+        info!("Generated {total_size} bytes of code:\n{vcode}");
 
         if self.precise_output {
             let dis = match isa.triple().architecture {
                 target_lexicon::Architecture::Pulley32 | target_lexicon::Architecture::Pulley64 => {
-                    pulley_interpreter::disas::Disassembler::disassemble_all(
-                        compiled_code.buffer.data(),
-                    )?
+                    // Disable hexdumps/offsets to reduce the churn in these
+                    // tests as instructions are encoded differently and/or
+                    // their immediates change.
+                    let mut disas =
+                        pulley_interpreter::disas::Disassembler::new(compiled_code.buffer.data());
+                    disas.hexdump(false).offsets(false);
+                    pulley_interpreter::decode::Decoder::decode_all(&mut disas)?;
+                    disas.disas().to_string()
                 }
                 _ => {
-                    let cs = isa
-                        .to_capstone()
-                        .map_err(|e| anyhow::format_err!("{}", e))?;
+                    let cs = isa.to_capstone().map_err(|e| anyhow::format_err!("{e}"))?;
                     compiled_code.disassemble(Some(&params), &cs)?
                 }
             };

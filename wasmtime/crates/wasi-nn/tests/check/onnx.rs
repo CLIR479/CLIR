@@ -1,17 +1,13 @@
-#![allow(unused)]
-
-use super::{artifacts_dir, download, DOWNLOAD_LOCK};
-use anyhow::{Context, Result};
-use std::sync::Mutex;
+use super::{DOWNLOAD_LOCK, artifacts_dir, download};
 use std::{env, fs};
+use wasmtime::{Result, error::Context as _};
 
 /// Return `Ok` if we find the cached MobileNet test artifacts; this will
 /// download the artifacts if necessary.
 pub fn are_artifacts_available() -> Result<()> {
     let _exclusively_retrieve_artifacts = DOWNLOAD_LOCK.lock().unwrap();
 
-    const ONNX_BASE_URL: &str =
-        "https://github.com/onnx/models/raw/bec48b6a70e5e9042c0badbaafefe4454e072d08/validated/vision/classification/mobilenet/model/mobilenetv2-10.onnx?download=";
+    const ONNX_BASE_URL: &str = "https://github.com/onnx/models/raw/bec48b6a70e5e9042c0badbaafefe4454e072d08/validated/vision/classification/mobilenet/model/mobilenetv2-10.onnx?download=";
 
     let artifacts_dir = artifacts_dir();
     if !artifacts_dir.is_dir() {

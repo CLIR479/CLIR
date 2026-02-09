@@ -1,8 +1,9 @@
-use crate::PrimaryMap;
+use crate::{
+    ModuleInternedRecGroupIndex, ModuleInternedTypeIndex, PrimaryMap, TypeTrace, WasmSubType,
+};
 use core::ops::{Index, Range};
-use cranelift_entity::{packed_option::PackedOption, SecondaryMap};
+use cranelift_entity::{SecondaryMap, packed_option::PackedOption};
 use serde_derive::{Deserialize, Serialize};
-use wasmtime_types::{ModuleInternedRecGroupIndex, ModuleInternedTypeIndex, WasmSubType};
 
 /// All types used in a core wasm module.
 ///
@@ -13,6 +14,28 @@ pub struct ModuleTypes {
     rec_groups: PrimaryMap<ModuleInternedRecGroupIndex, Range<ModuleInternedTypeIndex>>,
     wasm_types: PrimaryMap<ModuleInternedTypeIndex, WasmSubType>,
     trampoline_types: SecondaryMap<ModuleInternedTypeIndex, PackedOption<ModuleInternedTypeIndex>>,
+}
+
+impl TypeTrace for ModuleTypes {
+    fn trace<F, E>(&self, func: &mut F) -> Result<(), E>
+    where
+        F: FnMut(crate::EngineOrModuleTypeIndex) -> Result<(), E>,
+    {
+        for ty in self.wasm_types.values() {
+            ty.trace(func)?;
+        }
+        Ok(())
+    }
+
+    fn trace_mut<F, E>(&mut self, func: &mut F) -> Result<(), E>
+    where
+        F: FnMut(&mut crate::EngineOrModuleTypeIndex) -> Result<(), E>,
+    {
+        for ty in self.wasm_types.values_mut() {
+            ty.trace_mut(func)?;
+        }
+        Ok(())
+    }
 }
 
 impl ModuleTypes {
@@ -42,7 +65,7 @@ impl ModuleTypes {
     pub fn rec_group_elements(
         &self,
         rec_group: ModuleInternedRecGroupIndex,
-    ) -> impl ExactSizeIterator<Item = ModuleInternedTypeIndex> {
+    ) -> impl ExactSizeIterator<Item = ModuleInternedTypeIndex> + use<> {
         let range = &self.rec_groups[rec_group];
         (range.start.as_u32()..range.end.as_u32()).map(|i| ModuleInternedTypeIndex::from_u32(i))
     }
@@ -80,14 +103,17 @@ impl ModuleTypes {
         debug_assert!(self[ty].is_func());
         self.trampoline_types[ty].unwrap()
     }
+
+    /// Iterate over ever type in this set, mutably.
+    pub fn iter_mut(&mut self) -> impl ExactSizeIterator<Item = &mut WasmSubType> {
+        self.wasm_types.iter_mut().map(|(_id, ty)| ty)
+    }
 }
 
 /// Methods that only exist for `ModuleTypesBuilder`.
 #[cfg(feature = "compile")]
 impl ModuleTypes {
     /// Associate `trampoline_ty` as the trampoline type for `for_ty`.
-    ///
-    /// This is really only for use by the `ModuleTypesBuilder`.
     pub fn set_trampoline_type(
         &mut self,
         for_ty: ModuleInternedTypeIndex,
@@ -99,9 +125,11 @@ impl ModuleTypes {
         debug_assert!(!trampoline_ty.is_reserved_value());
         debug_assert!(self.wasm_types[for_ty].is_func());
         debug_assert!(self.trampoline_types[for_ty].is_none());
-        debug_assert!(self.wasm_types[trampoline_ty]
-            .unwrap_func()
-            .is_trampoline_type());
+        debug_assert!(
+            self.wasm_types[trampoline_ty]
+                .unwrap_func()
+                .is_trampoline_type()
+        );
 
         self.trampoline_types[for_ty] = Some(trampoline_ty).into();
     }

@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Result};
-use test_programs_artifacts::{foreach_keyvalue, KEYVALUE_MAIN_COMPONENT};
+use test_programs_artifacts::{KEYVALUE_MAIN_COMPONENT, foreach_keyvalue};
 use wasmtime::{
+    Result, Store,
     component::{Component, Linker, ResourceTable},
-    Store,
+    format_err,
 };
-use wasmtime_wasi::{bindings::Command, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView, p2::bindings::Command};
 use wasmtime_wasi_keyvalue::{WasiKeyValue, WasiKeyValueCtx, WasiKeyValueCtxBuilder};
 
 struct Ctx {
@@ -14,24 +14,21 @@ struct Ctx {
 }
 
 impl WasiView for Ctx {
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
-    }
-
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi_ctx
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi_ctx,
+            table: &mut self.table,
+        }
     }
 }
 
 async fn run_wasi(path: &str, ctx: Ctx) -> Result<()> {
-    let engine = test_programs_artifacts::engine(|config| {
-        config.async_support(true);
-    });
+    let engine = test_programs_artifacts::engine(|_config| {});
     let mut store = Store::new(&engine, ctx);
     let component = Component::from_file(&engine, path)?;
 
     let mut linker = Linker::new(&engine);
-    wasmtime_wasi::add_to_linker_async(&mut linker)?;
+    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
     wasmtime_wasi_keyvalue::add_to_linker(&mut linker, |h: &mut Ctx| {
         WasiKeyValue::new(&h.wasi_keyvalue_ctx, &mut h.table)
     })?;
@@ -41,12 +38,12 @@ async fn run_wasi(path: &str, ctx: Ctx) -> Result<()> {
         .wasi_cli_run()
         .call_run(&mut store)
         .await?
-        .map_err(|()| anyhow!("command returned with failing exit status"))
+        .map_err(|()| format_err!("command returned with failing exit status"))
 }
 
 macro_rules! assert_test_exists {
     ($name:ident) => {
-        #[allow(unused_imports)]
+        #[expect(unused_imports, reason = "just here to assert it exists")]
         use self::$name as _;
     };
 }
@@ -59,7 +56,7 @@ async fn keyvalue_main() -> Result<()> {
         KEYVALUE_MAIN_COMPONENT,
         Ctx {
             table: ResourceTable::new(),
-            wasi_ctx: WasiCtxBuilder::new().inherit_stderr().build(),
+            wasi_ctx: WasiCtx::builder().inherit_stderr().build(),
             wasi_keyvalue_ctx: WasiKeyValueCtxBuilder::new()
                 .in_memory_data([("atomics_key", "5")])
                 .build(),

@@ -1,8 +1,8 @@
 use super::{super::REALLOC_AND_FREE, engine};
-use anyhow::Result;
+use wasmtime::Result;
 use wasmtime::{
-    component::{Component, Linker},
     Store,
+    component::{Component, Linker},
 };
 
 fn component() -> String {

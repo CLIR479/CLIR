@@ -2,7 +2,7 @@ use cranelift_codegen::cfg_printer::CFGPrinter;
 use cranelift_codegen::cursor::{Cursor, CursorPosition, FuncCursor};
 use cranelift_codegen::flowgraph::{BlockPredecessor, ControlFlowGraph};
 use cranelift_codegen::ir::entities::Block;
-use cranelift_codegen::ir::layout::{BlockNode, Blocks};
+use cranelift_codegen::ir::layout::Blocks;
 use cranelift_codegen::ir::{
     types, BlockCall, Function, Inst, InstBuilder, InstructionData, JumpTableData, Layout, Value,
 };
@@ -47,7 +47,10 @@ fn reverse_postorder(
 
 pub fn compute_dominators(func: &Function) -> HashMap<Block, HashSet<Block>> {
     let cfg = ControlFlowGraph::with_function(func);
-    let start_node = func.layout.entry_block().expect("入口节点不存在");
+    let start_node = func
+        .layout
+        .entry_block()
+        .expect("Function has no entry block");
 
     let mut dominators: HashMap<Block, HashSet<Block>> = HashMap::new();
     let mut nodes: HashSet<Block> = HashSet::new();

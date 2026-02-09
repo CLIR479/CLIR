@@ -9,7 +9,7 @@ use cranelift_codegen::timing;
 use log::error;
 use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -151,16 +151,16 @@ fn worker_thread(
                         // The test panicked, leaving us a `Box<Any>`.
                         // Panics are usually strings.
                         if let Some(msg) = e.downcast_ref::<String>() {
-                            anyhow::bail!("panicked in worker #{}: {}", thread_num, msg)
+                            anyhow::bail!("panicked in worker #{thread_num}: {msg}")
                         } else if let Some(msg) = e.downcast_ref::<&'static str>() {
-                            anyhow::bail!("panicked in worker #{}: {}", thread_num, msg)
+                            anyhow::bail!("panicked in worker #{thread_num}: {msg}")
                         } else {
-                            anyhow::bail!("panicked in worker #{}", thread_num)
+                            anyhow::bail!("panicked in worker #{thread_num}")
                         }
                     });
 
                 if let Err(ref msg) = result {
-                    error!("FAIL: {}", msg);
+                    error!("FAIL: {msg}");
                 }
 
                 replies.send(Reply::Done { jobid, result }).unwrap();

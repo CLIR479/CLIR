@@ -1,10 +1,12 @@
 #![cfg(not(miri))]
 
-use anyhow::bail;
+use crate::ErrorExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use wasmtime::bail;
 use wasmtime::*;
+use wasmtime_test_macros::wasmtime_test;
 
 #[test]
 fn test_trap_return() -> Result<()> {
@@ -24,7 +26,7 @@ fn test_trap_return() -> Result<()> {
     let run_func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
 
     let e = run_func.call(&mut store, ()).unwrap_err();
-    assert!(format!("{e:?}").contains("test 123"));
+    e.assert_contains("test 123");
 
     assert!(
         e.downcast_ref::<WasmBacktrace>().is_some(),
@@ -35,7 +37,7 @@ fn test_trap_return() -> Result<()> {
 }
 
 #[test]
-fn test_anyhow_error_return() -> Result<()> {
+fn test_format_err_error_return() -> Result<()> {
     let mut store = Store::<()>::default();
     let wat = r#"
         (module
@@ -47,15 +49,14 @@ fn test_anyhow_error_return() -> Result<()> {
     let module = Module::new(store.engine(), wat)?;
     let hello_type = FuncType::new(store.engine(), None, None);
     let hello_func = Func::new(&mut store, hello_type, |_, _, _| {
-        Err(anyhow::Error::msg("test 1234"))
+        Err(wasmtime::Error::msg("test 1234"))
     });
 
     let instance = Instance::new(&mut store, &module, &[hello_func.into()])?;
     let run_func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
 
     let e = run_func.call(&mut store, ()).unwrap_err();
-    assert!(!e.to_string().contains("test 1234"));
-    assert!(format!("{e:?}").contains("Caused by:\n    test 1234"));
+    e.assert_contains("test 1234");
 
     assert!(e.downcast_ref::<Trap>().is_none());
     assert!(e.downcast_ref::<WasmBacktrace>().is_some());
@@ -85,7 +86,7 @@ fn test_trap_return_downcast() -> Result<()> {
     let module = Module::new(store.engine(), wat)?;
     let hello_type = FuncType::new(store.engine(), None, None);
     let hello_func = Func::new(&mut store, hello_type, |_, _, _| {
-        Err(anyhow::Error::from(MyTrap))
+        Err(wasmtime::Error::from(MyTrap))
     });
 
     let instance = Instance::new(&mut store, &module, &[hello_func.into()])?;
@@ -95,11 +96,9 @@ fn test_trap_return_downcast() -> Result<()> {
         .call(&mut store, ())
         .err()
         .expect("error calling function");
-    let dbg = format!("{e:?}");
-    println!("{dbg}");
 
     assert!(!e.to_string().contains("my trap"));
-    assert!(dbg.contains("Caused by:\n    my trap"));
+    e.assert_contains("my trap");
 
     e.downcast_ref::<MyTrap>()
         .expect("error downcasts to MyTrap");
@@ -210,7 +209,6 @@ fn test_trap_through_host() -> Result<()> {
 }
 
 #[test]
-#[allow(deprecated)]
 fn test_trap_backtrace_disabled() -> Result<()> {
     let mut config = Config::default();
     config.wasm_backtrace(false);
@@ -258,7 +256,7 @@ fn test_trap_trace_cb() -> Result<()> {
     assert_eq!(trace[0].func_index(), 2);
     assert_eq!(trace[1].module().name().unwrap(), "hello_mod");
     assert_eq!(trace[1].func_index(), 1);
-    assert!(format!("{e:?}").contains("cb throw"));
+    e.assert_contains("cb throw");
 
     Ok(())
 }
@@ -307,19 +305,16 @@ fn trap_display_pretty() -> Result<()> {
     let run_func = instance.get_typed_func::<(), ()>(&mut store, "bar")?;
 
     let e = run_func.call(&mut store, ()).unwrap_err();
-    let e = format!("{e:?}");
-    assert!(e.contains(
+    e.assert_contains(
         "\
 error while executing at wasm backtrace:
-    0:   0x23 - m!die
-    1:   0x27 - m!<wasm function 1>
-    2:   0x2c - m!foo
-    3:   0x31 - m!<wasm function 3>
+    0:     0x23 - m!die
+    1:     0x27 - m!<wasm function 1>
+    2:     0x2c - m!foo
+    3:     0x31 - m!<wasm function 3>",
+    );
 
-Caused by:
-    wasm trap: wasm `unreachable` instruction executed\
-"
-    ));
+    e.assert_contains("wasm trap: wasm `unreachable` instruction executed");
     Ok(())
 }
 
@@ -351,21 +346,17 @@ fn trap_display_multi_module() -> Result<()> {
     let bar2 = instance.get_typed_func::<(), ()>(&mut store, "bar2")?;
 
     let e = bar2.call(&mut store, ()).unwrap_err();
-    let e = format!("{e:?}");
-    assert!(e.contains(
+    e.assert_contains(
         "\
 error while executing at wasm backtrace:
-    0:   0x23 - a!die
-    1:   0x27 - a!<wasm function 1>
-    2:   0x2c - a!foo
-    3:   0x31 - a!<wasm function 3>
-    4:   0x29 - b!middle
-    5:   0x2e - b!<wasm function 2>
-
-Caused by:
-    wasm trap: wasm `unreachable` instruction executed\
-"
-    ));
+    0:     0x23 - a!die
+    1:     0x27 - a!<wasm function 1>
+    2:     0x2c - a!foo
+    3:     0x31 - a!<wasm function 3>
+    4:     0x29 - b!middle
+    5:     0x2e - b!<wasm function 2>",
+    );
+    e.assert_contains("wasm trap: wasm `unreachable` instruction executed");
     Ok(())
 }
 
@@ -385,7 +376,7 @@ fn trap_start_function_import() -> Result<()> {
     let sig = FuncType::new(store.engine(), None, None);
     let func = Func::new(&mut store, sig, |_, _, _| bail!("user trap"));
     let err = Instance::new(&mut store, &module, &[func.into()]).unwrap_err();
-    assert!(format!("{err:?}").contains("user trap"));
+    err.assert_contains("user trap");
     Ok(())
 }
 
@@ -532,9 +523,8 @@ fn mismatched_arguments() -> Result<()> {
         "expected 1 arguments, got 0"
     );
     let e = func.call(&mut store, &[Val::F32(0)], &mut []).unwrap_err();
-    let e = format!("{e:?}");
-    assert!(e.contains("argument type mismatch"));
-    assert!(e.contains("expected i32, found f32"));
+    e.assert_contains("argument type mismatch");
+    e.assert_contains("expected i32, found f32");
     assert_eq!(
         func.call(&mut store, &[Val::I32(0), Val::I32(1)], &mut [])
             .unwrap_err()
@@ -563,14 +553,9 @@ fn call_signature_mismatch() -> Result<()> {
     )?;
 
     let module = Module::new(store.engine(), &binary)?;
-    let err = Instance::new(&mut store, &module, &[])
-        .err()
-        .unwrap()
-        .downcast::<Trap>()
-        .unwrap();
-    assert!(err
-        .to_string()
-        .contains("wasm trap: indirect call type mismatch"));
+    let err = Instance::new(&mut store, &module, &[]).err().unwrap();
+    err.downcast_ref::<Trap>().unwrap();
+    err.assert_contains("wasm trap: indirect call type mismatch");
     Ok(())
 }
 
@@ -590,21 +575,19 @@ fn start_trap_pretty() -> Result<()> {
     let module = Module::new(store.engine(), wat)?;
     let e = match Instance::new(&mut store, &module, &[]) {
         Ok(_) => panic!("expected failure"),
-        Err(e) => format!("{e:?}"),
+        Err(e) => e,
     };
 
-    assert!(e.contains(
+    e.assert_contains(
         "\
 error while executing at wasm backtrace:
-    0:   0x1d - m!die
-    1:   0x21 - m!<wasm function 1>
-    2:   0x26 - m!foo
-    3:   0x2b - m!start
+    0:     0x1d - m!die
+    1:     0x21 - m!<wasm function 1>
+    2:     0x26 - m!foo
+    3:     0x2b - m!start",
+    );
 
-Caused by:
-    wasm trap: wasm `unreachable` instruction executed\
-"
-    ));
+    e.assert_contains("wasm trap: wasm `unreachable` instruction executed");
     Ok(())
 }
 
@@ -751,7 +734,7 @@ fn parse_dwarf_info() -> Result<()> {
     let engine = Engine::new(&config)?;
     let module = Module::new(&engine, &wasm)?;
     let mut linker = Linker::new(&engine);
-    wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |t| t)?;
+    wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |t| t)?;
     let mut store = Store::new(&engine, wasmtime_wasi::WasiCtxBuilder::new().build_p1());
     linker.module(&mut store, "", &module)?;
     let run = linker.get_default(&mut store, "")?;
@@ -792,17 +775,14 @@ fn no_hint_even_with_dwarf_info() -> Result<()> {
         "#,
     )?;
     let trap = Instance::new(&mut store, &module, &[]).unwrap_err();
-    let trap = format!("{trap:?}");
-    assert!(trap.contains(
+    trap.assert_contains(
         "\
 error while executing at wasm backtrace:
-    0:   0x1a - <unknown>!start
+    0:     0x1a - <unknown>!start",
+    );
 
-Caused by:
-    wasm trap: wasm `unreachable` instruction executed\
-"
-    ));
-    assert!(!trap.contains("WASM_BACKTRACE_DETAILS"));
+    trap.assert_contains("wasm trap: wasm `unreachable` instruction executed");
+    assert!(!format!("{trap:?}").contains("WASM_BACKTRACE_DETAILS"));
     Ok(())
 }
 
@@ -826,16 +806,12 @@ fn hint_with_dwarf_info() -> Result<()> {
         "#,
     )?;
     let trap = Instance::new(&mut store, &module, &[]).unwrap_err();
-    let trap = format!("{trap:?}");
-    assert!(trap.contains(
+    trap.assert_contains(
         "\
 error while executing at wasm backtrace:
-    0:   0x1a - <unknown>!start
-note: using the `WASMTIME_BACKTRACE_DETAILS=1` environment variable may show more debugging information
-
-Caused by:
-    wasm trap: wasm `unreachable` instruction executed"
-    ));
+    0:     0x1a - <unknown>!start
+note: using the `WASMTIME_BACKTRACE_DETAILS=1` environment variable may show more debugging information");
+    trap.assert_contains("wasm trap: wasm `unreachable` instruction executed");
     Ok(())
 }
 
@@ -850,17 +826,21 @@ fn multithreaded_traps() -> Result<()> {
     )?;
     let instance = Instance::new(&mut store, &module, &[])?;
 
-    assert!(instance
-        .get_typed_func::<(), ()>(&mut store, "run")?
-        .call(&mut store, ())
-        .is_err());
+    assert!(
+        instance
+            .get_typed_func::<(), ()>(&mut store, "run")?
+            .call(&mut store, ())
+            .is_err()
+    );
 
     let handle = std::thread::spawn(move || {
-        assert!(instance
-            .get_typed_func::<(), ()>(&mut store, "run")
-            .unwrap()
-            .call(&mut store, ())
-            .is_err());
+        assert!(
+            instance
+                .get_typed_func::<(), ()>(&mut store, "run")
+                .unwrap()
+                .call(&mut store, ())
+                .is_err()
+        );
     });
 
     handle.join().expect("couldn't join thread");
@@ -935,10 +915,7 @@ fn catch_trap_calling_across_stores() -> Result<()> {
                 .expect("trap function should be exported");
 
             let trap = func.call(&mut data.child_store, ()).unwrap_err();
-            assert!(
-                format!("{trap:?}").contains("unreachable"),
-                "trap should contain 'unreachable', got: {trap:?}"
-            );
+            trap.assert_contains("unreachable");
 
             let trace = trap.downcast_ref::<WasmBacktrace>().unwrap().frames();
 
@@ -1017,7 +994,7 @@ async fn async_then_sync_trap() -> Result<()> {
     }
 
     let mut async_store = Store::new(
-        &Engine::new(Config::new().async_support(true)).unwrap(),
+        &Engine::default(),
         AsyncCtx {
             sync_instance,
             sync_store,
@@ -1080,7 +1057,7 @@ async fn sync_then_async_trap() -> Result<()> {
         )
     "#;
 
-    let mut async_store = Store::new(&Engine::new(Config::new().async_support(true)).unwrap(), ());
+    let mut async_store = Store::new(&Engine::default(), ());
 
     let async_module = Module::new(async_store.engine(), wat)?;
 
@@ -1173,7 +1150,6 @@ fn standalone_backtrace() -> Result<()> {
 }
 
 #[test]
-#[allow(deprecated)]
 fn standalone_backtrace_disabled() -> Result<()> {
     let mut config = Config::new();
     config.wasm_backtrace(false);
@@ -1348,12 +1324,15 @@ fn wasm_fault_address_reported_by_default() -> Result<()> {
     // It looks like the exact reported fault address may not be deterministic,
     // so assert that we have the right error message, but not the exact
     // address.
+    //
+    // Skip 32-bit platforms here which currently all use Pulley and don't use
+    // virtual memory for catching traps. This means that the trap error isn't
+    // available.
     let err = format!("{err:?}");
-    assert!(
-        err.contains("memory fault at wasm address ")
-            && err.contains(" in linear memory of size 0x10000"),
-        "bad error: {err}"
-    );
+    let contains_address = err.contains("memory fault at wasm address ")
+        && err.contains(" in linear memory of size 0x10000");
+    let address_expected = cfg!(target_pointer_width = "64");
+    assert_eq!(contains_address, address_expected, "bad error: {err}");
     Ok(())
 }
 
@@ -1366,7 +1345,7 @@ fn wasm_fault_address_reported_from_mpk_protected_memory() -> Result<()> {
     // this calculation for MPK-protected, causing an abort.
     let mut pool = crate::small_pool_config();
     pool.total_memories(16);
-    pool.memory_protection_keys(MpkEnabled::Auto);
+    pool.memory_protection_keys(Enabled::Auto);
     let mut config = Config::new();
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
     let engine = Engine::new(&config)?;
@@ -1390,8 +1369,7 @@ fn wasm_fault_address_reported_from_mpk_protected_memory() -> Result<()> {
     // We expect an error here, not an abort; but we also check that the store
     // can now calculate the correct Wasm address. If this test is failing with
     // an abort, use `--nocapture` to see more details.
-    let err = format!("{err:?}");
-    assert!(err.contains("0xdeadbeef"), "bad error: {err}");
+    err.assert_contains("0xdeadbeef");
     Ok(())
 }
 
@@ -1511,7 +1489,7 @@ fn dont_see_stale_stack_walking_registers() -> Result<()> {
                 (export "get_trap" (func $host_get_trap))
 
                 ;; We enter and exit Wasm, which saves registers in the
-                ;; `VMRuntimeLimits`. Later, when we call a re-exported host
+                ;; `VMStoreContext`. Later, when we call a re-exported host
                 ;; function, we should not accidentally reuse those saved
                 ;; registers.
                 (start $start)
@@ -1535,7 +1513,7 @@ fn dont_see_stale_stack_walking_registers() -> Result<()> {
     let host_get_trap = Func::new(
         &mut store,
         FuncType::new(&engine, [], []),
-        |_caller, _args, _results| Err(anyhow::anyhow!("trap!!!")),
+        |_caller, _args, _results| Err(wasmtime::format_err!("trap!!!")),
     );
     linker.define(&store, "", "host_get_trap", host_get_trap)?;
 
@@ -1543,7 +1521,7 @@ fn dont_see_stale_stack_walking_registers() -> Result<()> {
     let get_trap = instance.get_func(&mut store, "get_trap").unwrap();
 
     let err = get_trap.call(&mut store, &[], &mut []).unwrap_err();
-    assert!(err.to_string().contains("trap!!!"));
+    err.assert_contains("trap!!!");
 
     Ok(())
 }
@@ -1670,12 +1648,178 @@ fn same_module_multiple_stores() -> Result<()> {
     Ok(())
 }
 
+#[wasmtime_test(wasm_features(tail_call))]
+fn tail_call_to_imported_function(config: &mut Config) -> Result<()> {
+    let engine = Engine::new(config)?;
+
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+              (import "" "" (func (result i32)))
+
+              (func (export "run") (result i32)
+                return_call 0
+              )
+            )
+        "#,
+    )?;
+
+    let mut store = Store::new(&engine, ());
+    let host_func = Func::wrap(&mut store, || -> Result<i32> { bail!("whoopsie") });
+    let instance = Instance::new(&mut store, &module, &[host_func.into()])?;
+
+    let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
+    let err = run.call(&mut store, ()).unwrap_err();
+    err.assert_contains("whoopsie");
+
+    Ok(())
+}
+
+#[wasmtime_test(wasm_features(tail_call))]
+fn tail_call_to_imported_function_in_start_function(config: &mut Config) -> Result<()> {
+    let engine = Engine::new(config)?;
+
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+              (import "" "" (func))
+
+              (func $f
+                return_call 0
+              )
+
+              (start $f)
+            )
+        "#,
+    )?;
+
+    let mut store = Store::new(&engine, ());
+    let host_func = Func::wrap(&mut store, || -> Result<()> { bail!("whoopsie") });
+    let err = Instance::new(&mut store, &module, &[host_func.into()]).unwrap_err();
+    err.assert_contains("whoopsie");
+
+    Ok(())
+}
+
+#[wasmtime_test(wasm_features(tail_call, function_references))]
+fn return_call_ref_to_imported_function(config: &mut Config) -> Result<()> {
+    let engine = Engine::new(config)?;
+
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+              (type (func (result i32)))
+              (func (export "run") (param (ref 0)) (result i32)
+                (return_call_ref 0 (local.get 0))
+              )
+            )
+        "#,
+    )?;
+
+    let mut store = Store::new(&engine, ());
+    let host_func = Func::wrap(&mut store, || -> Result<i32> { bail!("whoopsie") });
+    let instance = Instance::new(&mut store, &module, &[])?;
+
+    let run = instance.get_typed_func::<Func, i32>(&mut store, "run")?;
+    let err = run.call(&mut store, host_func).unwrap_err();
+    err.assert_contains("whoopsie");
+
+    Ok(())
+}
+
+#[wasmtime_test(wasm_features(tail_call, function_references))]
+fn return_call_indirect_to_imported_function(config: &mut Config) -> Result<()> {
+    let engine = Engine::new(config)?;
+
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+              (import "" "" (func (result i32)))
+              (table 1 funcref (ref.func 0))
+              (func (export "run") (result i32)
+                (return_call_indirect (result i32) (i32.const 0))
+              )
+            )
+        "#,
+    )?;
+
+    let mut store = Store::new(&engine, ());
+    let host_func = Func::wrap(&mut store, || -> Result<i32> { bail!("whoopsie") });
+    let instance = Instance::new(&mut store, &module, &[host_func.into()])?;
+
+    let run = instance.get_typed_func::<(), i32>(&mut store, "run")?;
+    let err = run.call(&mut store, ()).unwrap_err();
+    err.assert_contains("whoopsie");
+
+    Ok(())
+}
+
 #[test]
-fn async_stack_size_ignored_if_disabled() -> Result<()> {
-    let mut config = Config::new();
-    config.async_support(false);
-    config.max_wasm_stack(8 << 20);
-    Engine::new(&config)?;
+fn return_call_to_aborting_wasm_function_with_stack_adjustments() -> Result<()> {
+    let engine = Engine::default();
+    let module = Module::new(
+        &engine,
+        r#"
+(module
+  (func (export "entry")
+        (param i64 i64 i64 i64 i64 i64)
+        (result i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
+    return_call $abort
+  )
+  (func $abort (result i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
+    unreachable
+  )
+)
+        "#,
+    )?;
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let func = instance.get_func(&mut store, "entry").unwrap();
+    let args = vec![Val::I64(0); 6];
+    let mut results = vec![Val::I64(0); 10];
+
+    let err = func.call(&mut store, &args, &mut results).unwrap_err();
+
+    let trap: &Trap = err.downcast_ref().unwrap();
+    assert_eq!(*trap, Trap::UnreachableCodeReached);
+
+    let trace: &WasmBacktrace = err.downcast_ref().unwrap();
+    assert_eq!(trace.frames().len(), 1);
+    assert_eq!(trace.frames()[0].func_name(), Some("abort"));
+
+    let module2 = Module::new(
+        &engine,
+        r#"
+(module
+  (func (export "entry")
+        (param i64 i64 i64 i64 i64 i64)
+        (result i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
+    return_call $foo
+  )
+  (func $foo (result i64 i64 i64 i64 i64 i64 i64 i64 i64 i64)
+    call $abort
+    unreachable
+  )
+  (func $abort unreachable)
+)
+        "#,
+    )?;
+    let instance = Instance::new(&mut store, &module2, &[])?;
+    let func = instance.get_func(&mut store, "entry").unwrap();
+
+    let err = func.call(&mut store, &args, &mut results).unwrap_err();
+
+    let trap: &Trap = err.downcast_ref().unwrap();
+    assert_eq!(*trap, Trap::UnreachableCodeReached);
+
+    let trace: &WasmBacktrace = err.downcast_ref().unwrap();
+    assert_eq!(trace.frames().len(), 2);
+    assert_eq!(trace.frames()[0].func_name(), Some("abort"));
+    assert_eq!(trace.frames()[1].func_name(), Some("foo"));
 
     Ok(())
 }

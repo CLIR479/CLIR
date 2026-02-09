@@ -1,12 +1,12 @@
 #[cfg(feature = "coredump")]
 use super::coredump::WasmCoreDump;
+#[cfg(feature = "gc")]
+use crate::ThrownException;
 use crate::prelude::*;
 use crate::store::StoreOpaque;
 use crate::{AsContext, Module};
 use core::fmt;
-use wasmtime_environ::{
-    demangle_function_name, demangle_function_name_or_index, EntityRef, FilePos,
-};
+use wasmtime_environ::{FilePos, demangle_function_name, demangle_function_name_or_index};
 
 /// Representation of a WebAssembly trap and what caused it to occur.
 ///
@@ -20,22 +20,26 @@ use wasmtime_environ::{
 /// # Errors in Wasmtime
 ///
 /// Error-handling in Wasmtime is primarily done through the
-/// [`anyhow`][mod@anyhow] crate where most results are a
-/// [`Result<T>`](anyhow::Result) which is an alias for [`Result<T,
-/// anyhow::Error>`](std::result::Result). Errors in Wasmtime are represented
-/// with [`anyhow::Error`] which acts as a container for any type of error in
+/// [`wasmtime::Error`] type where most results are a
+/// [`wasmtime::Result<T>`] which is an alias for [`Result<T,
+/// wasmtime::Error>`](std::result::Result). Errors in Wasmtime are represented
+/// with [`wasmtime::Error`] which acts as a container for any type of error in
 /// addition to optional context for this error. The "base" error or
-/// [`anyhow::Error::root_cause`] is a [`Trap`] whenever WebAssembly hits a
+/// [`wasmtime::Error::root_cause`] is a [`Trap`] whenever WebAssembly hits a
 /// trap, or otherwise it's whatever the host created the error with when
 /// returning an error for a host call.
 ///
 /// Any error which happens while WebAssembly is executing will also, by
 /// default, capture a backtrace of the wasm frames while executing. This
 /// backtrace is represented with a [`WasmBacktrace`] instance and is attached
-/// to the [`anyhow::Error`] return value as a
-/// [`context`](anyhow::Error::context). Inspecting a [`WasmBacktrace`] can be
-/// done with the [`downcast_ref`](anyhow::Error::downcast_ref) function. For
+/// to the [`wasmtime::Error`] return value as a
+/// [`context`](crate::Error::context). Inspecting a [`WasmBacktrace`] can be
+/// done with the [`downcast_ref`](crate::Error::downcast_ref) function. For
 /// information on this see the [`WasmBacktrace`] documentation.
+///
+/// [`wasmtime::Error`]: crate::Error
+/// [`wasmtime::Result<T>`]: crate::Result
+/// [`wasmtime::Error::root_cause`]: crate::Error::root_cause
 ///
 /// # Examples
 ///
@@ -70,13 +74,6 @@ use wasmtime_environ::{
 /// ```
 pub use wasmtime_environ::Trap;
 
-// Same safety requirements and caveats as
-// `crate::runtime::vm::raise_user_trap`.
-pub(crate) unsafe fn raise(error: anyhow::Error) -> ! {
-    let needs_backtrace = error.downcast_ref::<WasmBacktrace>().is_none();
-    crate::runtime::vm::raise_user_trap(error, needs_backtrace)
-}
-
 #[cold] // traps are exceptional, this helps move handling off the main path
 pub(crate) fn from_runtime_box(
     store: &mut StoreOpaque,
@@ -88,7 +85,9 @@ pub(crate) fn from_runtime_box(
         coredumpstack,
     } = *runtime_trap;
     let (mut error, pc) = match reason {
-        // For user-defined errors they're already an `anyhow::Error` so no
+        #[cfg(feature = "gc")]
+        crate::runtime::vm::TrapReason::Exception => (ThrownException.into(), None),
+        // For user-defined errors they're already an `crate::Error` so no
         // conversion is really necessary here, but a `backtrace` may have
         // been captured so it's attempted to get inserted here.
         //
@@ -101,21 +100,13 @@ pub(crate) fn from_runtime_box(
         // provide useful information to debug with for the embedder/caller,
         // otherwise the information about what the wasm was doing when the
         // error was generated would be lost.
-        crate::runtime::vm::TrapReason::User {
-            error,
-            needs_backtrace,
-        } => {
-            debug_assert!(
-                needs_backtrace == backtrace.is_some() || !store.engine().config().wasm_backtrace
-            );
-            (error, None)
-        }
+        crate::runtime::vm::TrapReason::User(error) => (error, None),
         crate::runtime::vm::TrapReason::Jit {
             pc,
             faulting_addr,
             trap,
         } => {
-            let mut err: Error = trap.into_anyhow();
+            let mut err: Error = trap.into();
 
             // If a fault address was present, for example with segfaults,
             // then simultaneously assert that it's within a known linear memory
@@ -126,7 +117,7 @@ pub(crate) fn from_runtime_box(
             }
             (err, Some(pc))
         }
-        crate::runtime::vm::TrapReason::Wasm(trap_code) => (trap_code.into_anyhow(), None),
+        crate::runtime::vm::TrapReason::Wasm(trap_code) => (trap_code.into(), None),
     };
 
     if let Some(bt) = backtrace {
@@ -150,12 +141,13 @@ pub(crate) fn from_runtime_box(
 /// Representation of a backtrace of function frames in a WebAssembly module for
 /// where an error happened.
 ///
-/// This structure is attached to the [`anyhow::Error`] returned from many
+/// This structure is attached to the [`wasmtime::Error`] returned from many
 /// Wasmtime functions that execute WebAssembly such as [`Instance::new`] or
-/// [`Func::call`]. This can be acquired with the [`anyhow::Error::downcast`]
-/// family of methods to programmatically inspect the backtrace. Otherwise since
-/// it's part of the error returned this will get printed along with the rest of
-/// the error when the error is logged.
+/// [`Func::call`]. This can be acquired with the
+/// [`Error::downcast`](crate::Error::downcast) family of methods to
+/// programmatically inspect the backtrace. Otherwise since it's part of the
+/// error returned this will get printed along with the rest of the error when
+/// the error is logged.
 ///
 /// Capturing of wasm backtraces can be configured through the
 /// [`Config::wasm_backtrace`](crate::Config::wasm_backtrace) method.
@@ -165,6 +157,7 @@ pub(crate) fn from_runtime_box(
 ///
 /// [`Func::call`]: crate::Func::call
 /// [`Instance::new`]: crate::Instance::new
+/// [`wasmtime::Error`]: crate::Error
 ///
 /// # Examples
 ///
@@ -201,8 +194,7 @@ pub struct WasmBacktrace {
     hint_wasm_backtrace_details_env: bool,
     // This is currently only present for the `Debug` implementation for extra
     // context.
-    #[allow(dead_code)]
-    runtime_trace: crate::runtime::vm::Backtrace,
+    _runtime_trace: crate::runtime::vm::Backtrace,
 }
 
 impl WasmBacktrace {
@@ -261,7 +253,7 @@ impl WasmBacktrace {
             WasmBacktrace {
                 wasm_trace: Vec::new(),
                 hint_wasm_backtrace_details_env: false,
-                runtime_trace: crate::runtime::vm::Backtrace::empty(),
+                _runtime_trace: crate::runtime::vm::Backtrace::empty(),
             }
         }
     }
@@ -274,11 +266,7 @@ impl WasmBacktrace {
     /// always captures a backtrace.
     pub fn force_capture(store: impl AsContext) -> WasmBacktrace {
         let store = store.as_context();
-        Self::from_captured(
-            store.0,
-            crate::runtime::vm::Backtrace::new(store.0.runtime_limits()),
-            None,
-        )
+        Self::from_captured(store.0, crate::runtime::vm::Backtrace::new(store.0), None)
     }
 
     fn from_captured(
@@ -343,8 +331,12 @@ impl WasmBacktrace {
                 // do this then we will print out a helpful note in
                 // `Display` to indicate that more detailed information
                 // in a trap may be available.
-                let has_unparsed_debuginfo = module.compiled_module().has_unparsed_debuginfo();
-                if has_unparsed_debuginfo && wasm_backtrace_details_env_used {
+                let has_unparsed_debuginfo =
+                    module.module().compiled_module().has_unparsed_debuginfo();
+                if has_unparsed_debuginfo
+                    && wasm_backtrace_details_env_used
+                    && cfg!(feature = "addr2line")
+                {
                     hint_wasm_backtrace_details_env = true;
                 }
             }
@@ -352,7 +344,7 @@ impl WasmBacktrace {
 
         Self {
             wasm_trace,
-            runtime_trace,
+            _runtime_trace: runtime_trace,
             hint_wasm_backtrace_details_env,
         }
     }
@@ -380,7 +372,7 @@ impl fmt::Display for WasmBacktrace {
             write!(f, "  {i:>3}: ")?;
 
             if let Some(offset) = frame.module_offset() {
-                write!(f, "{offset:#6x} - ")?;
+                write!(f, "{offset:#8x} - ")?;
             }
 
             let write_raw_func_name = |f: &mut fmt::Formatter<'_>| {
@@ -392,7 +384,12 @@ impl fmt::Display for WasmBacktrace {
             } else {
                 for (i, symbol) in frame.symbols().iter().enumerate() {
                     if i > 0 {
-                        write!(f, "              - ")?;
+                        if needs_newline {
+                            writeln!(f, "")?;
+                        } else {
+                            needs_newline = true;
+                        }
+                        write!(f, "                - ")?;
                     } else {
                         // ...
                     }
@@ -415,7 +412,11 @@ impl fmt::Display for WasmBacktrace {
             }
         }
         if self.hint_wasm_backtrace_details_env {
-            write!(f, "\nnote: using the `WASMTIME_BACKTRACE_DETAILS=1` environment variable may show more debugging information")?;
+            write!(
+                f,
+                "\nnote: using the `WASMTIME_BACKTRACE_DETAILS=1` \
+                 environment variable may show more debugging information"
+            )?;
         }
         Ok(())
     }
@@ -443,15 +444,12 @@ impl FrameInfo {
     /// if no information can be found.
     pub(crate) fn new(module: Module, text_offset: usize) -> Option<FrameInfo> {
         let compiled_module = module.compiled_module();
-        let (index, _func_offset) = compiled_module.func_by_text_offset(text_offset)?;
-        let info = compiled_module.wasm_func_info(index);
-        let func_start = info.start_srcloc;
-        let instr = wasmtime_environ::lookup_file_pos(
-            compiled_module.code_memory().address_map_data(),
-            text_offset,
-        );
+        let index = compiled_module.func_by_text_offset(text_offset)?;
+        let func_start = compiled_module.func_start_srcloc(index);
+        let instr =
+            wasmtime_environ::lookup_file_pos(module.engine_code().address_map_data(), text_offset);
         let index = compiled_module.module().func_index(index);
-        let func_index = index.index() as u32;
+        let func_index = index.as_u32();
         let func_name = compiled_module.func_name(index).map(|s| s.to_string());
 
         // In debug mode for now assert that we found a mapping for `pc` within

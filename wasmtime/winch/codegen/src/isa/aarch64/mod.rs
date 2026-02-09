@@ -1,25 +1,22 @@
-use self::regs::{ALL_GPR, MAX_FPR, MAX_GPR, NON_ALLOCATABLE_GPR};
-use crate::isa::aarch64::regs::{ALL_FPR, NON_ALLOCATABLE_FPR};
+use self::regs::{fpr_bit_set, gpr_bit_set};
 use crate::{
-    abi::{wasm_sig, ABI},
+    BuiltinFunctions, Result,
+    abi::{ABI, wasm_sig},
     codegen::{CodeGen, CodeGenContext, FuncEnv, TypeConverter},
     frame::{DefinedLocals, Frame},
     isa::{Builder, TargetIsa},
     masm::MacroAssembler,
     regalloc::RegAlloc,
-    regset::RegBitSet,
     stack::Stack,
-    BuiltinFunctions,
 };
-use anyhow::Result;
 use cranelift_codegen::settings::{self, Flags};
-use cranelift_codegen::{isa::aarch64::settings as aarch64_settings, Final, MachBufferFinalized};
+use cranelift_codegen::{Final, MachBufferFinalized, isa::aarch64::settings as aarch64_settings};
 use cranelift_codegen::{MachTextSectionBuilder, TextSectionBuilder};
 use masm::MacroAssembler as Aarch64Masm;
 use target_lexicon::Triple;
 use wasmparser::{FuncValidator, FunctionBody, ValidatorResources};
 use wasmtime_cranelift::CompiledFunction;
-use wasmtime_environ::{ModuleTranslation, ModuleTypesBuilder, VMOffsets, WasmFuncType};
+use wasmtime_environ::{ModuleTranslation, ModuleTypesBuilder, Tunables, VMOffsets, WasmFuncType};
 
 mod abi;
 mod address;
@@ -41,8 +38,6 @@ pub(crate) fn isa_builder(triple: Triple) -> Builder {
 }
 
 /// Aarch64 ISA.
-// Until Aarch64 emission is supported.
-#[allow(dead_code)]
 pub(crate) struct Aarch64 {
     /// The target triple.
     triple: Triple,
@@ -92,13 +87,14 @@ impl TargetIsa for Aarch64 {
         types: &ModuleTypesBuilder,
         builtins: &mut BuiltinFunctions,
         validator: &mut FuncValidator<ValidatorResources>,
+        tunables: &Tunables,
     ) -> Result<CompiledFunction> {
         let pointer_bytes = self.pointer_bytes();
         let vmoffsets = VMOffsets::new(pointer_bytes, &translation.module);
         let mut body = body.get_binary_reader();
-        let mut masm = Aarch64Masm::new(pointer_bytes, self.shared_flags.clone());
+        let mut masm = Aarch64Masm::new(pointer_bytes, self.shared_flags.clone())?;
         let stack = Stack::new();
-        let abi_sig = wasm_sig::<abi::Aarch64ABI>(sig);
+        let abi_sig = wasm_sig::<abi::Aarch64ABI>(sig)?;
 
         let env = FuncEnv::new(
             &vmoffsets,
@@ -112,25 +108,16 @@ impl TargetIsa for Aarch64 {
         let defined_locals =
             DefinedLocals::new::<abi::Aarch64ABI>(&type_converter, &mut body, validator)?;
         let frame = Frame::new::<abi::Aarch64ABI>(&abi_sig, &defined_locals)?;
-        let gpr = RegBitSet::int(
-            ALL_GPR.into(),
-            NON_ALLOCATABLE_GPR.into(),
-            usize::try_from(MAX_GPR).unwrap(),
-        );
-        let fpr = RegBitSet::float(
-            ALL_FPR.into(),
-            NON_ALLOCATABLE_FPR.into(),
-            usize::try_from(MAX_FPR).unwrap(),
-        );
-        let regalloc = RegAlloc::from(gpr, fpr);
+        let regalloc = RegAlloc::from(gpr_bit_set(), fpr_bit_set());
         let codegen_context = CodeGenContext::new(regalloc, stack, frame, &vmoffsets);
-        let mut codegen = CodeGen::new(&mut masm, codegen_context, env, abi_sig);
+        let codegen = CodeGen::new(tunables, &mut masm, codegen_context, env, abi_sig);
 
-        codegen.emit(&mut body, validator)?;
-        let names = codegen.env.take_name_map();
-        let base = codegen.source_location.base;
+        let mut body_codegen = codegen.emit_prologue()?;
+        body_codegen.emit(body, validator)?;
+        let names = body_codegen.env.take_name_map();
+        let base = body_codegen.source_location.base;
         Ok(CompiledFunction::new(
-            masm.finalize(base),
+            masm.finalize(base)?,
             names,
             self.function_alignment(),
         ))
@@ -154,5 +141,22 @@ impl TargetIsa for Aarch64 {
     ) -> Result<Option<cranelift_codegen::isa::unwind::UnwindInfo>> {
         // TODO: should fill this in with an actual implementation
         Ok(None)
+    }
+
+    fn page_size_align_log2(&self) -> u8 {
+        use target_lexicon::*;
+        match self.triple().operating_system {
+            OperatingSystem::MacOSX { .. }
+            | OperatingSystem::Darwin(_)
+            | OperatingSystem::IOS(_)
+            | OperatingSystem::TvOS(_) => {
+                debug_assert_eq!(1 << 14, 0x4000);
+                14
+            }
+            _ => {
+                debug_assert_eq!(1 << 16, 0x10000);
+                16
+            }
+        }
     }
 }

@@ -1,7 +1,6 @@
 use super::ref_types_module;
-use super::skip_pooling_allocator_tests;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 use wasmtime::*;
 
 struct SetFlagOnDrop(Arc<AtomicBool>);
@@ -50,7 +49,7 @@ fn smoke_test_gc_impl(use_epochs: bool) -> Result<()> {
 
     let do_gc = Func::wrap(&mut store, |mut caller: Caller<'_, _>| {
         // Do a GC with `externref`s on the stack in Wasm frames.
-        caller.gc();
+        caller.gc(None)
     });
     let instance = Instance::new(&mut store, &module, &[do_gc.into()])?;
     let func = instance.get_func(&mut store, "func").unwrap();
@@ -68,7 +67,7 @@ fn smoke_test_gc_impl(use_epochs: bool) -> Result<()> {
 
         // Doing a GC should see that there aren't any `externref`s on the stack in
         // Wasm frames anymore.
-        scope.as_context_mut().gc();
+        scope.as_context_mut().gc(None)?;
 
         // But the scope should still be rooting `r`.
         assert!(!inner_dropped.load(SeqCst));
@@ -79,6 +78,14 @@ fn smoke_test_gc_impl(use_epochs: bool) -> Result<()> {
     assert!(inner_dropped.load(SeqCst));
 
     Ok(())
+}
+
+struct CountDrops(Arc<AtomicUsize>);
+
+impl Drop for CountDrops {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, SeqCst);
+    }
 }
 
 #[test]
@@ -100,8 +107,6 @@ fn wasm_dropping_refs() -> Result<()> {
 
     let num_refs_dropped = Arc::new(AtomicUsize::new(0));
 
-    // NB: 4096 is greater than the initial `VMExternRefActivationsTable`
-    // capacity, so this will trigger at least one GC.
     for _ in 0..4096 {
         let mut scope = RootScope::new(&mut store);
         let r = ExternRef::new(&mut scope, CountDrops(num_refs_dropped.clone()))?;
@@ -109,21 +114,11 @@ fn wasm_dropping_refs() -> Result<()> {
         drop_ref.call(&mut scope, &args, &mut [])?;
     }
 
-    assert!(num_refs_dropped.load(SeqCst) > 0);
-
-    // And after doing a final GC, all the refs should have been dropped.
-    store.gc();
+    // After doing a GC, all the refs should have been dropped.
+    store.gc(None)?;
     assert_eq!(num_refs_dropped.load(SeqCst), 4096);
 
     return Ok(());
-
-    struct CountDrops(Arc<AtomicUsize>);
-
-    impl Drop for CountDrops {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, SeqCst);
-        }
-    }
 }
 
 #[test]
@@ -185,6 +180,7 @@ fn many_live_refs() -> Result<()> {
                 .unwrap()
                 .data(&caller)
                 .unwrap()
+                .unwrap()
                 .downcast_ref::<CountLiveRefs>()
                 .unwrap();
             assert!(r.live_refs.load(SeqCst) > 0);
@@ -196,7 +192,7 @@ fn many_live_refs() -> Result<()> {
 
     many_live_refs.call(&mut store, &[], &mut [])?;
 
-    store.as_context_mut().gc();
+    store.as_context_mut().gc(None)?;
     assert_eq!(live_refs.load(SeqCst), 0);
 
     return Ok(());
@@ -252,7 +248,7 @@ fn drop_externref_via_table_set() -> Result<()> {
             table_set.call(&mut scope, &args, &mut [])?;
         }
 
-        scope.as_context_mut().gc();
+        scope.as_context_mut().gc(None)?;
         assert!(!foo_is_dropped.load(SeqCst));
         assert!(!bar_is_dropped.load(SeqCst));
 
@@ -262,7 +258,7 @@ fn drop_externref_via_table_set() -> Result<()> {
         }
     }
 
-    store.gc();
+    store.gc(None)?;
     assert!(foo_is_dropped.load(SeqCst));
     assert!(!bar_is_dropped.load(SeqCst));
 
@@ -279,11 +275,9 @@ fn global_drops_externref() -> Result<()> {
     let _ = env_logger::try_init();
     test_engine(&Engine::default())?;
 
-    if !skip_pooling_allocator_tests() {
-        test_engine(&Engine::new(
-            Config::new().allocation_strategy(InstanceAllocationStrategy::pooling()),
-        )?)?;
-    }
+    let mut config = Config::new();
+    config.allocation_strategy(crate::small_pool_config());
+    test_engine(&Engine::new(&config)?)?;
 
     return Ok(());
 
@@ -330,11 +324,9 @@ fn table_drops_externref() -> Result<()> {
     let _ = env_logger::try_init();
     test_engine(&Engine::default())?;
 
-    if !skip_pooling_allocator_tests() {
-        test_engine(&Engine::new(
-            Config::new().allocation_strategy(InstanceAllocationStrategy::pooling()),
-        )?)?;
-    }
+    let mut config = Config::new();
+    config.allocation_strategy(crate::small_pool_config());
+    test_engine(&Engine::new(&config)?)?;
 
     return Ok(());
 
@@ -449,6 +441,7 @@ fn no_gc_middle_of_args() -> Result<()> {
             assert_eq!(
                 a.data(&caller)
                     .expect("rooted")
+                    .expect("host data")
                     .downcast_ref::<String>()
                     .expect("is string"),
                 "a"
@@ -456,6 +449,7 @@ fn no_gc_middle_of_args() -> Result<()> {
             assert_eq!(
                 b.data(&caller)
                     .expect("rooted")
+                    .expect("host data")
                     .downcast_ref::<String>()
                     .expect("is string"),
                 "b"
@@ -463,6 +457,7 @@ fn no_gc_middle_of_args() -> Result<()> {
             assert_eq!(
                 c.data(&caller)
                     .expect("rooted")
+                    .expect("host data")
                     .downcast_ref::<String>()
                     .expect("is string"),
                 "c"
@@ -616,22 +611,32 @@ fn gc_and_tail_calls_and_stack_arguments() -> Result<()> {
             let b = b.unwrap();
             let c = c.unwrap();
             assert_eq!(
-                a.data(&caller).unwrap().downcast_ref::<String>().unwrap(),
+                a.data(&caller)
+                    .unwrap()
+                    .unwrap()
+                    .downcast_ref::<String>()
+                    .unwrap(),
                 "a"
             );
             assert_eq!(
-                b.data(&caller).unwrap().downcast_ref::<String>().unwrap(),
+                b.data(&caller)
+                    .unwrap()
+                    .unwrap()
+                    .downcast_ref::<String>()
+                    .unwrap(),
                 "b"
             );
             assert_eq!(
-                c.data(&caller).unwrap().downcast_ref::<String>().unwrap(),
+                c.data(&caller)
+                    .unwrap()
+                    .unwrap()
+                    .downcast_ref::<String>()
+                    .unwrap(),
                 "c"
             );
         },
     )?;
-    linker.func_wrap("", "gc", |mut caller: Caller<()>| {
-        caller.gc();
-    })?;
+    linker.func_wrap("", "gc", |mut caller: Caller<()>| caller.gc(None))?;
 
     let instance = linker.instantiate(&mut store, &module)?;
     let func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
@@ -642,7 +647,7 @@ fn gc_and_tail_calls_and_stack_arguments() -> Result<()> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn no_leak_with_global_get_elem_segment() -> anyhow::Result<()> {
+fn no_leak_with_global_get_elem_segment() -> wasmtime::Result<()> {
     let dropped = Arc::new(AtomicBool::new(false));
 
     let engine = Engine::default();
@@ -688,7 +693,7 @@ fn no_leak_with_global_get_elem_segment() -> anyhow::Result<()> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn table_init_with_externref_global_get() -> anyhow::Result<()> {
+fn table_init_with_externref_global_get() -> wasmtime::Result<()> {
     let dropped = Arc::new(AtomicBool::new(false));
 
     let mut config = Config::new();
@@ -729,28 +734,31 @@ fn rooted_gets_collected_after_scope_exit() -> Result<()> {
         let mut scope = RootScope::new(&mut store);
         let _externref = ExternRef::new(&mut scope, SetFlagOnDrop(flag.clone()))?;
 
-        scope.as_context_mut().gc();
+        scope.as_context_mut().gc(None)?;
         assert!(!flag.load(SeqCst), "not dropped when still rooted");
     }
 
-    store.as_context_mut().gc();
+    store.as_context_mut().gc(None)?;
     assert!(flag.load(SeqCst), "dropped after being unrooted");
 
     Ok(())
 }
 
 #[test]
-fn manually_rooted_gets_collected_after_unrooting() -> Result<()> {
+fn owned_rooted_gets_collected_after_unrooting() -> Result<()> {
     let mut store = Store::<()>::default();
     let flag = Arc::new(AtomicBool::new(false));
 
-    let externref = ExternRef::new_manually_rooted(&mut store, SetFlagOnDrop(flag.clone()))?;
+    let externref = {
+        let mut scope = RootScope::new(&mut store);
+        ExternRef::new(&mut scope, SetFlagOnDrop(flag.clone()))?.to_owned_rooted(&mut scope)?
+    };
 
-    store.gc();
+    store.gc(None)?;
     assert!(!flag.load(SeqCst), "not dropped when still rooted");
 
-    externref.unroot(&mut store);
-    store.gc();
+    drop(externref);
+    store.gc(None)?;
     assert!(flag.load(SeqCst), "dropped after being unrooted");
 
     Ok(())
@@ -772,7 +780,7 @@ fn round_trip_gc_ref_through_typed_wasm_func() -> Result<()> {
             )
         "#,
     )?;
-    let gc = Func::wrap(&mut store, |mut caller: Caller<'_, _>| caller.gc());
+    let gc = Func::wrap(&mut store, |mut caller: Caller<'_, _>| caller.gc(None));
     let instance = Instance::new(&mut store, &module, &[gc.into()])?;
     let f = instance
         .get_typed_func::<Option<Rooted<ExternRef>>, Option<Rooted<ExternRef>>>(&mut store, "f")?;
@@ -789,8 +797,8 @@ fn round_trip_gc_ref_through_func_wrap() -> Result<()> {
     let f = Func::wrap(
         &mut store,
         |mut caller: Caller<'_, _>, x: Rooted<ExternRef>| {
-            caller.gc();
-            x
+            caller.gc(None)?;
+            Ok(x)
         },
     );
     let f = f.typed::<Rooted<ExternRef>, Rooted<ExternRef>>(&store)?;
@@ -808,11 +816,11 @@ fn to_raw_from_raw_doesnt_leak() -> Result<()> {
     {
         let mut scope = RootScope::new(&mut store);
         let x = ExternRef::new(&mut scope, SetFlagOnDrop(flag.clone()))?;
-        let raw = unsafe { x.to_raw(&mut scope)? };
-        let _x = unsafe { ExternRef::from_raw(&mut scope, raw) };
+        let raw = x.to_raw(&mut scope)?;
+        let _x = ExternRef::from_raw(&mut scope, raw);
     }
 
-    store.gc();
+    store.gc(None)?;
     assert!(flag.load(SeqCst));
     Ok(())
 }
@@ -835,7 +843,7 @@ fn table_fill_doesnt_leak() -> Result<()> {
         table.fill(&mut scope, 0, Ref::Extern(None), 10)?;
     }
 
-    store.gc();
+    store.gc(None)?;
     assert!(flag.load(SeqCst));
     Ok(())
 }
@@ -862,7 +870,933 @@ fn table_copy_doesnt_leak() -> Result<()> {
         Table::copy(&mut scope, &table, 0, &table, 5, 5)?;
     }
 
-    store.gc();
+    store.gc(None)?;
     assert!(flag.load(SeqCst));
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn table_set_doesnt_leak() -> Result<()> {
+    let _ = env_logger::try_init();
+
+    let mut store = Store::<()>::default();
+    let flag = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut scope = RootScope::new(&mut store);
+        let table = Table::new(
+            &mut scope,
+            TableType::new(RefType::EXTERNREF, 10, Some(10)),
+            Ref::Extern(None),
+        )?;
+
+        let x = ExternRef::new(&mut scope, SetFlagOnDrop(flag.clone()))?;
+        table.set(&mut scope, 2, x.into())?;
+        table.set(&mut scope, 2, x.into())?;
+        table.set(&mut scope, 2, Ref::Extern(None))?;
+    }
+
+    store.gc(None)?;
+    assert!(flag.load(SeqCst));
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn table_grow_doesnt_leak() -> Result<()> {
+    let _ = env_logger::try_init();
+
+    let mut store = Store::<()>::default();
+    let flag = Arc::new(AtomicBool::new(false));
+
+    {
+        let mut scope = RootScope::new(&mut store);
+        let table = Table::new(
+            &mut scope,
+            TableType::new(RefType::EXTERNREF, 10, Some(10)),
+            Ref::Extern(None),
+        )?;
+
+        let x = ExternRef::new(&mut scope, SetFlagOnDrop(flag.clone()))?;
+        table.grow(&mut scope, 0, x.into())?;
+    }
+
+    store.gc(None)?;
+    assert!(flag.load(SeqCst));
+    Ok(())
+}
+
+// This is a test that the argument to `table.init` is properly handled w.r.t.
+// write barriers and such. This doesn't use `SetFlagOnDrop` because that would
+// require initializing a table with an element initialized from a global and
+// the global keeps the externref alive regardless. Instead this has a small GC
+// heap and we continuously make more garbage than is in the heap and expect
+// this to work as when it triggers a GC everything prior should get cleaned up.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn table_init_doesnt_leak() -> Result<()> {
+    const SIZE: u64 = 64 << 10;
+
+    let _ = env_logger::try_init();
+
+    let mut config = Config::new();
+    config.wasm_gc(true);
+    config.wasm_function_references(true);
+    config.memory_may_move(false);
+    config.memory_reservation(SIZE);
+    config.memory_reservation_for_growth(0);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+
+    let module = Module::new(
+        store.engine(),
+        r#"
+            (module
+                (table 1 arrayref)
+
+                (type $a (array i31ref))
+
+                (func (export "run")
+                    i32.const 0
+                    i32.const 0
+                    i32.const 1
+                    table.init $e)
+                (elem $e arrayref (array.new $a (ref.i31 (i32.const 0)) (i32.const 200)))
+            )
+        "#,
+    )?;
+
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    for _ in 0..200 {
+        func.call(&mut store, ())?;
+    }
+
+    Ok(())
+}
+
+#[test]
+fn ref_matches() -> Result<()> {
+    let mut store = Store::<()>::default();
+    let engine = store.engine().clone();
+
+    let func_ty = FuncType::new(&engine, None, None);
+    let func_ref_ty = RefType::new(true, HeapType::ConcreteFunc(func_ty.clone()));
+    let f = Func::new(&mut store, func_ty, |_, _, _| Ok(()));
+
+    let pre = StructRefPre::new(&mut store, StructType::new(&engine, [])?);
+    let s = StructRef::new(&mut store, &pre, &[])?.to_anyref();
+
+    let pre = ArrayRefPre::new(
+        &mut store,
+        ArrayType::new(&engine, FieldType::new(Mutability::Const, StorageType::I8)),
+    );
+    let a = ArrayRef::new(&mut store, &pre, &Val::I32(0), 0)?.to_anyref();
+
+    let i31 = AnyRef::from_i31(&mut store, I31::wrapping_i32(1234));
+
+    let e = ExternRef::new(&mut store, "hello")?;
+
+    for (val, ty, expected) in [
+        // nulls to nullexternref
+        (Ref::Extern(None), RefType::NULLEXTERNREF, true),
+        (Ref::Any(None), RefType::NULLEXTERNREF, false),
+        (Ref::Func(None), RefType::NULLEXTERNREF, false),
+        // nulls to externref
+        (Ref::Extern(None), RefType::EXTERNREF, true),
+        (Ref::Any(None), RefType::EXTERNREF, false),
+        (Ref::Func(None), RefType::EXTERNREF, false),
+        // nulls to nullref
+        (Ref::Extern(None), RefType::NULLREF, false),
+        (Ref::Any(None), RefType::NULLREF, true),
+        (Ref::Func(None), RefType::NULLREF, false),
+        // nulls to structref
+        (Ref::Extern(None), RefType::STRUCTREF, false),
+        (Ref::Any(None), RefType::STRUCTREF, true),
+        (Ref::Func(None), RefType::STRUCTREF, false),
+        // nulls to arrayref
+        (Ref::Extern(None), RefType::ARRAYREF, false),
+        (Ref::Any(None), RefType::ARRAYREF, true),
+        (Ref::Func(None), RefType::ARRAYREF, false),
+        // nulls to i31ref
+        (Ref::Extern(None), RefType::I31REF, false),
+        (Ref::Any(None), RefType::I31REF, true),
+        (Ref::Func(None), RefType::I31REF, false),
+        // nulls to eqref
+        (Ref::Extern(None), RefType::EQREF, false),
+        (Ref::Any(None), RefType::EQREF, true),
+        (Ref::Func(None), RefType::EQREF, false),
+        // nulls to anyref
+        (Ref::Extern(None), RefType::ANYREF, false),
+        (Ref::Any(None), RefType::ANYREF, true),
+        (Ref::Func(None), RefType::ANYREF, false),
+        // non-null structref
+        (Ref::Any(Some(s)), RefType::NULLFUNCREF, false),
+        (Ref::Any(Some(s)), func_ref_ty.clone(), false),
+        (Ref::Any(Some(s)), RefType::FUNCREF, false),
+        (Ref::Any(Some(s)), RefType::NULLEXTERNREF, false),
+        (Ref::Any(Some(s)), RefType::EXTERNREF, false),
+        (Ref::Any(Some(s)), RefType::NULLREF, false),
+        (Ref::Any(Some(s)), RefType::STRUCTREF, true),
+        (Ref::Any(Some(s)), RefType::ARRAYREF, false),
+        (Ref::Any(Some(s)), RefType::I31REF, false),
+        (Ref::Any(Some(s)), RefType::EQREF, true),
+        (Ref::Any(Some(s)), RefType::ANYREF, true),
+        // non-null arrayref
+        (Ref::Any(Some(a)), RefType::NULLFUNCREF, false),
+        (Ref::Any(Some(a)), func_ref_ty.clone(), false),
+        (Ref::Any(Some(a)), RefType::FUNCREF, false),
+        (Ref::Any(Some(a)), RefType::NULLEXTERNREF, false),
+        (Ref::Any(Some(a)), RefType::EXTERNREF, false),
+        (Ref::Any(Some(a)), RefType::NULLREF, false),
+        (Ref::Any(Some(a)), RefType::STRUCTREF, false),
+        (Ref::Any(Some(a)), RefType::ARRAYREF, true),
+        (Ref::Any(Some(a)), RefType::I31REF, false),
+        (Ref::Any(Some(a)), RefType::EQREF, true),
+        (Ref::Any(Some(a)), RefType::ANYREF, true),
+        // non-null i31ref
+        (Ref::Any(Some(i31)), RefType::NULLFUNCREF, false),
+        (Ref::Any(Some(i31)), func_ref_ty.clone(), false),
+        (Ref::Any(Some(i31)), RefType::FUNCREF, false),
+        (Ref::Any(Some(i31)), RefType::NULLEXTERNREF, false),
+        (Ref::Any(Some(i31)), RefType::EXTERNREF, false),
+        (Ref::Any(Some(i31)), RefType::NULLREF, false),
+        (Ref::Any(Some(i31)), RefType::STRUCTREF, false),
+        (Ref::Any(Some(i31)), RefType::ARRAYREF, false),
+        (Ref::Any(Some(i31)), RefType::I31REF, true),
+        (Ref::Any(Some(i31)), RefType::EQREF, true),
+        (Ref::Any(Some(i31)), RefType::ANYREF, true),
+        // non-null funcref
+        (Ref::Func(Some(f)), RefType::NULLFUNCREF, false),
+        (Ref::Func(Some(f)), func_ref_ty.clone(), true),
+        (Ref::Func(Some(f)), RefType::FUNCREF, true),
+        (Ref::Func(Some(f)), RefType::NULLEXTERNREF, false),
+        (Ref::Func(Some(f)), RefType::EXTERNREF, false),
+        (Ref::Func(Some(f)), RefType::NULLREF, false),
+        (Ref::Func(Some(f)), RefType::STRUCTREF, false),
+        (Ref::Func(Some(f)), RefType::ARRAYREF, false),
+        (Ref::Func(Some(f)), RefType::I31REF, false),
+        (Ref::Func(Some(f)), RefType::EQREF, false),
+        (Ref::Func(Some(f)), RefType::ANYREF, false),
+        // non-null externref
+        (Ref::Extern(Some(e)), RefType::NULLFUNCREF, false),
+        (Ref::Extern(Some(e)), func_ref_ty.clone(), false),
+        (Ref::Extern(Some(e)), RefType::FUNCREF, false),
+        (Ref::Extern(Some(e)), RefType::NULLEXTERNREF, false),
+        (Ref::Extern(Some(e)), RefType::EXTERNREF, true),
+        (Ref::Extern(Some(e)), RefType::NULLREF, false),
+        (Ref::Extern(Some(e)), RefType::STRUCTREF, false),
+        (Ref::Extern(Some(e)), RefType::ARRAYREF, false),
+        (Ref::Extern(Some(e)), RefType::I31REF, false),
+        (Ref::Extern(Some(e)), RefType::EQREF, false),
+        (Ref::Extern(Some(e)), RefType::ANYREF, false),
+    ] {
+        let actual = val.matches_ty(&mut store, &ty)?;
+        assert_eq!(
+            actual, expected,
+            "{val:?} matches {ty:?}? expected {expected}, got {actual}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_9669() -> Result<()> {
+    let _ = env_logger::try_init();
+
+    let mut config = Config::new();
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
+    config.collector(Collector::DeferredReferenceCounting);
+
+    let engine = Engine::new(&config)?;
+
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+                (type $empty (struct))
+                (type $thing (struct
+                    (field $field1 (ref $empty))
+                    (field $field2 (ref $empty))
+                ))
+
+                (func (export "run")
+                    (local $object (ref $thing))
+
+                    struct.new $empty
+                    struct.new $empty
+                    struct.new $thing
+
+                    local.tee $object
+                    struct.get $thing $field1
+                    drop
+
+                    local.get $object
+                    struct.get $thing $field2
+                    drop
+                )
+            )
+        "#,
+    )?;
+
+    let mut store = Store::new(&engine, ());
+    let instance = Instance::new(&mut store, &module, &[])?;
+
+    let func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    func.call(&mut store, ())?;
+
+    Ok(())
+}
+
+#[test]
+fn drc_transitive_drop_cons_list() -> Result<()> {
+    let _ = env_logger::try_init();
+
+    let mut config = Config::new();
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
+    config.collector(Collector::DeferredReferenceCounting);
+
+    let engine = Engine::new(&config)?;
+
+    // Define a module that defines a recursive type (a `cons` list of
+    // `externref`s) and exports a global of that type so that we can access it
+    // from the host, because we don't yet have host APIs for defining recursive
+    // types or rec groups.
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+                (type $cons (struct (field externref) (field (ref null $cons))))
+                (global (export "g") (ref null $cons) (ref.null $cons))
+            )
+        "#,
+    )?;
+
+    let export = module.exports().nth(0).unwrap().ty();
+    let global = export.unwrap_global();
+    let ref_ty = global.content().unwrap_ref();
+    let struct_ty = ref_ty.heap_type().unwrap_concrete_struct();
+
+    let mut store = Store::new(&engine, ());
+
+    let pre = StructRefPre::new(&mut store, struct_ty.clone());
+    let num_refs_dropped = Arc::new(AtomicUsize::new(0));
+
+    let len = if cfg!(miri) { 2 } else { 100 };
+    {
+        let mut store = RootScope::new(&mut store);
+
+        let mut cdr = None;
+        for _ in 0..len {
+            let externref = ExternRef::new(&mut store, CountDrops(num_refs_dropped.clone()))?;
+            let cons = StructRef::new(&mut store, &pre, &[externref.into(), cdr.into()])?;
+            cdr = Some(cons);
+        }
+
+        // Still holding the cons list alive at this point.
+        assert_eq!(num_refs_dropped.load(SeqCst), 0);
+    }
+
+    // Not holding the cons list alive anymore; should transitively drop
+    // everything we created.
+    store.gc(None)?;
+    assert_eq!(num_refs_dropped.load(SeqCst), len);
+
+    Ok(())
+}
+
+#[test]
+fn drc_transitive_drop_nested_arrays_tree() -> Result<()> {
+    let _ = env_logger::try_init();
+
+    let mut config = Config::new();
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
+    config.collector(Collector::DeferredReferenceCounting);
+
+    let engine = Engine::new(&config)?;
+
+    let array_ty = ArrayType::new(
+        &engine,
+        FieldType::new(
+            Mutability::Var,
+            StorageType::ValType(ValType::Ref(RefType::ANYREF)),
+        ),
+    );
+
+    let mut store = Store::new(&engine, ());
+    let pre = ArrayRefPre::new(&mut store, array_ty);
+    let num_refs_dropped = Arc::new(AtomicUsize::new(0));
+    let mut expected = 0;
+
+    fn recursively_build_tree(
+        mut store: &mut RootScope<&mut Store<()>>,
+        pre: &ArrayRefPre,
+        num_refs_dropped: &Arc<AtomicUsize>,
+        expected: &mut usize,
+        depth: u32,
+    ) -> Result<Rooted<AnyRef>> {
+        let max = if cfg!(miri) { 1 } else { 3 };
+        if depth >= max {
+            *expected += 1;
+            let e = ExternRef::new(&mut store, CountDrops(num_refs_dropped.clone()))?;
+            AnyRef::convert_extern(&mut store, e)
+        } else {
+            let left = recursively_build_tree(store, pre, num_refs_dropped, expected, depth + 1)?;
+            let right = recursively_build_tree(store, pre, num_refs_dropped, expected, depth + 1)?;
+            let arr = ArrayRef::new_fixed(store, pre, &[left.into(), right.into()])?;
+            Ok(arr.to_anyref())
+        }
+    }
+
+    {
+        let mut store = RootScope::new(&mut store);
+        let _tree = recursively_build_tree(&mut store, &pre, &num_refs_dropped, &mut expected, 0)?;
+
+        // Still holding the tree alive at this point.
+        assert_eq!(num_refs_dropped.load(SeqCst), 0);
+    }
+
+    // Not holding the tree alive anymore; should transitively drop everything
+    // we created.
+    store.gc(None)?;
+    assert_eq!(num_refs_dropped.load(SeqCst), expected);
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn drc_traces_the_correct_number_of_gc_refs_in_arrays() -> Result<()> {
+    let _ = env_logger::try_init();
+
+    let mut config = Config::new();
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
+    config.collector(Collector::DeferredReferenceCounting);
+
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+
+    // The DRC collector was mistakenly reporting that arrays of GC refs had
+    // `size_of(elems)` outgoing edges, rather than `len(elems)` edges. None of
+    // our existing tests happened to trigger this bug because although we were
+    // tricking the collector into tracing unallocated GC heap memory, it was
+    // all zeroed out and was treated as null GC references. We can avoid that
+    // in this regression test by first painting the heap with a large poison
+    // value before we start allocating arrays, so that if the GC tries tracing
+    // bogus heap memory, it finds very large GC ref heap indices and ultimately
+    // tries to follow them outside the bounds of the GC heap, which (before
+    // this bug was fixed) would lead to a panic.
+
+    let array_i8_ty = ArrayType::new(&engine, FieldType::new(Mutability::Var, StorageType::I8));
+    let array_i8_pre = ArrayRefPre::new(&mut store, array_i8_ty);
+
+    {
+        let mut store = RootScope::new(&mut store);
+
+        // Spray a poison pattern across the heap.
+        let len = 1_000_000;
+        let _poison = ArrayRef::new(&mut store, &array_i8_pre, &Val::I32(-1), len);
+    }
+
+    // Make sure the poison array is collected.
+    store.gc(None)?;
+
+    // Allocate and then collect an array of GC refs from Wasm. This should not
+    // trick the collector into tracing any poison and panicking.
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+                (type $ty (array (mut anyref)))
+                (start $f)
+                (func $f
+                    (drop (array.new $ty (ref.null any) (i32.const 1_000)))
+                )
+            )
+        "#,
+    )?;
+    let _instance = Instance::new(&mut store, &module, &[])?;
+    store.gc(None)?;
+
+    Ok(())
+}
+
+// Test that we can completely fill the GC heap until we get an OOM. This
+// exercises growing the GC heap and that we configure compilation tunables and
+// runtime memories backing GC heaps correctly.
+#[test]
+#[cfg_attr(any(miri, not(target_pointer_width = "64")), ignore)]
+fn gc_heap_oom() -> Result<()> {
+    if std::env::var("WASMTIME_TEST_NO_HOG_MEMORY").is_ok() {
+        return Ok(());
+    }
+
+    let _ = env_logger::try_init();
+
+    for heap_size in [
+        // Very small heap.
+        1 << 16,
+        // Bigger heap: 4 GiB
+        1 << 32,
+    ] {
+        for pooling in [true, false] {
+            let mut config = Config::new();
+            config.wasm_function_references(true);
+            config.wasm_gc(true);
+            config.collector(Collector::Null);
+            config.memory_reservation(heap_size);
+            config.memory_reservation_for_growth(0);
+            config.memory_guard_size(0);
+            config.memory_may_move(false);
+
+            if pooling {
+                let mut pooling = crate::small_pool_config();
+                pooling.max_memory_size(heap_size.try_into().unwrap());
+                config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
+            }
+
+            let engine = Engine::new(&config)?;
+
+            let module = Module::new(
+                &engine,
+                r#"
+                (module
+                    (type $s (struct))
+                    (global $g (export "g") (mut i32) (i32.const 0))
+                    (func (export "run")
+                      loop
+                        struct.new $s
+
+                        global.get $g
+                        i32.const 1
+                        i32.add
+                        global.set $g
+
+                        br 0
+                      end
+                    )
+                )
+            "#,
+            )?;
+
+            let mut store = Store::new(&engine, ());
+            let instance = Instance::new(&mut store, &module, &[])?;
+
+            let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+            let err = run.call(&mut store, ()).expect_err("should oom");
+            assert!(err.is::<Trap>(), "should get trap, got: {err:?}");
+            let trap = err.downcast::<Trap>().unwrap();
+            assert_eq!(trap, Trap::AllocationTooLarge);
+
+            let g = instance.get_global(&mut store, "g").unwrap();
+            const SIZE_OF_NULL_GC_HEADER: u64 = 8;
+            const FUDGE: u64 = 2;
+            let actual = g.get(&mut store).unwrap_i32() as u64;
+            let expected = heap_size / SIZE_OF_NULL_GC_HEADER;
+            assert!(
+                actual.abs_diff(expected) <= FUDGE,
+                "actual approx= expected failed: \
+                 actual = {actual}, expected = {expected}, FUDGE={FUDGE}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_10772() -> Result<()> {
+    let mut store = crate::gc_store()?;
+    let engine = store.engine().clone();
+
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+                (type $empty (struct))
+                (type $tuple-concrete (struct (field (ref $empty))))
+                (type $tuple-abstract (struct (field (ref struct))))
+                (func (export "abstract") (param $t (ref $tuple-abstract))
+                    (drop (ref.cast (ref $tuple-concrete) (local.get $t)))
+                )
+            )
+        "#,
+    )?;
+
+    let linker = Linker::new(&engine);
+
+    let instance = linker.instantiate(&mut store, &module)?;
+    let abstract_ = instance.get_func(&mut store, "abstract").unwrap();
+    let empty_pre = StructRefPre::new(&mut store, StructType::new(&engine, [])?);
+    let empty_struct = StructRef::new(&mut store, &empty_pre, &[])?;
+    let tuple_pre = StructRefPre::new(
+        &mut store,
+        StructType::new(
+            &engine,
+            [FieldType::new(
+                Mutability::Const,
+                StorageType::ValType(ValType::Ref(RefType::new(false, HeapType::Struct))),
+            )],
+        )?,
+    );
+    let tuple_struct = StructRef::new(&mut store, &tuple_pre, &[empty_struct.into()])?;
+    let tuple_any = Val::from(tuple_struct);
+
+    match abstract_.call(store, &[tuple_any], &mut []) {
+        Ok(()) => panic!("should have trapped on cast failure"),
+        Err(e) => {
+            let trap = e.downcast::<Trap>().expect("should fail with a trap");
+            assert_eq!(trap, Trap::CastFailure);
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn drc_gc_inbetween_host_calls() -> Result<()> {
+    let _ = env_logger::try_init();
+
+    let mut config = Config::new();
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
+    config.collector(Collector::DeferredReferenceCounting);
+
+    let engine = Engine::new(&config)?;
+
+    let mut store = Store::new(&engine, ());
+    let func = Func::wrap(&mut store, |_: Option<Rooted<ExternRef>>| {});
+
+    let mut invoke_func = || {
+        let inner_dropped = Arc::new(AtomicBool::new(false));
+        {
+            let mut scope = RootScope::new(&mut store);
+            let r = ExternRef::new(&mut scope, SetFlagOnDrop(inner_dropped.clone()))?;
+            func.call(&mut scope, &[r.into()], &mut [])?;
+        }
+
+        assert!(!inner_dropped.load(SeqCst));
+        store.gc(None)?;
+        assert!(inner_dropped.load(SeqCst));
+        wasmtime::error::Ok(())
+    };
+
+    invoke_func()?;
+    invoke_func()?;
+
+    Ok(())
+}
+
+#[test]
+fn owned_rooted() -> Result<()> {
+    let _ = env_logger::try_init();
+
+    let mut config = Config::new();
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
+    config.collector(Collector::DeferredReferenceCounting);
+
+    let engine = Engine::new(&config)?;
+
+    let mut store = Store::new(&engine, ());
+    let inner_dropped = Arc::new(AtomicBool::new(false));
+    let r = {
+        let mut scope = RootScope::new(&mut store);
+        let r = ExternRef::new(&mut scope, SetFlagOnDrop(inner_dropped.clone()))?;
+        r.to_owned_rooted(&mut scope)?
+    };
+    assert!(!inner_dropped.load(SeqCst));
+    store.gc(None)?;
+    assert!(!inner_dropped.load(SeqCst));
+    let r2 = r.clone();
+    store.gc(None)?;
+    assert!(!inner_dropped.load(SeqCst));
+    drop(r);
+    store.gc(None)?;
+    assert!(!inner_dropped.load(SeqCst));
+    drop(r2);
+    store.gc(None)?;
+    assert!(inner_dropped.load(SeqCst));
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn owned_rooted_lots_of_root_creation() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
+    config.collector(Collector::DeferredReferenceCounting);
+
+    let engine = Engine::new(&config)?;
+
+    let mut store = Store::new(&engine, ());
+    let inner_dropped = Arc::new(AtomicBool::new(false));
+    let r = {
+        let mut scope = RootScope::new(&mut store);
+        let r = ExternRef::new(&mut scope, SetFlagOnDrop(inner_dropped.clone()))?;
+        r.to_owned_rooted(&mut scope)?
+    };
+    assert!(!inner_dropped.load(SeqCst));
+    store.gc(None)?;
+
+    for _ in 0..100_000 {
+        let mut scope = RootScope::new(&mut store);
+        // Go through a LIFO root then back to an owned root to create
+        // a distinct root.
+        let r2 = r.to_rooted(&mut scope);
+        let r3 = r2.to_owned_rooted(&mut scope);
+        drop(r3);
+    }
+
+    store.gc(None)?;
+    assert!(!inner_dropped.load(SeqCst));
+
+    drop(r);
+    store.gc(None)?;
+    assert!(inner_dropped.load(SeqCst));
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn runtime_table_init_oom() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_gc(true);
+    config.wasm_function_references(true);
+    config.memory_may_move(false);
+    config.memory_reservation(64 << 10);
+    config.memory_reservation_for_growth(0);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+
+    let module = Module::new(
+        store.engine(),
+        r#"
+            (module
+                (table 100 arrayref)
+
+                (type $a (array i31ref))
+
+                (func (export "run")
+                    i32.const 0
+                    i32.const 0
+                    i32.const 5
+                    table.init $e)
+                (elem $e arrayref
+                    (array.new_default $a (i32.const 100))
+                    (array.new_default $a (i32.const 10000))
+                    (array.new_default $a (i32.const 10000))
+                    (array.new_default $a (i32.const 10000))
+                    (array.new_default $a (i32.const 1000000))
+                )
+            )
+        "#,
+    )?;
+
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    func.call(&mut store, ())
+        .unwrap_err()
+        .downcast::<GcHeapOutOfMemory<()>>()?;
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn instantiate_table_init_oom() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_gc(true);
+    config.wasm_function_references(true);
+    config.memory_may_move(false);
+    config.memory_reservation(64 << 10);
+    config.memory_reservation_for_growth(0);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+
+    let module = Module::new(
+        store.engine(),
+        r#"
+            (module
+                (table 100 arrayref)
+
+                (type $a (array i31ref))
+
+                (elem (i32.const 0) arrayref
+                    (array.new_default $a (i32.const 100))
+                    (array.new_default $a (i32.const 10000))
+                    (array.new_default $a (i32.const 10000))
+                    (array.new_default $a (i32.const 10000))
+                    (array.new_default $a (i32.const 1000000))
+                )
+            )
+        "#,
+    )?;
+
+    Instance::new(&mut store, &module, &[])
+        .unwrap_err()
+        .downcast::<GcHeapOutOfMemory<()>>()?;
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn instantiate_table_init_expr_oom() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_gc(true);
+    config.wasm_function_references(true);
+    config.memory_may_move(false);
+    config.memory_reservation(64 << 10);
+    config.memory_reservation_for_growth(0);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+
+    let module = Module::new(
+        store.engine(),
+        r#"
+            (module
+                (type $a (array i31ref))
+                (table 100 (ref $a) (array.new_default $a (i32.const 100000)))
+            )
+        "#,
+    )?;
+
+    Instance::new(&mut store, &module, &[])
+        .unwrap_err()
+        .downcast::<GcHeapOutOfMemory<()>>()?;
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn instantiate_global_init_oom() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_gc(true);
+    config.wasm_function_references(true);
+    config.memory_may_move(false);
+    config.memory_reservation(64 << 10);
+    config.memory_reservation_for_growth(0);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+
+    let module = Module::new(
+        store.engine(),
+        r#"
+            (module
+                (table 100 arrayref)
+                (type $a (array i31ref))
+                (global (ref $a) (array.new_default $a (i32.const 10000000)))
+            )
+        "#,
+    )?;
+
+    Instance::new(&mut store, &module, &[])
+        .unwrap_err()
+        .downcast::<GcHeapOutOfMemory<()>>()?;
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn array_new_elem_oom() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_gc(true);
+    config.wasm_function_references(true);
+    config.memory_may_move(false);
+    config.memory_reservation(64 << 10);
+    config.memory_reservation_for_growth(0);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+
+    let module = Module::new(
+        store.engine(),
+        r#"
+            (module
+                (type $a (array (mut arrayref)))
+                (type $i (array i31ref))
+
+                (func (export "run")
+                    i32.const 0
+                    i32.const 5
+                    array.new_elem $a $e
+                    drop)
+
+                (elem $e arrayref
+                    (array.new_default $i (i32.const 100))
+                    (array.new_default $i (i32.const 10000))
+                    (array.new_default $i (i32.const 10000))
+                    (array.new_default $i (i32.const 10000))
+                    (array.new_default $i (i32.const 1000000))
+                )
+            )
+        "#,
+    )?;
+
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    func.call(&mut store, ())
+        .unwrap_err()
+        .downcast::<GcHeapOutOfMemory<()>>()?;
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn array_init_elem_oom() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_gc(true);
+    config.wasm_function_references(true);
+    config.memory_may_move(false);
+    config.memory_reservation(64 << 10);
+    config.memory_reservation_for_growth(0);
+    let engine = Engine::new(&config)?;
+    let mut store = Store::new(&engine, ());
+
+    let module = Module::new(
+        store.engine(),
+        r#"
+            (module
+                (type $a (array (mut arrayref)))
+                (type $i (array i31ref))
+
+                (func (export "run")
+                    i32.const 5
+                    array.new_default $a
+                    i32.const 0
+                    i32.const 0
+                    i32.const 5
+                    array.init_elem $a $e)
+
+                (elem $e arrayref
+                    (array.new_default $i (i32.const 100))
+                    (array.new_default $i (i32.const 10000))
+                    (array.new_default $i (i32.const 10000))
+                    (array.new_default $i (i32.const 10000))
+                    (array.new_default $i (i32.const 1000000))
+                )
+            )
+        "#,
+    )?;
+
+    let instance = Instance::new(&mut store, &module, &[])?;
+    let func = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    func.call(&mut store, ())
+        .unwrap_err()
+        .downcast::<GcHeapOutOfMemory<()>>()?;
+
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! The `print-cf-constructor` sub-command.
+//! The `print-cfg` sub-command.
 //!
 //! Read a series of Cranelift IR files and print their control flow graphs
 //! in graphviz format.
@@ -10,7 +10,7 @@ use cranelift_codegen::cfg_printer::CFGPrinter;
 use cranelift_reader::parse_functions;
 use std::path::{Path, PathBuf};
 
-/// Prints out cf-constructor in GraphViz Dot format
+/// Prints out cfg in GraphViz Dot format
 #[derive(Parser)]
 pub struct Options {
     /// Specify an input file to be used. Use '-' for stdin.

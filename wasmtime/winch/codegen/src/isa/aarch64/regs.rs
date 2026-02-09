@@ -1,12 +1,13 @@
 //! AArch64 register definition.
 
 use crate::isa::reg::Reg;
+use crate::regset::RegBitSet;
 use regalloc2::{PReg, RegClass};
 
 /// FPR index bound.
-pub(crate) const MAX_FPR: u32 = 32;
+const MAX_FPR: u32 = 32;
 /// FPR index bound.
-pub(crate) const MAX_GPR: u32 = 32;
+const MAX_GPR: u32 = 32;
 
 /// Construct a X-register from an index.
 pub(crate) const fn xreg(num: u8) -> Reg {
@@ -26,13 +27,8 @@ pub(crate) const fn ip0() -> Reg {
     xreg(16)
 }
 
-/// Alias to the IP0 register.
-pub(crate) const fn scratch() -> Reg {
-    ip0()
-}
-
 // Alias to register v31.
-pub(crate) const fn float_scratch() -> Reg {
+const fn float_scratch() -> Reg {
     vreg(31)
 }
 
@@ -80,68 +76,68 @@ pub(crate) const fn sp() -> Reg {
 
 /// Shadow stack pointer register.
 ///
-/// The shadow stack pointer is used as the base for memory addressing
+/// The shadow stack pointer (SSP) is used as the base for memory addressing
 /// to workaround Aarch64's constraint on the stack pointer 16-byte
 /// alignment for memory addressing. This allows word-size loads and
-/// stores.  It's always assumed that the real stack pointer is
-/// 16-byte unaligned; the only exceptions to this assumption are the function
-/// prologue and epilogue in which we use the real stack pointer for
-/// addressing, assuming that the 16-byte alignment is respected.
+/// stores.  It's always assumed that the real stack pointer (SP) is
+/// 16-byte unaligned; the only exceptions to this assumption are:
 ///
-/// The fact that the shadow stack pointer is used for memory
-/// addressing, doesn't change the meaning of the real stack pointer,
-/// which should always be used to allocate and deallocate stack
-/// space. The real stack pointer is always treated as "primary".
-/// Throughout the code generation any change to the stack pointer is
-/// reflected in the shadow stack pointer via the
-/// [MacroAssembler::move_sp_to_shadow_sp] function.
+/// * The function prologue and epilogue in which we use SP
+///   for addressing, assuming that the 16-byte alignment is respected.
+/// * Call sites, in which the code generation process explicitly ensures that
+///   the stack pointer is 16-byte aligned.
+/// * Code that could result in signal handling, like loads/stores.
 ///
-/// This approach, requires copying the real stack pointer value into
-/// x28 every time the real stack pointer moves, which involves
-/// emitting one more instruction. For example, this is generally how
-/// the real stack pointer and x28 will look like during a function:
+/// SSP is utilized for space allocation. After each allocation, its value is
+/// copied to SP, ensuring that SP accurately reflects the allocated space.
+/// Accessing memory below SP may lead to undefined behavior, as this memory can
+/// be overwritten by interrupts and signal handlers.
 ///
-/// +-----------+
-/// |           |      Save x28 (callee-saved)
-/// +-----------+----- SP at function entry (after epilogue, slots for FP and LR)
-/// |           |      Copy the value of SP to x28
+/// This approach requires copying the value of SSP into SP every time SSP
+/// changes, more explicitly, this happens at three main locations:
+///
+/// 1. After space is allocated, to respect the requirement of avoiding
+///    addressing space below SP.
+/// 2. At function epilogue.
+/// 3. After explicit SP is emitted (code that could result in signal handling).
+///
+/// +-----------+      Prologue:
+/// |           |      * Save SSP (callee-saved)
+/// +-----------+----- * SP at function entry (after prologue, slots for FP and LR)
+/// |           |      * Copy the value of SP to SSP
 /// |           |
-/// +-----------+----- SP after reserving stack space for locals and arguments
-/// |           |      Copy the value of SP to x28
+/// +-----------+----- SSP after reserving stack space for locals and arguments
+/// |           |      Copy the value of SSP to SP
 /// |           |
-/// +-----------+----- SP after a push
-/// |           |      Copy the value of SP to x28 (similar after a pop)
+/// +-----------+----- SSP after a push
+/// |           |      Copy the value of SSP to SP
 /// |           |      
 /// |           |       
 /// |           |
-/// |           |
-/// +-----------+----- At epilogue restore x28 (callee-saved)
-/// +-----------+
+/// |           |      Epilogue:
+/// |           |      * Copy SSP to SP
+/// +-----------+----- * Restore SSP (callee-saved)
+/// +-----------+      
 ///
 /// In summary, the following invariants must be respected:
 ///
-/// * The real stack pointer is always primary, and must be used to
-///   allocate and deallocate stack space(e.g. push, pop). This
-///   operation must always be followed by a copy of the real stack
-///   pointer to x28.
-/// * The real stack pointer must never be used to
-///   address memory except when we are certain that the required
-///   alignment is respected (e.g.  during the prologue and epilogue)
-/// * The value of the real stack pointer is copied to x28 when
-///   entering a function.
-/// * The value of x28 doesn't change between
+/// * SSP is considered primary, and must be used to allocate and deallocate
+///   stack space(e.g. push, pop). This operation must always be followed by
+///   a copy of SSP to SP.
+/// * SP must never be used to address memory except when we are certain that
+///   the required alignment is respected (e.g.  during the prologue and epilogue)
+/// * SP must be explicitly aligned when code could result in signal handling.
+/// * The value of SP is copied to SSP when entering a function.
+/// * The value of SSP doesn't change between
 ///   function calls (as it's callee saved), compliant with
 ///   Aarch64's ABI.
-/// * x28 is not available during register allocation.
-/// * Since the real stack pointer is always primary, there's no need
-///   to copy the shadow stack pointer into the real stack
-///   pointer. The copy is only done SP -> Shadow SP direction.
+/// * SSP is not available during register allocation.
 pub(crate) const fn shadow_sp() -> Reg {
     xreg(28)
 }
 
 /// Bitmask for non-allocatable GPR.
-pub(crate) const NON_ALLOCATABLE_GPR: u32 = (1 << ip0().hw_enc())
+const NON_ALLOCATABLE_GPR: u32 = (1 << ip0().hw_enc())
     | (1 << ip1().hw_enc())
     | (1 << platform().hw_enc())
     | (1 << fp().hw_enc())
@@ -149,13 +145,57 @@ pub(crate) const NON_ALLOCATABLE_GPR: u32 = (1 << ip0().hw_enc())
     | (1 << zero().hw_enc())
     | (1 << shadow_sp().hw_enc())
     | (1 << vmctx().hw_enc());
-
 /// Bitmask to represent the available general purpose registers.
-pub(crate) const ALL_GPR: u32 = u32::MAX & !NON_ALLOCATABLE_GPR;
+const ALLOCATABLE_GPR: u32 = u32::MAX & !NON_ALLOCATABLE_GPR;
 
 /// Bitmask for non-allocatable FPR.
 /// All FPRs are allocatable, v0..=v7 are generally used for params and results.
-pub(crate) const NON_ALLOCATABLE_FPR: u32 = 1 << float_scratch().hw_enc();
 
+const NON_ALLOCATABLE_FPR: u32 = 1 << float_scratch().hw_enc();
 /// Bitmask to represent the available floating point registers.
-pub(crate) const ALL_FPR: u32 = u32::MAX & !NON_ALLOCATABLE_FPR;
+const ALLOCATABLE_FPR: u32 = u32::MAX & !NON_ALLOCATABLE_FPR;
+
+/// Allocatable scratch general purpose registers.
+const ALLOCATABLE_SCRATCH_GPR: u32 = (1 << ip0().hw_enc()) | (1 << ip1().hw_enc());
+/// Non-allocatable scratch general purpose registers.
+const NON_ALLOCATABLE_SCRATCH_GPR: u32 = u32::MAX & !ALLOCATABLE_SCRATCH_GPR;
+
+const ALLOCATABLE_SCRATCH_FPR: u32 = 1 << float_scratch().hw_enc();
+/// Non-allocatable scratch general purpose registers.
+const NON_ALLOCATABLE_SCRATCH_FPR: u32 = u32::MAX & !ALLOCATABLE_SCRATCH_FPR;
+
+/// Bitset for allocatable general purpose registers.
+pub fn gpr_bit_set() -> RegBitSet {
+    RegBitSet::int(
+        ALLOCATABLE_GPR.into(),
+        NON_ALLOCATABLE_GPR.into(),
+        usize::try_from(MAX_GPR).unwrap(),
+    )
+}
+
+/// Bitset for allocatable floating point registers.
+pub fn fpr_bit_set() -> RegBitSet {
+    RegBitSet::float(
+        ALLOCATABLE_FPR.into(),
+        NON_ALLOCATABLE_FPR.into(),
+        usize::try_from(MAX_FPR).unwrap(),
+    )
+}
+
+/// Bitset for allocatable scratch general purpose registers.
+pub fn scratch_gpr_bitset() -> RegBitSet {
+    RegBitSet::int(
+        ALLOCATABLE_SCRATCH_GPR.into(),
+        NON_ALLOCATABLE_SCRATCH_GPR.into(),
+        usize::try_from(MAX_GPR).unwrap(),
+    )
+}
+
+/// Bitset for allocatable scratch floating point registers.
+pub fn scratch_fpr_bitset() -> RegBitSet {
+    RegBitSet::float(
+        ALLOCATABLE_SCRATCH_FPR.into(),
+        NON_ALLOCATABLE_SCRATCH_FPR.into(),
+        usize::try_from(MAX_FPR).unwrap(),
+    )
+}

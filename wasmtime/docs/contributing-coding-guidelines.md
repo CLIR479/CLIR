@@ -11,15 +11,85 @@ be aware of.
 All PRs must be formatted according to rustfmt, and this is checked in the
 continuous integration tests. You can format code locally with:
 
-```sh
-$ cargo fmt
+```console
+cargo fmt
 ```
 
 at the root of the repository. You can find [more information about rustfmt
 online](https://github.com/rust-lang/rustfmt) too, such as how to configure
 your editor.
 
-### Minimum Supported `rustc` Version
+### Compiler Warnings and Lints
+
+Wasmtime promotes all compiler warnings to errors in CI, meaning that the `main`
+branch will never have compiler warnings for the version of Rust that's being
+tested on CI. Compiler warnings change over time, however, so it's not always
+guaranteed that Wasmtime will build with zero warnings given an arbitrary
+version of Rust. If you encounter compiler warnings on your version of Rust
+please feel free to send a PR fixing them.
+
+During local development, however, compiler warnings are simply warnings and the
+build and tests can still succeed despite the presence of warnings. This can be
+useful because warnings are often quite prevalent in the middle of a
+refactoring, for example. By the time you make a PR, though, we'll require that
+all warnings are resolved or otherwise CI will fail and the PR cannot land.
+
+Compiler lints are controlled through the `[workspace.lints.rust]` table in the
+`Cargo.toml` at the root of the Wasmtime repository. A few allow-by-default
+lints are enabled such as `trivial_numeric_casts`, and you're welcome to enable
+more lints as applicable. Lints can additionally be enabled on a per-crate basis
+such as placing this in a `src/lib.rs` file:
+
+```rust
+#![warn(trivial_numeric_casts)]
+```
+
+Using `warn` here will allow local development to continue while still causing
+CI to promote this warning to an error.
+
+### Clippy
+
+All PRs are gated on `cargo clippy` passing for all workspace crates and
+targets. All clippy lints, however, are allow-by-default and thus disabled. The
+Wasmtime project selectively enables Clippy lints on an opt-in basis. Lints can
+be controlled for the entire workspace via `[workspace.lints.clippy]`:
+
+```toml
+[workspace.lints.clippy]
+# ...
+manual_strip = 'warn'
+```
+
+or on a per-crate or module basis by using attributes:
+
+```rust
+#![warn(clippy::manual_strip)]
+```
+
+In Wasmtime we've found that the default set of Clippy lints is too noisy to
+productively use other Clippy lints, hence the allow-by-default behavior.
+Despite this though there are numerous useful Clippy lints which are desired for
+all crates or in some cases for a single crate or module. Wasmtime encourages
+contributors to enable Clippy lints they find useful through workspace or
+per-crate configuration.
+
+Like compiler warnings in the above section all Clippy warnings are turned into
+errors in CI. This means that `cargo clippy` should always produce no warnings
+on Wasmtime's `main` branch if you're using the same compiler version that CI
+does (typically current stable Rust). This means, however, that if you enable a
+new Clippy lint for the workspace you'll be required to fix the lint for all
+crates in the workspace to land the PR in CI.
+
+Clippy can be run locally with:
+
+```console
+cargo clippy --workspace --all-targets
+```
+
+Contributors are welcome to enable new lints and send PRs for this. Feel free to
+reach out if you're not sure about a lint as well.
+
+### Minimum Supported `rustc` Version (MSRV)
 
 Wasmtime and Cranelift support the latest three stable releases of Rust. This
 means that if the latest version of Rust is 1.72.0 then Wasmtime supports Rust
@@ -32,6 +102,13 @@ periodically and the general repository does not depend on nightly features.
 
 Updating Wasmtime's MSRV is done by editing the `rust-version` field in the
 workspace root's `Cargo.toml`
+
+Note that this policy is subject to change over time (notably it might be
+extended to include more rustc versions). Current Wasmtime users don't require a
+larger MSRV window to justify the maintenance needed to have a larger window. If
+your use case requires a larger MSRV range though please feel free to contact
+maintainers to raise your use case (e.g. an issue, in a Wasmtime meeting, on
+Zulip, etc).
 
 ### Dependencies of Wasmtime
 
@@ -157,3 +234,145 @@ above can be used to update an `exemptions` entry or add a new entry. Note that
 when the "popular threshold" is used **do not add a vet entry** because the
 crate is, in fact, not vetted. This is required to go through an
 `[[exemptions]]` entry.
+
+### Crate Organization
+
+The Wasmtime repository is a bit of a monorepo with lots of crates internally
+within it. The Wasmtime project and `wasmtime` crate also consists of a variety
+of crates intended for various purposes. As such not all crates are treated
+exactly the same and so there are some rough guidelines here about adding new
+crates to the repository and where to place/name them:
+
+* Wasmtime-related crates live in `crates/foo/Cargo.toml` where the crate name
+  is typically `wasmtime-foo` or `wasmtime-internal-foo`.
+
+* Cranelift-related crates live in `cranelift/foo/Cargo.toml` where the crate is
+  named `cranelift-foo`.
+
+* Some projects such as Winch, Pulley, and Wiggle are exceptions to the above
+  rules and live in `winch/*`, `pulley/*` and `crates/wiggle/*`.
+
+* Some crates are "internal" to Wasmtime. This means that they only exist for
+  crate organization purposes (such as optional dependencies, or code
+  organization). These crates are not intended for public consumption and are
+  intended for exclusively being used by the `wasmtime` crate, for example, or
+  other public crates. These crates should be named `wasmtime-internal-foo` and
+  live in `crates/foo`. The `[workspace.dependencies]` directive in `Cargo.toml`
+  at the root of the repository should rename it to `wasmtime-foo` in
+  workspace-local usage, meaning that the "internal" part is only relevant on
+  crates.io.
+
+### Adding Crates
+
+Adding a new crate to the Wasmtime workspace takes a bit of care. Wasmtime uses
+crates.io trusted publishing meaning that all crates are published from CI in a
+specific workflow. This means that crates must exist on crates.io prior to their
+first publication from the Wasmtime workspace and be configured for trusted
+publishing.
+
+The process for adding a new crate to the workspace looks like:
+
+1. In a PR a new crate is added and this documentation probably isn't read to
+   start out with.
+2. CI will fail in the "verify-publish" job because this crate doesn't exist on
+   crates.io.
+3. The PR author should publish a placeholder crate to crates.io.
+4. The PR author should go to "Settings" on crates.io, click on "Add" under
+   "Trusted Publishing", and enter the following:
+   fields:
+   * Publisher: `GitHub`
+   * Repository Owner: `bytecodealliance`
+   * Repository name: `wasmtime`
+   * Workflow filename: `publish-to-cratesio.yml`
+   * Environment name: `publish`
+5. The PR author should then check the box for requiring all publishes to use
+   the trusted publishing workflow.
+6. The PR author should invite the `wasmtime-publish` user to this crate.
+7. A Wasmtime maintainer, with access to the BA 1password vault, will log in to
+   crates.io as the `wasmtime-publish` user to accept the invite. Wasmtime
+   maintainers should double-check all of the settings and remove the original
+   owner of the crate so just `wasmtime-publish` owns the crate.
+
+This ensures that when publication time rolls around the crate is already
+reserved on GitHub and the publication workflow will succeed. After the initial
+publication the crate is managed by Wasmtime maintainers.
+
+### Use of `unsafe`
+
+Wasmtime is a project that contains `unsafe` Rust code. Wasmtime is also used in
+security-critical contexts which means that it's extra-important that this
+`unsafe` code is correct. The purpose of this section is to outline guidelines
+and guidance for how to use `unsafe` in Wasmtime.
+
+Ideally Wasmtime would have no `unsafe` code. For large components of Wasmtime
+this is already true, for these components have little to no `unsafe` code:
+
+* Cranelift - compiling WebAssembly modules.
+* Winch - compiling WebAssembly modules.
+* Wasmparser - validating WebAssembly.
+* `wasmtime-wasi` / `wasmtime-wasi-http` - implementation of WASI.
+
+Without `unsafe` the likelihood of a security bug is greatly reduced with the
+riskiest possibility being a DoS vector through a panic, generally considered a
+low-severity issue. Inevitably though due to the nature of Wasmtime it's
+effectively impossible to 100% remove `unsafe` code. The question then becomes
+what is the right balance and how to work with `unsafe`?
+
+Some `unsafe` blocks are effectively impossible to remove. For example somewhere
+in Wasmtime we're going to take the output of Cranelift and turn it into a
+function pointer to calling it. In doing so the correctness of the `unsafe`
+block relies on the correctness of Cranelift as well as the translation from
+WebAssembly to Cranelift. This is a fundamental property of the Wasmtime project
+and thus can't really be mitigated.
+
+Other `unsafe` blocks, however, ideally will be self-contained and isolated to a
+small portion of Wasmtime. For this code Wasmtime tries to follow these
+guidelines:
+
+1. Users of the public API of the `wasmtime` crate should never need `unsafe`.
+   The API of `wasmtime` should be sound and safe no matter how its combined
+   with other safe Rust code. While `unsafe` additions are allowed they should
+   be very clearly documented with a precise contract of what exactly is unsafe
+   and what must be upheld by the caller. For example `Module::deserialize`
+   clearly documents that it could allow arbitrary code execution and thus it's
+   not safe to pass in arbitrary bytes, but previously serialized bytes are
+   always safe to pass in.
+
+2. Declaring a function as `unsafe` should be accompanied with clear
+   documentation on the function declaration indicating why the function is
+   `unsafe`. This should clearly indicate all the contracts that need to be
+   upheld by callers for the invocation to be safe. There is no way to verify
+   that the documentation is correct but this is a useful flag to reviewers and
+   readers alike to be more vigilant around such functions.
+
+3. An `unsafe` block within a function should be accompanied with a preceding
+   comment explaining why it's safe to have this block. It should be possible to
+   verify this comment with local reasoning, for example considering little code
+   outside of the current function or module. This means that it should be
+   almost trivial to connect the contracts required on the callee function (why
+   the `unsafe` block is there in the first place) to the surrounding code. This
+   can include the current function being `unsafe` (effectively "forwarding" the
+   contract of the callee) or via local reasoning.
+
+4. Implementation of a feature within Wasmtime should not result in excessive
+   amounts of `unsafe` functions or usage of `unsafe` functions. The goal here
+   is that if two possible designs for a feature are being weighed it's not
+   required to favor one with zero unsafe vs one with just a little unsafe, but
+   one with a little unsafe should be favored over one that is entirely unsafe.
+   An example of this is Wasmtime's implementation of the GC proposal with a
+   sandboxed heap where the data on the heap is never trusted. This comes at a
+   minor theoretical performance loss on the host but has the benefit of all
+   functions within the implementation are all safe. These sorts of design
+   tradeoffs are not really possible to codify in stone, but the general
+   guideline is to try to favor safer implementations so long as the
+   hypothetical sacrifice in performance isn't too great.
+
+It should be noted that Wasmtime is a relatively large and old codebase and thus
+does not perfectly follow these guidelines for preexisting code. Code not
+following these guidelines is considered technical debt that must be paid down
+at one point. Wasmtime tries to [keep track of known issues][unsafe-code-tag] to
+burn down this list over time. New features to Wasmtime are allowed to add to
+this list, but it should be clear how to burn down the list in time for any new
+entries added.
+
+[unsafe-code-tag]: https://github.com/bytecodealliance/wasmtime/labels/wasmtime%3Aunsafe-code

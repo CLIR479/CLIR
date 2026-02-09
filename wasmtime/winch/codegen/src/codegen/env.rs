@@ -1,19 +1,20 @@
 use crate::{
-    abi::{wasm_sig, ABISig, ABI},
-    codegen::{control, BlockSig, BuiltinFunction, BuiltinFunctions, OperandSize},
+    Result,
+    abi::{ABI, ABISig, wasm_sig},
+    codegen::{BlockSig, BuiltinFunction, BuiltinFunctions, OperandSize, control},
     isa::TargetIsa,
 };
 use cranelift_codegen::ir::{UserExternalName, UserExternalNameRef};
 use std::collections::{
-    hash_map::Entry::{Occupied, Vacant},
     HashMap,
+    hash_map::Entry::{Occupied, Vacant},
 };
 use std::mem;
 use wasmparser::BlockType;
 use wasmtime_environ::{
-    BuiltinFunctionIndex, FuncIndex, GlobalIndex, MemoryIndex, MemoryPlan, MemoryStyle,
-    ModuleTranslation, ModuleTypesBuilder, PrimaryMap, PtrSize, TableIndex, TablePlan, TypeConvert,
-    TypeIndex, VMOffsets, WasmHeapType, WasmValType,
+    BuiltinFunctionIndex, DefinedFuncIndex, FuncIndex, FuncKey, GlobalIndex, IndexType, Memory,
+    MemoryIndex, ModuleTranslation, ModuleTypesBuilder, PrimaryMap, PtrSize, Table, TableIndex,
+    TypeConvert, TypeIndex, VMOffsets, WasmHeapType, WasmValType,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -42,50 +43,32 @@ pub struct TableData {
     pub(crate) current_elements_size: OperandSize,
 }
 
-/// Style of the heap.
-#[derive(Debug, Copy, Clone)]
-pub enum HeapStyle {
-    /// Static heap, which has a fixed address.
-    Static {
-        /// The heap bound in bytes, not including the bytes for the offset
-        /// guard pages.
-        bound: u64,
-    },
-    /// Dynamic heap, which can be relocated to a different address when grown.
-    /// The bounds are calculated at runtime on every access.
-    Dynamic,
-}
-
 /// Heap metadata.
 ///
 /// Heaps represent a WebAssembly linear memory.
 #[derive(Debug, Copy, Clone)]
 pub struct HeapData {
     /// The offset to the base of the heap.
-    /// Relative to the VMContext pointer if the WebAssembly memory is locally
+    /// Relative to the `VMContext` pointer if the WebAssembly memory is locally
     /// defined. Else this is relative to the location of the imported WebAssembly
     /// memory location.
     pub offset: u32,
     /// The offset to the current length field.
     pub current_length_offset: u32,
-    /// If the WebAssembly memory is imported, this field contains the offset to locate the
+    /// If the WebAssembly memory is imported or shared, this field contains the offset to locate the
     /// base of the heap.
     pub import_from: Option<u32>,
-    /// The memory type (32 or 64).
-    pub ty: WasmValType,
-    /// The style of the heap.
-    pub style: HeapStyle,
-    /// The guaranteed minimum size, in bytes.
-    pub min_size: u64,
-    /// The maximum heap size in bytes.
-    pub max_size: Option<u64>,
-    /// The log2 of this memory's page size, in bytes.
-    ///
-    /// By default the page size is 64KiB (0x10000; 2**16; 1<<16; 65536) but the
-    /// custom-page-sizes proposal allows opting into a page size of `1`.
-    pub page_size_log2: u8,
-    /// Size in bytes of the offset guard pages, located after the heap bounds.
-    pub offset_guard_size: u64,
+    /// The memory type this heap is associated with.
+    pub memory: Memory,
+}
+
+impl HeapData {
+    pub fn index_type(&self) -> WasmValType {
+        match self.memory.idx_type {
+            IndexType::I32 => WasmValType::I32,
+            IndexType::I64 => WasmValType::I64,
+        }
+    }
 }
 
 /// A function callee.
@@ -101,6 +84,9 @@ pub(crate) enum Callee {
     FuncRef(TypeIndex),
     /// A built-in function.
     Builtin(BuiltinFunction),
+    /// A built-in function, but the vmctx argument is located at the static
+    /// offset provided from the current function's vmctx.
+    BuiltinWithDifferentVmctx(BuiltinFunction, u32),
 }
 
 /// The function environment.
@@ -134,6 +120,8 @@ pub struct FuncEnv<'a, 'translation: 'a, 'data: 'translation, P: PtrSize> {
     heap_access_spectre_mitigation: bool,
     /// Whether or not to enable Spectre mitigation on table element accesses.
     table_access_spectre_mitigation: bool,
+    /// Size of pages on the compilation target.
+    pub page_size_log2: u8,
     name_map: PrimaryMap<UserExternalNameRef, UserExternalName>,
     name_intern: HashMap<UserExternalName, UserExternalNameRef>,
 }
@@ -166,6 +154,7 @@ impl<'a, 'translation, 'data, P: PtrSize> FuncEnv<'a, 'translation, 'data, P> {
             ptr_type,
             heap_access_spectre_mitigation: isa.flags().enable_heap_access_spectre_mitigation(),
             table_access_spectre_mitigation: isa.flags().enable_table_access_spectre_mitigation(),
+            page_size_log2: isa.page_size_align_log2(),
             builtins,
             name_map: Default::default(),
             name_intern: Default::default(),
@@ -193,20 +182,21 @@ impl<'a, 'translation, 'data, P: PtrSize> FuncEnv<'a, 'translation, 'data, P> {
     }
 
     /// Converts a [wasmparser::BlockType] into a [BlockSig].
-    pub(crate) fn resolve_block_sig(&self, ty: BlockType) -> BlockSig {
+    pub(crate) fn resolve_block_sig(&self, ty: BlockType) -> Result<BlockSig> {
         use BlockType::*;
-        match ty {
+        Ok(match ty {
             Empty => BlockSig::new(control::BlockType::void()),
             Type(ty) => {
-                let ty = TypeConverter::new(self.translation, self.types).convert_valtype(ty);
+                let ty = TypeConverter::new(self.translation, self.types).convert_valtype(ty)?;
                 BlockSig::new(control::BlockType::single(ty))
             }
             FuncType(idx) => {
-                let sig_index = self.translation.module.types[TypeIndex::from_u32(idx)];
+                let sig_index = self.translation.module.types[TypeIndex::from_u32(idx)]
+                    .unwrap_module_type_index();
                 let sig = self.types[sig_index].unwrap_func();
                 BlockSig::new(control::BlockType::func(sig.clone()))
             }
-        }
+        })
     }
 
     /// Resolves `GlobalData` of a global at the given index.
@@ -242,7 +232,7 @@ impl<'a, 'translation, 'data, P: PtrSize> FuncEnv<'a, 'translation, 'data, P> {
                                 .vmctx_vmtable_definition_current_elements(defined),
                         ),
                         None => (
-                            Some(self.vmoffsets.vmctx_vmtable_import_from(index)),
+                            Some(self.vmoffsets.vmctx_vmtable_from(index)),
                             self.vmoffsets.vmtable_definition_base().into(),
                             self.vmoffsets.vmtable_definition_current_elements().into(),
                         ),
@@ -262,22 +252,33 @@ impl<'a, 'translation, 'data, P: PtrSize> FuncEnv<'a, 'translation, 'data, P> {
     }
 
     /// Resolve a `HeapData` from a [MemoryIndex].
-    // TODO: (@saulecabrera)
-    // Handle shared memories when implementing support for Wasm Threads.
     pub fn resolve_heap(&mut self, index: MemoryIndex) -> HeapData {
+        let mem = self.translation.module.memories[index];
+        let is_shared = mem.shared;
         match self.resolved_heaps.entry(index) {
             Occupied(entry) => *entry.get(),
             Vacant(entry) => {
                 let (import_from, base_offset, current_length_offset) =
                     match self.translation.module.defined_memory_index(index) {
                         Some(defined) => {
-                            let owned = self.translation.module.owned_memory_index(defined);
-                            (
-                                None,
-                                self.vmoffsets.vmctx_vmmemory_definition_base(owned),
-                                self.vmoffsets
-                                    .vmctx_vmmemory_definition_current_length(owned),
-                            )
+                            if is_shared {
+                                (
+                                    Some(self.vmoffsets.vmctx_vmmemory_pointer(defined)),
+                                    self.vmoffsets.ptr.vmmemory_definition_base().into(),
+                                    self.vmoffsets
+                                        .ptr
+                                        .vmmemory_definition_current_length()
+                                        .into(),
+                                )
+                            } else {
+                                let owned = self.translation.module.owned_memory_index(defined);
+                                (
+                                    None,
+                                    self.vmoffsets.vmctx_vmmemory_definition_base(owned),
+                                    self.vmoffsets
+                                        .vmctx_vmmemory_definition_current_length(owned),
+                                )
+                            }
                         }
                         None => (
                             Some(self.vmoffsets.vmctx_vmmemory_import_from(index)),
@@ -289,32 +290,21 @@ impl<'a, 'translation, 'data, P: PtrSize> FuncEnv<'a, 'translation, 'data, P> {
                         ),
                     };
 
-                let plan = &self.translation.module.memory_plans[index];
-                let (min_size, max_size) = heap_limits(&plan);
-                let (style, offset_guard_size) = heap_style_and_offset_guard_size(&plan);
+                let memory = &self.translation.module.memories[index];
 
                 *entry.insert(HeapData {
                     offset: base_offset,
                     import_from,
                     current_length_offset,
-                    style,
-                    ty: if plan.memory.memory64 {
-                        WasmValType::I64
-                    } else {
-                        WasmValType::I32
-                    },
-                    min_size,
-                    max_size,
-                    page_size_log2: plan.memory.page_size_log2,
-                    offset_guard_size,
+                    memory: *memory,
                 })
             }
         }
     }
 
-    /// Get a [`TablePlan`] from a [`TableIndex`].
-    pub fn table_plan(&mut self, index: TableIndex) -> &TablePlan {
-        &self.translation.module.table_plans[index]
+    /// Get a [`Table`] from a [`TableIndex`].
+    pub fn table(&mut self, index: TableIndex) -> &Table {
+        &self.translation.module.tables[index]
     }
 
     /// Returns true if Spectre mitigations are enabled for heap bounds check.
@@ -328,48 +318,52 @@ impl<'a, 'translation, 'data, P: PtrSize> FuncEnv<'a, 'translation, 'data, P> {
         self.table_access_spectre_mitigation
     }
 
-    pub(crate) fn callee_sig<'b, A>(&'b mut self, callee: &'b Callee) -> &'b ABISig
+    pub(crate) fn callee_sig<'b, A>(&'b mut self, callee: &'b Callee) -> Result<&'b ABISig>
     where
         A: ABI,
     {
         match callee {
             Callee::Local(idx) | Callee::Import(idx) => {
-                let types = self.translation.get_types();
-                let ty = types[types.core_function_at(idx.as_u32())].unwrap_func();
-                let val = || {
+                if self.resolved_callees.contains_key(idx) {
+                    Ok(self.resolved_callees.get(idx).unwrap())
+                } else {
+                    let types = self.translation.get_types();
+                    let types = types.as_ref();
+                    let ty = types[types.core_function_at(idx.as_u32())].unwrap_func();
                     let converter = TypeConverter::new(self.translation, self.types);
-                    let ty = converter.convert_func_type(&ty);
-                    wasm_sig::<A>(&ty)
-                };
-                self.resolved_callees.entry(*idx).or_insert_with(val)
+                    let ty = converter.convert_func_type(&ty)?;
+                    let sig = wasm_sig::<A>(&ty)?;
+                    self.resolved_callees.insert(*idx, sig);
+                    Ok(self.resolved_callees.get(idx).unwrap())
+                }
             }
             Callee::FuncRef(idx) => {
-                let val = || {
-                    let sig_index = self.translation.module.types[*idx];
+                if self.resolved_sigs.contains_key(idx) {
+                    Ok(self.resolved_sigs.get(idx).unwrap())
+                } else {
+                    let sig_index = self.translation.module.types[*idx].unwrap_module_type_index();
                     let ty = self.types[sig_index].unwrap_func();
-                    let sig = wasm_sig::<A>(ty);
-                    sig
-                };
-                self.resolved_sigs.entry(*idx).or_insert_with(val)
+                    let sig = wasm_sig::<A>(ty)?;
+                    self.resolved_sigs.insert(*idx, sig);
+                    Ok(self.resolved_sigs.get(idx).unwrap())
+                }
             }
-            Callee::Builtin(b) => b.sig(),
+            Callee::Builtin(b) | Callee::BuiltinWithDifferentVmctx(b, _) => Ok(b.sig()),
         }
     }
 
     /// Creates a name to reference the `builtin` provided.
     pub fn name_builtin(&mut self, builtin: BuiltinFunctionIndex) -> UserExternalNameRef {
-        self.intern_name(UserExternalName {
-            namespace: wasmtime_cranelift::NS_WASMTIME_BUILTIN,
-            index: builtin.index(),
-        })
+        let key = FuncKey::WasmToBuiltinTrampoline(builtin);
+        let (namespace, index) = key.into_raw_parts();
+        self.intern_name(UserExternalName { namespace, index })
     }
 
     /// Creates a name to reference the wasm function `index` provided.
-    pub fn name_wasm(&mut self, index: FuncIndex) -> UserExternalNameRef {
-        self.intern_name(UserExternalName {
-            namespace: wasmtime_cranelift::NS_WASM_FUNC,
-            index: index.as_u32(),
-        })
+    pub fn name_wasm(&mut self, def_func: DefinedFuncIndex) -> UserExternalNameRef {
+        let key = FuncKey::DefinedWasmFunction(self.translation.module_index(), def_func);
+        let (namespace, index) = key.into_raw_parts();
+        self.intern_name(UserExternalName { namespace, index })
     }
 
     /// Interns `name` into a `UserExternalNameRef` and ensures that duplicate
@@ -397,16 +391,20 @@ pub(crate) struct TypeConverter<'a, 'data: 'a> {
 
 impl TypeConvert for TypeConverter<'_, '_> {
     fn lookup_heap_type(&self, idx: wasmparser::UnpackedIndex) -> WasmHeapType {
-        wasmtime_environ::WasmparserTypeConverter::new(self.types, &self.translation.module)
-            .lookup_heap_type(idx)
+        wasmtime_environ::WasmparserTypeConverter::new(self.types, |idx| {
+            self.translation.module.types[idx].unwrap_module_type_index()
+        })
+        .lookup_heap_type(idx)
     }
 
     fn lookup_type_index(
         &self,
         index: wasmparser::UnpackedIndex,
     ) -> wasmtime_environ::EngineOrModuleTypeIndex {
-        wasmtime_environ::WasmparserTypeConverter::new(self.types, &self.translation.module)
-            .lookup_type_index(index)
+        wasmtime_environ::WasmparserTypeConverter::new(self.types, |idx| {
+            self.translation.module.types[idx].unwrap_module_type_index()
+        })
+        .lookup_type_index(index)
     }
 }
 
@@ -414,36 +412,4 @@ impl<'a, 'data> TypeConverter<'a, 'data> {
     pub fn new(translation: &'a ModuleTranslation<'data>, types: &'a ModuleTypesBuilder) -> Self {
         Self { translation, types }
     }
-}
-
-fn heap_style_and_offset_guard_size(plan: &MemoryPlan) -> (HeapStyle, u64) {
-    match plan {
-        MemoryPlan {
-            style: MemoryStyle::Static { byte_reservation },
-            offset_guard_size,
-            ..
-        } => (
-            HeapStyle::Static {
-                bound: *byte_reservation,
-            },
-            *offset_guard_size,
-        ),
-
-        MemoryPlan {
-            style: MemoryStyle::Dynamic { .. },
-            offset_guard_size,
-            ..
-        } => (HeapStyle::Dynamic, *offset_guard_size),
-    }
-}
-
-fn heap_limits(plan: &MemoryPlan) -> (u64, Option<u64>) {
-    (
-        plan.memory.minimum_byte_size().unwrap_or_else(|_| {
-            // 2^64 as a minimum doesn't fin in a 64 bit integer.
-            // So in this case, the minimum is clamped to u64::MAX.
-            u64::MAX
-        }),
-        plan.memory.maximum_byte_size().ok(),
-    )
 }

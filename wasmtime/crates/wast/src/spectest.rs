@@ -70,13 +70,17 @@ pub fn link_spectest<T>(
     let table = Table::new(&mut *store, ty, Ref::Func(None))?;
     linker.define(&mut *store, "spectest", "table", table)?;
 
+    let ty = TableType::new64(RefType::FUNCREF, 10, Some(20));
+    let table = Table::new(&mut *store, ty, Ref::Func(None))?;
+    linker.define(&mut *store, "spectest", "table64", table)?;
+
     let ty = MemoryType::new(1, Some(2));
     let memory = Memory::new(&mut *store, ty)?;
     linker.define(&mut *store, "spectest", "memory", memory)?;
 
     if config.use_shared_memory {
         let ty = MemoryType::shared(1, 1);
-        let memory = Memory::new(&mut *store, ty)?;
+        let memory = SharedMemory::new(store.engine(), ty)?;
         linker.define(&mut *store, "spectest", "shared_memory", memory)?;
     }
 
@@ -85,11 +89,14 @@ pub fn link_spectest<T>(
 
 #[cfg(feature = "component-model")]
 pub fn link_component_spectest<T>(linker: &mut component::Linker<T>) -> Result<()> {
-    use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
     use wasmtime::component::{Resource, ResourceType};
 
     let engine = linker.engine().clone();
+    linker
+        .root()
+        .func_wrap("host-echo-u32", |_, v: (u32,)| Ok(v))?;
     linker
         .root()
         .func_wrap("host-return-two", |_, _: ()| Ok((2u32,)))?;
@@ -98,16 +105,18 @@ pub fn link_component_spectest<T>(linker: &mut component::Linker<T>) -> Result<(
     i.instance("nested")?
         .func_wrap("return-four", |_, _: ()| Ok((4u32,)))?;
 
-    let module = Module::new(
-        &engine,
-        r#"
-            (module
-                (global (export "g") i32 i32.const 100)
-                (func (export "f") (result i32) i32.const 101)
-            )
-        "#,
-    )?;
-    i.module("simple-module", &module)?;
+    if !cfg!(miri) {
+        let module = Module::new(
+            &engine,
+            r#"
+                (module
+                    (global (export "g") i32 i32.const 100)
+                    (func (export "f") (result i32) i32.const 101)
+                )
+            "#,
+        )?;
+        i.module("simple-module", &module)?;
+    }
 
     struct Resource1;
     struct Resource2;

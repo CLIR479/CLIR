@@ -6,9 +6,9 @@ use clap::Parser;
 use cranelift_codegen::isa::{CallConv, OwnedTargetIsa};
 use cranelift_filetests::TestFileCompiler;
 use cranelift_native::builder as host_isa_builder;
-use cranelift_reader::{parse_run_command, parse_test, Details, IsaSpec, ParseOptions};
+use cranelift_reader::{Details, IsaSpec, ParseOptions, parse_run_command, parse_test};
 use std::path::{Path, PathBuf};
-use target_lexicon::{Triple, HOST};
+use target_lexicon::{HOST, Triple};
 
 /// Execute clif code and verify with test expressions
 #[derive(Parser)]
@@ -68,18 +68,18 @@ pub fn run(options: &Options) -> Result<()> {
     match errors {
         0 => Ok(()),
         1 => anyhow::bail!("1 failure"),
-        n => anyhow::bail!("{} failures", n),
+        n => anyhow::bail!("{n} failures"),
     }
 }
 
 /// Run all functions in a file that are succeeded by "run:" comments
-pub fn run_single_file(path: &PathBuf) -> Result<()> {
+fn run_single_file(path: &PathBuf) -> Result<()> {
     let file_contents = read_to_string(&path)?;
     run_file_contents(file_contents)
 }
 
 /// Main body of `run_single_file` separated for testing
-pub fn run_file_contents(file_contents: String) -> Result<()> {
+fn run_file_contents(file_contents: String) -> Result<()> {
     let options = ParseOptions {
         default_calling_convention: CallConv::triple_default(&Triple::host()), // use the host's default calling convention
         ..ParseOptions::default()
@@ -96,8 +96,8 @@ pub fn run_file_contents(file_contents: String) -> Result<()> {
                 let trampoline = compiled.get_trampoline(&func).unwrap();
 
                 command
-                    .run(|_, args| Ok(trampoline.call(args)))
-                    .map_err(|s| anyhow::anyhow!("{}", s))?;
+                    .run(|_, args| Ok(trampoline.call(&compiled, args)))
+                    .map_err(|s| anyhow::anyhow!("{s}"))?;
             }
         }
     }
@@ -106,7 +106,7 @@ pub fn run_file_contents(file_contents: String) -> Result<()> {
 
 /// Build an ISA based on the current machine running this code (the host)
 fn create_target_isa(isa_spec: &IsaSpec) -> Result<OwnedTargetIsa> {
-    let builder = host_isa_builder().map_err(|s| anyhow::anyhow!("{}", s))?;
+    let builder = host_isa_builder().map_err(|s| anyhow::anyhow!("{s}"))?;
     match *isa_spec {
         IsaSpec::None(ref flags) => {
             // build an ISA for the current machine
@@ -131,6 +131,9 @@ mod test {
 
     #[test]
     fn nop() {
+        if cranelift_native::builder().is_err() {
+            return;
+        }
         let code = String::from(
             "
             function %test() -> i8 {

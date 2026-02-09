@@ -17,7 +17,7 @@
 ;; function u0:0(i64 vmctx, i64) tail {
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly gv0+8
-;;     gv2 = load.i64 notrap aligned gv1
+;;     gv2 = load.i64 notrap aligned gv1+16
 ;;     stack_limit = gv2
 ;;
 ;;                                 block0(v0: i64, v1: i64):
@@ -25,10 +25,8 @@
 ;; @0021                               v3 = iconst.i32 4
 ;; @0023                               v4 = iconst.i32 4
 ;; @0025                               v5 = isub v3, v4  ; v3 = 4, v4 = 4
-;; @002a                               brif v5, block2, block4
-;;
-;;                                 block2:
-;; @002c                               trap unreachable
+;; @002c                               trapnz v5, user11
+;; @002a                               jump block4
 ;;
 ;;                                 block4:
 ;; @002e                               v6 = iconst.i32 6

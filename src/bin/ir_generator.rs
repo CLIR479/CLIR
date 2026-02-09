@@ -4,11 +4,13 @@ use clap::{ArgAction, Parser};
 use commons::fixed_rng::initialize_rng;
 use commons::types::{config_intersection, load_config, ArchConfig};
 use cranelift_codegen::cfg_printer::CFGPrinter;
+use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::flowgraph::ControlFlowGraph;
 use cranelift_codegen::ir::{
     AbiParam, Block, ExtFuncData, ExternalName, Function, Signature, UserExternalName, UserFuncName,
 };
-use cranelift_codegen::isa::CallConv;
+use cranelift_codegen::isa::{self, CallConv};
+use cranelift_codegen::Context;
 use cranelift_codegen::{ir, write_function};
 use env_logger;
 use function_generator::dominator_tree::compute_dominators;
@@ -134,7 +136,6 @@ fn generate_ir(config: &ArchConfig, path: &str, num: u32) -> Result<(), String> 
                     .push((func.clone(), (dominator_block_set, block_def_values)));
 
                 insert_function_invocation(func_node, &func_dominator_ref_map_vec);
-
                 write_function(&mut clif_output, &func_node.func);
             }
             insert_function_invocation(&mut root_func_node, &func_dominator_ref_map_vec);
@@ -155,7 +156,6 @@ fn generate_ir(config: &ArchConfig, path: &str, num: u32) -> Result<(), String> 
         });
 
         clif_output.push_str("\n\n; print: %main()");
-
         
         let path = Path::new(path);
         fs::create_dir_all(path);
@@ -167,6 +167,7 @@ fn generate_ir(config: &ArchConfig, path: &str, num: u32) -> Result<(), String> 
         let mut clif_speed_size_file =
             File::create(path.join(format!("cranelift_ir_{}_speed_and_size.clif", fileid)))
                 .unwrap();
+        
 
         let mut clif_none_output = clif_output.clone();
         clif_none_output.insert_str(
@@ -414,7 +415,7 @@ fn main() -> Result<(), String> {
             }
 
             generate_ir_intersection(configs, output_path.to_str().unwrap(), num)
-                .map_err(|e| format!("Failed to generate IR compatible: {}", e))?;
+                .map_err(|e| format!("Failed to generate IR intersection: {}", e))?;
         }
         _ => {
             return Err(format!("Unknown mode: {}", mode));

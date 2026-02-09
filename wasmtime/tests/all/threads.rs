@@ -1,18 +1,52 @@
 use std::{
-    collections::{hash_map::RandomState, HashSet},
+    collections::{HashSet, hash_map::RandomState},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
     },
 };
 use wasmtime::*;
 
-#[test]
-fn test_instantiate_shared_memory() -> Result<()> {
-    let wat = r#"(module (memory 1 1 shared))"#;
+pub fn engine() -> Option<Engine> {
     let mut config = Config::new();
     config.wasm_threads(true);
-    let engine = Engine::new(&config)?;
+    config.shared_memory(true);
+    match Engine::new(&config) {
+        Ok(engine) => {
+            assert!(cfg!(target_pointer_width = "64"));
+            Some(engine)
+        }
+        Err(e) => {
+            assert!(cfg!(target_pointer_width = "32"), "unexpected error {e:?}");
+            None
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn shared_memory_failed_creation() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_threads(true);
+    config.shared_memory(false);
+    let Ok(engine) = Engine::new(&config) else {
+        return Ok(());
+    };
+    assert!(SharedMemory::new(&engine, MemoryType::shared(1, 1)).is_err());
+    let wat = r#"(module (memory 1 1 shared))"#;
+    let module = Module::new(&engine, wat)?;
+    let mut store = Store::new(&engine, ());
+    assert!(Instance::new(&mut store, &module, &[]).is_err());
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn test_instantiate_shared_memory() -> Result<()> {
+    let wat = r#"(module (memory 1 1 shared))"#;
+    let Some(engine) = engine() else {
+        return Ok(());
+    };
     let module = Module::new(&engine, wat)?;
     let mut store = Store::new(&engine, ());
     let _instance = Instance::new(&mut store, &module, &[])?;
@@ -20,11 +54,12 @@ fn test_instantiate_shared_memory() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_import_shared_memory() -> Result<()> {
     let wat = r#"(module (import "env" "memory" (memory 1 5 shared)))"#;
-    let mut config = Config::new();
-    config.wasm_threads(true);
-    let engine = Engine::new(&config)?;
+    let Some(engine) = engine() else {
+        return Ok(());
+    };
     let module = Module::new(&engine, wat)?;
     let mut store = Store::new(&engine, ());
     let shared_memory = SharedMemory::new(&engine, MemoryType::shared(1, 5))?;
@@ -33,11 +68,12 @@ fn test_import_shared_memory() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_export_shared_memory() -> Result<()> {
     let wat = r#"(module (memory (export "memory") 1 5 shared))"#;
-    let mut config = Config::new();
-    config.wasm_threads(true);
-    let engine = Engine::new(&config)?;
+    let Some(engine) = engine() else {
+        return Ok(());
+    };
     let module = Module::new(&engine, wat)?;
     let mut store = Store::new(&engine, ());
     let instance = Instance::new(&mut store, &module, &[])?;
@@ -57,9 +93,9 @@ fn test_sharing_of_shared_memory() -> Result<()> {
         (import "env" "memory" (memory 1 5 shared))
         (func (export "first_word") (result i32) (i32.load (i32.const 0)))
     )"#;
-    let mut config = Config::new();
-    config.wasm_threads(true);
-    let engine = Engine::new(&config)?;
+    let Some(engine) = engine() else {
+        return Ok(());
+    };
     let module = Module::new(&engine, wat)?;
     let mut store = Store::new(&engine, ());
     let shared_memory = SharedMemory::new(&engine, MemoryType::shared(1, 5))?;
@@ -101,9 +137,9 @@ fn test_probe_shared_memory_size() -> Result<()> {
         (memory (export "memory") 1 2 shared)
         (func (export "size") (result i32) (memory.size))
     )"#;
-    let mut config = Config::new();
-    config.wasm_threads(true);
-    let engine = Engine::new(&config)?;
+    let Some(engine) = engine() else {
+        return Ok(());
+    };
     let module = Module::new(&engine, wat)?;
     let mut store = Store::new(&engine, ());
     let instance = Instance::new(&mut store, &module, &[])?;
@@ -122,6 +158,7 @@ fn test_probe_shared_memory_size() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_multi_memory() -> Result<()> {
     let wat = r#"(module
         (import "env" "imported" (memory $imported 5 10 shared))
@@ -129,10 +166,9 @@ fn test_multi_memory() -> Result<()> {
         (memory (export "shared") 1 2 shared)
         (export "imported" (memory $imported))
     )"#;
-    let mut config = Config::new();
-    config.wasm_threads(true);
-    config.wasm_multi_memory(true);
-    let engine = Engine::new(&config)?;
+    let Some(engine) = engine() else {
+        return Ok(());
+    };
     let module = Module::new(&engine, wat)?;
     let mut store = Store::new(&engine, ());
     let incoming_shared_memory = SharedMemory::new(&engine, MemoryType::shared(5, 10))?;
@@ -168,9 +204,9 @@ fn test_grow_memory_in_multiple_threads() -> Result<()> {
         (func (export "grow") (param $delta i32) (result i32) (memory.grow (local.get $delta)))
     )"#;
 
-    let mut config = Config::new();
-    config.wasm_threads(true);
-    let engine = Engine::new(&config)?;
+    let Some(engine) = engine() else {
+        return Ok(());
+    };
     let module = Module::new(&engine, wat)?;
     let shared_memory = SharedMemory::new(&engine, MemoryType::shared(1, NUM_GROW_OPS as u32))?;
     let mut threads = vec![];
@@ -240,9 +276,9 @@ fn test_memory_size_accessibility() -> Result<()> {
         )
     )"#;
 
-    let mut config = Config::new();
-    config.wasm_threads(true);
-    let engine = Engine::new(&config)?;
+    let Some(engine) = engine() else {
+        return Ok(());
+    };
     let module = Module::new(&engine, wat)?;
     let shared_memory = SharedMemory::new(&engine, MemoryType::shared(1, NUM_GROW_OPS as u32))?;
     let done = Arc::new(AtomicBool::new(false));
@@ -275,5 +311,13 @@ fn test_memory_size_accessibility() -> Result<()> {
     done.store(true, Ordering::SeqCst);
     probe_thread.join().unwrap();
 
+    Ok(())
+}
+
+#[test]
+fn create_shared_memory_through_memory() -> Result<()> {
+    let engine = Engine::default();
+    let mut store = Store::new(&engine, ());
+    assert!(Memory::new(&mut store, MemoryType::shared(1, 1)).is_err());
     Ok(())
 }

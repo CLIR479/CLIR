@@ -1,11 +1,11 @@
 use super::ref_types_module;
-use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use wasmtime::*;
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn pass_funcref_in_and_out_of_wasm() -> anyhow::Result<()> {
+fn pass_funcref_in_and_out_of_wasm() -> wasmtime::Result<()> {
     let (mut store, module) = ref_types_module(
         false,
         r#"
@@ -68,9 +68,10 @@ fn pass_funcref_in_and_out_of_wasm() -> anyhow::Result<()> {
             .get_func(&mut other_store, "f")
             .unwrap();
 
-        assert!(func
-            .call(&mut store, &[Val::FuncRef(Some(f))], &mut [Val::I32(0)])
-            .is_err());
+        assert!(
+            func.call(&mut store, &[Val::FuncRef(Some(f))], &mut [Val::I32(0)])
+                .is_err()
+        );
     }
 
     Ok(())
@@ -78,7 +79,7 @@ fn pass_funcref_in_and_out_of_wasm() -> anyhow::Result<()> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn receive_null_funcref_from_wasm() -> anyhow::Result<()> {
+fn receive_null_funcref_from_wasm() -> wasmtime::Result<()> {
     let (mut store, module) = ref_types_module(
         false,
         r#"
@@ -102,7 +103,7 @@ fn receive_null_funcref_from_wasm() -> anyhow::Result<()> {
 }
 
 #[test]
-fn wrong_store() -> anyhow::Result<()> {
+fn wrong_store() -> wasmtime::Result<()> {
     let dropped = Arc::new(AtomicBool::new(false));
     {
         let mut store1 = Store::<()>::default();
@@ -130,7 +131,7 @@ fn wrong_store() -> anyhow::Result<()> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn func_new_returns_wrong_store() -> anyhow::Result<()> {
+fn func_new_returns_wrong_store() -> wasmtime::Result<()> {
     let dropped = Arc::new(AtomicBool::new(false));
     {
         let mut store1 = Store::<()>::default();

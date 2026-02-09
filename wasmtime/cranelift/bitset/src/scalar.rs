@@ -54,7 +54,6 @@ where
         let mut s = f.debug_struct(core::any::type_name::<Self>());
         for i in 0..Self::capacity() {
             use alloc::string::ToString;
-            let i = u8::try_from(i).unwrap();
             s.field(&i.to_string(), &self.contains(i));
         }
         s.finish()
@@ -556,14 +555,17 @@ pub trait ScalarBitSetStorage:
 macro_rules! impl_storage {
     ( $int:ty ) => {
         impl ScalarBitSetStorage for $int {
+            #[inline]
             fn leading_zeros(self) -> u8 {
                 u8::try_from(self.leading_zeros()).unwrap()
             }
 
+            #[inline]
             fn trailing_zeros(self) -> u8 {
                 u8::try_from(self.trailing_zeros()).unwrap()
             }
 
+            #[inline]
             fn count_ones(self) -> u8 {
                 u8::try_from(self.count_ones()).unwrap()
             }

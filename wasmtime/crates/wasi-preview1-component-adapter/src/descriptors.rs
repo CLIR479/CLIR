@@ -4,12 +4,12 @@ use crate::{BlockingMode, ImportAlloc, State, TrappingUnwrap, WasmStr};
 use core::cell::{Cell, OnceCell, UnsafeCell};
 use core::mem::MaybeUninit;
 use core::num::NonZeroUsize;
-use wasi::{Errno, Fd};
+use wasip1::{Errno, Fd};
 
 #[cfg(not(feature = "proxy"))]
-use crate::bindings::wasi::filesystem::types as filesystem;
-#[cfg(not(feature = "proxy"))]
 use crate::File;
+#[cfg(not(feature = "proxy"))]
+use crate::bindings::wasi::filesystem::types as filesystem;
 
 pub const MAX_DESCRIPTORS: usize = 128;
 
@@ -52,7 +52,7 @@ impl Streams {
                     StreamType::File(File {
                         descriptor_type: filesystem::DescriptorType::Directory,
                         ..
-                    }) => return Err(wasi::ERRNO_BADF),
+                    }) => return Err(wasip1::ERRNO_BADF),
                     // For files, we may have adjusted the position for seeking, so
                     // create a new stream.
                     #[cfg(not(feature = "proxy"))]
@@ -60,7 +60,7 @@ impl Streams {
                         let input = file.fd.read_via_stream(file.position.get())?;
                         input
                     }
-                    _ => return Err(wasi::ERRNO_BADF),
+                    _ => return Err(wasip1::ERRNO_BADF),
                 };
                 self.input.set(input).trapping_unwrap();
                 Ok(self.input.get().trapping_unwrap())
@@ -80,7 +80,7 @@ impl Streams {
                     StreamType::File(File {
                         descriptor_type: filesystem::DescriptorType::Directory,
                         ..
-                    }) => return Err(wasi::ERRNO_BADF),
+                    }) => return Err(wasip1::ERRNO_BADF),
                     // For files, we may have adjusted the position for seeking, so
                     // create a new stream.
                     #[cfg(not(feature = "proxy"))]
@@ -92,7 +92,7 @@ impl Streams {
                         };
                         output
                     }
-                    _ => return Err(wasi::ERRNO_BADF),
+                    _ => return Err(wasip1::ERRNO_BADF),
                 };
                 self.output.set(output).trapping_unwrap();
                 Ok(self.output.get().trapping_unwrap())
@@ -117,7 +117,7 @@ pub enum Stdio {
 }
 
 impl Stdio {
-    pub fn filetype(&self) -> wasi::Filetype {
+    pub fn filetype(&self) -> wasip1::Filetype {
         #[cfg(not(feature = "proxy"))]
         let is_terminal = {
             use crate::bindings::wasi::cli;
@@ -130,9 +130,9 @@ impl Stdio {
         #[cfg(feature = "proxy")]
         let is_terminal = false;
         if is_terminal {
-            wasi::FILETYPE_CHARACTER_DEVICE
+            wasip1::FILETYPE_CHARACTER_DEVICE
         } else {
-            wasi::FILETYPE_UNKNOWN
+            wasip1::FILETYPE_UNKNOWN
         }
     }
 }
@@ -149,8 +149,8 @@ pub struct Descriptors {
 }
 
 #[cfg(not(feature = "proxy"))]
-#[link(wasm_import_module = "wasi:filesystem/preopens@0.2.1")]
-extern "C" {
+#[link(wasm_import_module = "wasi:filesystem/preopens@0.2.6")]
+unsafe extern "C" {
     #[link_name = "get-directories"]
     fn wasi_filesystem_get_directories(rval: *mut PreopenList);
 }
@@ -236,14 +236,16 @@ impl Descriptors {
         let alloc = ImportAlloc::GetPreopenPath {
             cur: 0,
             nth,
-            alloc: state.temporary_alloc(),
+            alloc: unsafe { state.temporary_alloc() },
         };
         let (preopens, _) = state.with_import_alloc(alloc, || {
             let mut preopens = PreopenList {
                 base: std::ptr::null(),
                 len: 0,
             };
-            wasi_filesystem_get_directories(&mut preopens);
+            unsafe {
+                wasi_filesystem_get_directories(&mut preopens);
+            }
             preopens
         });
 
@@ -252,25 +254,27 @@ impl Descriptors {
         // discard all of the descriptors and close them since we otherwise
         // don't want to leak them.
         for i in 0..preopens.len {
-            let preopen = preopens.base.add(i).read();
+            let preopen = unsafe { preopens.base.add(i).read() };
             drop(preopen.descriptor);
 
             if (i as u32) != nth {
                 continue;
             }
             assert!(preopen.path.len <= len);
-            core::ptr::copy(preopen.path.ptr, path, preopen.path.len);
+            unsafe {
+                core::ptr::copy(preopen.path.ptr, path, preopen.path.len);
+            }
         }
     }
 
     fn push(&self, desc: Descriptor) -> Result<Fd, Errno> {
         unsafe {
             let table = (*self.table.get()).as_mut_ptr();
-            let len = usize::try_from(self.table_len.get()).trapping_unwrap();
+            let len = usize::from(self.table_len.get());
             if len >= (*table).len() {
-                return Err(wasi::ERRNO_NOMEM);
+                return Err(wasip1::ERRNO_NOMEM);
             }
-            core::ptr::addr_of_mut!((*table)[len]).write(desc);
+            (&raw mut (*table)[len]).write(desc);
             self.table_len.set(u16::try_from(len + 1).trapping_unwrap());
             Ok(Fd::from(u32::try_from(len).trapping_unwrap()))
         }
@@ -280,7 +284,7 @@ impl Descriptors {
         unsafe {
             std::slice::from_raw_parts(
                 (*self.table.get()).as_ptr().cast(),
-                usize::try_from(self.table_len.get()).trapping_unwrap(),
+                usize::from(self.table_len.get()),
             )
         }
     }
@@ -289,7 +293,7 @@ impl Descriptors {
         unsafe {
             std::slice::from_raw_parts_mut(
                 (*self.table.get()).as_mut_ptr().cast(),
-                usize::try_from(self.table_len.get()).trapping_unwrap(),
+                usize::from(self.table_len.get()),
             )
         }
     }
@@ -317,32 +321,27 @@ impl Descriptors {
     pub fn get(&self, fd: Fd) -> Result<&Descriptor, Errno> {
         self.table()
             .get(usize::try_from(fd).trapping_unwrap())
-            .ok_or(wasi::ERRNO_BADF)
+            .ok_or(wasip1::ERRNO_BADF)
     }
 
     pub fn get_mut(&mut self, fd: Fd) -> Result<&mut Descriptor, Errno> {
         self.table_mut()
             .get_mut(usize::try_from(fd).trapping_unwrap())
-            .ok_or(wasi::ERRNO_BADF)
+            .ok_or(wasip1::ERRNO_BADF)
     }
 
-    // Internal: close a fd, returning the descriptor.
-    fn close_(&mut self, fd: Fd) -> Result<Descriptor, Errno> {
+    // Close an fd.
+    pub fn close(&mut self, fd: Fd) -> Result<(), Errno> {
         // Throw an error if closing an fd which is already closed
         match self.get(fd)? {
-            Descriptor::Closed(_) => Err(wasi::ERRNO_BADF)?,
+            Descriptor::Closed(_) => Err(wasip1::ERRNO_BADF)?,
             _ => {}
         }
         // Mutate the descriptor to be closed, and push the closed fd onto the head of the linked list:
         let last_closed = self.closed;
         let prev = std::mem::replace(self.get_mut(fd)?, Descriptor::Closed(last_closed));
         self.closed = Some(fd);
-        Ok(prev)
-    }
-
-    // Close an fd.
-    pub fn close(&mut self, fd: Fd) -> Result<(), Errno> {
-        drop(self.close_(fd)?);
+        drop(prev);
         Ok(())
     }
 
@@ -356,17 +355,31 @@ impl Descriptors {
 
     // Implementation of fd_renumber
     pub fn renumber(&mut self, from_fd: Fd, to_fd: Fd) -> Result<(), Errno> {
-        // First, ensure from_fd is in bounds:
-        let _ = self.get(from_fd)?;
+        // First, ensure to_fd/from_fd is in bounds:
+        if let Descriptor::Closed(_) = self.get(to_fd)? {
+            return Err(wasip1::ERRNO_BADF);
+        }
+        if let Descriptor::Closed(_) = self.get(from_fd)? {
+            return Err(wasip1::ERRNO_BADF);
+        }
         // Expand table until to_fd is in bounds as well:
         while self.table_len.get() as u32 <= to_fd {
             self.push_closed()?;
         }
-        // Then, close from_fd and put its contents into to_fd:
-        let desc = self.close_(from_fd)?;
-        // TODO FIXME if this overwrites a preopen, do we need to clear it from the preopen table?
-        *self.get_mut(to_fd)? = desc;
-
+        // Throw an error if renumbering a closed fd
+        match self.get(from_fd)? {
+            Descriptor::Closed(_) => Err(wasip1::ERRNO_BADF)?,
+            _ => {}
+        }
+        // Close from_fd and put its contents into to_fd
+        if from_fd != to_fd {
+            // Mutate the descriptor to be closed, and push the closed fd onto the head of the linked list:
+            let last_closed = self.closed;
+            let desc = std::mem::replace(self.get_mut(from_fd)?, Descriptor::Closed(last_closed));
+            self.closed = Some(from_fd);
+            // TODO FIXME if this overwrites a preopen, do we need to clear it from the preopen table?
+            *self.get_mut(to_fd)? = desc;
+        }
         Ok(())
     }
 
@@ -393,19 +406,19 @@ impl Descriptors {
                         ..
                     }),
                 ..
-            }) => Err(wasi::ERRNO_BADF),
+            }) => Err(wasip1::ERRNO_BADF),
             Descriptor::Streams(Streams {
                 type_: StreamType::File(file),
                 ..
             }) => Ok(file),
-            Descriptor::Closed(_) => Err(wasi::ERRNO_BADF),
+            Descriptor::Closed(_) => Err(wasip1::ERRNO_BADF),
             _ => Err(error),
         }
     }
 
     #[cfg(not(feature = "proxy"))]
     pub fn get_file(&self, fd: Fd) -> Result<&File, Errno> {
-        self.get_file_with_error(fd, wasi::ERRNO_INVAL)
+        self.get_file_with_error(fd, wasip1::ERRNO_INVAL)
     }
 
     #[cfg(not(feature = "proxy"))]
@@ -424,31 +437,31 @@ impl Descriptors {
             Descriptor::Streams(Streams {
                 type_: StreamType::File(File { .. }),
                 ..
-            }) => Err(wasi::ERRNO_NOTDIR),
-            _ => Err(wasi::ERRNO_BADF),
+            }) => Err(wasip1::ERRNO_NOTDIR),
+            _ => Err(wasip1::ERRNO_BADF),
         }
     }
 
     #[cfg(not(feature = "proxy"))]
     pub fn get_seekable_file(&self, fd: Fd) -> Result<&File, Errno> {
-        self.get_file_with_error(fd, wasi::ERRNO_SPIPE)
+        self.get_file_with_error(fd, wasip1::ERRNO_SPIPE)
     }
 
     pub fn get_seekable_stream_mut(&mut self, fd: Fd) -> Result<&mut Streams, Errno> {
-        self.get_stream_with_error_mut(fd, wasi::ERRNO_SPIPE)
+        self.get_stream_with_error_mut(fd, wasip1::ERRNO_SPIPE)
     }
 
     pub fn get_read_stream(&self, fd: Fd) -> Result<&InputStream, Errno> {
         match self.get(fd)? {
             Descriptor::Streams(streams) => streams.get_read_stream(),
-            Descriptor::Closed(_) | Descriptor::Bad => Err(wasi::ERRNO_BADF),
+            Descriptor::Closed(_) | Descriptor::Bad => Err(wasip1::ERRNO_BADF),
         }
     }
 
     pub fn get_write_stream(&self, fd: Fd) -> Result<&OutputStream, Errno> {
         match self.get(fd)? {
             Descriptor::Streams(streams) => streams.get_write_stream(),
-            Descriptor::Closed(_) | Descriptor::Bad => Err(wasi::ERRNO_BADF),
+            Descriptor::Closed(_) | Descriptor::Bad => Err(wasip1::ERRNO_BADF),
         }
     }
 }

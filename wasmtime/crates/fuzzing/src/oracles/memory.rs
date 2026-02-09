@@ -56,7 +56,10 @@ pub fn check_memory_accesses(input: MemoryAccesses) {
         Ok(x) => x,
         Err(e) => {
             log::info!("Failed to instantiate: {e:?}");
-            assert!(format!("{e:?}").contains("Cannot allocate memory"));
+            assert!(
+                format!("{e:?}").contains("Cannot allocate memory"),
+                "bad error: {e:?}",
+            );
             return;
         }
     };
@@ -235,7 +238,8 @@ pub fn check_memory_accesses(input: MemoryAccesses) {
     };
 
     do_accesses(&mut store, "initial size");
-    let _ = memory.grow(&mut store, u64::from(growth));
+    let res = memory.grow(&mut store, u64::from(growth));
+    log::debug!("grow {growth} -> {res:?}");
     do_accesses(&mut store, "after growing");
 }
 
@@ -259,8 +263,12 @@ fn build_wasm(image: &HeapImage, offset: u32) -> Vec<u8> {
 
     {
         let mut types = wasm_encoder::TypeSection::new();
-        types.function([wasm_encoder::ValType::I64], [wasm_encoder::ValType::I32]);
-        types.function([wasm_encoder::ValType::I64], [wasm_encoder::ValType::I64]);
+        types
+            .ty()
+            .function([wasm_encoder::ValType::I64], [wasm_encoder::ValType::I32]);
+        types
+            .ty()
+            .function([wasm_encoder::ValType::I64], [wasm_encoder::ValType::I64]);
         module.section(&types);
     }
 
@@ -384,20 +392,13 @@ fn build_wasm(image: &HeapImage, offset: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbitrary::{Arbitrary, Unstructured};
-    use rand::prelude::*;
+    use crate::test::test_n_times;
 
     #[test]
     fn smoke_test_memory_access() {
-        let mut rng = SmallRng::seed_from_u64(0);
-        let mut buf = vec![0; 1024];
-
-        for _ in 0..1024 {
-            rng.fill_bytes(&mut buf);
-            let u = Unstructured::new(&buf);
-            if let Ok(input) = MemoryAccesses::arbitrary_take_rest(u) {
-                check_memory_accesses(input);
-            }
-        }
+        test_n_times(50, |input: MemoryAccesses, _u| {
+            check_memory_accesses(input);
+            Ok(())
+        })
     }
 }

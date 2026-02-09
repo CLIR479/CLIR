@@ -1,16 +1,15 @@
 //! Definitions of runtime structures and metadata which are serialized into ELF
 //! with `postcard` as part of a module's compilation process.
 
+use crate::error::{Result, bail};
 use crate::prelude::*;
 use crate::{
-    obj, CompiledFunctionInfo, CompiledModuleInfo, DebugInfoData, DefinedFuncIndex, FunctionLoc,
-    FunctionName, MemoryInitialization, Metadata, ModuleTranslation, PrimaryMap, Tunables,
+    CompiledModuleInfo, DebugInfoData, FunctionName, MemoryInitialization, Metadata,
+    ModuleTranslation, Tunables, obj,
 };
-use anyhow::{bail, Result};
-use object::write::{Object, SectionId, StandardSegment, WritableBuffer};
 use object::SectionKind;
+use object::write::{Object, SectionId, StandardSegment, WritableBuffer};
 use std::ops::Range;
-use wasmtime_types::ModuleInternedTypeIndex;
 
 /// Helper structure to create an ELF file as a compilation artifact.
 ///
@@ -113,12 +112,7 @@ impl<'a> ObjectBuilder<'a> {
     /// Returns the `CompiledModuleInfo` corresponding to this core Wasm module
     /// as a result of this append operation. This is then serialized into the
     /// final artifact by the caller.
-    pub fn append(
-        &mut self,
-        translation: ModuleTranslation<'_>,
-        funcs: PrimaryMap<DefinedFuncIndex, CompiledFunctionInfo>,
-        wasm_to_array_trampolines: Vec<(ModuleInternedTypeIndex, FunctionLoc)>,
-    ) -> Result<CompiledModuleInfo> {
+    pub fn append(&mut self, translation: ModuleTranslation<'_>) -> Result<CompiledModuleInfo> {
         let ModuleTranslation {
             mut module,
             debuginfo,
@@ -219,11 +213,8 @@ impl<'a> ObjectBuilder<'a> {
 
         Ok(CompiledModuleInfo {
             module,
-            funcs,
-            wasm_to_array_trampolines,
             func_names,
             meta: Metadata {
-                native_debug_info_present: self.tunables.generate_native_debuginfo,
                 has_unparsed_debuginfo,
                 code_section_offset: debuginfo.wasm_file.code_section_offset,
                 has_wasm_debuginfo: self.tunables.parse_wasm_debuginfo,
@@ -275,12 +266,16 @@ impl<'a> ObjectBuilder<'a> {
 
 /// A type which can be the result of serializing an object.
 pub trait FinishedObject: Sized {
+    /// State required for `finish_object`, if any.
+    type State;
+
     /// Emit the object as `Self`.
-    fn finish_object(obj: ObjectBuilder<'_>) -> Result<Self>;
+    fn finish_object(obj: ObjectBuilder<'_>, state: &Self::State) -> Result<Self>;
 }
 
 impl FinishedObject for Vec<u8> {
-    fn finish_object(obj: ObjectBuilder<'_>) -> Result<Self> {
+    type State = ();
+    fn finish_object(obj: ObjectBuilder<'_>, _state: &Self::State) -> Result<Self> {
         let mut result = ObjectVec::default();
         obj.finish(&mut result)?;
         return Ok(result.0);

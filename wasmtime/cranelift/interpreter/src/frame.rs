@@ -1,7 +1,7 @@
 //! Implements a call frame (activation record) for the Cranelift interpreter.
 
 use cranelift_codegen::data_value::DataValue;
-use cranelift_codegen::ir::{types, Function, Value as ValueRef};
+use cranelift_codegen::ir::{Function, Value as ValueRef, types};
 use cranelift_entity::EntityRef;
 use log::trace;
 
@@ -34,7 +34,7 @@ impl<'a> Frame<'a> {
     #[inline]
     pub fn get(&self, name: ValueRef) -> &DataValue {
         assert!(name.index() < self.registers.len());
-        trace!("Get {}", name);
+        trace!("Get {name}");
         &self
             .registers
             .get(name.index())
@@ -68,7 +68,7 @@ impl<'a> Frame<'a> {
     #[inline]
     pub fn set(&mut self, name: ValueRef, value: DataValue) -> Option<DataValue> {
         assert!(name.index() < self.registers.len());
-        trace!("Set {} -> {}", name, value);
+        trace!("Set {name} -> {value}");
         std::mem::replace(&mut self.registers[name.index()], Some(value))
     }
 
@@ -85,7 +85,7 @@ impl<'a> Frame<'a> {
     /// could be removed if we copied the values in the right order (i.e. when modifying in place,
     /// we need to avoid changing a value before it is referenced).
     pub fn rename(&mut self, old_names: &[ValueRef], new_names: &[ValueRef]) {
-        trace!("Renaming {:?} -> {:?}", old_names, new_names);
+        trace!("Renaming {old_names:?} -> {new_names:?}");
         assert_eq!(old_names.len(), new_names.len());
         let new_registers = vec![None; self.registers.len()];
         let mut old_registers = std::mem::replace(&mut self.registers, new_registers);
@@ -110,8 +110,8 @@ impl<'a> Frame<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
     use cranelift_codegen::ir::InstBuilder;
+    use cranelift_codegen::ir::immediates::{Ieee32, Ieee64};
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
     use cranelift_reader::parse_functions;
 

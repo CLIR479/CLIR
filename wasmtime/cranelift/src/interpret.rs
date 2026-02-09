@@ -5,7 +5,7 @@ use clap::Parser;
 use cranelift_interpreter::environment::FunctionStore;
 use cranelift_interpreter::interpreter::{Interpreter, InterpreterState};
 use cranelift_interpreter::step::ControlFlow;
-use cranelift_reader::{parse_run_command, parse_test, ParseError, ParseOptions};
+use cranelift_reader::{ParseError, ParseOptions, parse_run_command, parse_test};
 use std::path::PathBuf;
 use std::{fs, io};
 use thiserror::Error;
@@ -55,7 +55,7 @@ pub fn run(options: &Options) -> anyhow::Result<()> {
     match errors {
         0 => Ok(()),
         1 => anyhow::bail!("1 failure"),
-        n => anyhow::bail!("{} failures", n),
+        n => anyhow::bail!("{n} failures"),
     }
 }
 
@@ -126,6 +126,7 @@ impl FileInterpreter {
                     let state = InterpreterState::default().with_function_store(env.clone());
                     match Interpreter::new(state).call_by_name(func_name, args) {
                         Ok(ControlFlow::Return(results)) => Ok(results.to_vec()),
+                        Ok(ControlFlow::Trap(trap)) => Err(trap.to_string()),
                         Ok(_) => panic!("Unexpected returned control flow--this is likely a bug."),
                         Err(t) => Err(t.to_string()),
                     }

@@ -239,7 +239,7 @@ struct FuzzInput<'a> {
 /// and the module ends with a custom section indicating it's a fuzz input
 /// then the contents of the custom section are returned along with the
 /// contents of the original module.
-fn extract_fuzz_input(data: &[u8]) -> anyhow::Result<FuzzInput<'_>> {
+fn extract_fuzz_input(data: &[u8]) -> wasmtime::Result<FuzzInput<'_>> {
     use wasmparser::{Parser, Payload};
     let mut prev_end = 8;
     for section in Parser::new(0).parse_all(data) {
@@ -267,7 +267,7 @@ fn extract_fuzz_input(data: &[u8]) -> anyhow::Result<FuzzInput<'_>> {
             prev_end = range.end;
         }
     }
-    anyhow::bail!("no input found")
+    wasmtime::bail!("no input found")
 }
 
 #[cfg(test)]
@@ -300,7 +300,7 @@ mod tests {
         // should have been the same.
 
         let mut rng = SmallRng::seed_from_u64(0);
-        let max_size = 2048;
+        let max_size = 4096;
         let seed_size = 128;
         let mut buf = vec![0; max_size];
         let mut compares = 0;
@@ -311,10 +311,10 @@ mod tests {
             let mutate = mutate::<u32>;
             let run2 = run_config::<(u32, u32)>;
 
-            if let Ok((module, known_valid)) = execute(&buf[..seed_size], run1, gen) {
+            if let Ok((module, known_valid)) = execute(&buf[..seed_size], run1, generate) {
                 assert_eq!(known_valid, KnownValid::Yes);
-                let new_size = mutate(&mut buf, seed_size, max_size, gen, noop_mutate);
-                if let Ok((module2, known_valid)) = execute(&buf[..new_size], run2, gen) {
+                let new_size = mutate(&mut buf, seed_size, max_size, generate, noop_mutate);
+                if let Ok((module2, known_valid)) = execute(&buf[..new_size], run2, generate) {
                     assert_eq!(known_valid, KnownValid::No);
                     compares += 1;
                     if module != module2 {
@@ -340,7 +340,7 @@ mod tests {
             Ok((data.to_vec(), known_valid))
         }
 
-        fn gen<T>(_: &mut T, u: &mut Unstructured<'_>) -> Result<(Vec<u8>, KnownValid)>
+        fn generate<T>(_: &mut T, u: &mut Unstructured<'_>) -> Result<(Vec<u8>, KnownValid)>
         where
             T: for<'a> Arbitrary<'a>,
         {

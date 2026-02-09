@@ -1,11 +1,10 @@
 #![cfg(not(miri))]
-#![allow(dead_code)]
 
 use super::engine;
-use anyhow::Result;
+use wasmtime::Result;
 use wasmtime::{
+    Config, Engine, Store,
     component::{Component, Linker},
-    Store,
 };
 
 mod ownership;
@@ -13,6 +12,7 @@ mod results;
 
 mod no_imports {
     use super::*;
+    use std::rc::Rc;
 
     wasmtime::component::bindgen!({
         inline: "
@@ -54,12 +54,89 @@ mod no_imports {
         let no_imports = NoImports::instantiate(&mut store, &component, &linker)?;
         no_imports.call_bar(&mut store)?;
         no_imports.foo().call_foo(&mut store)?;
+
+        let linker = Linker::new(&engine);
+        let mut non_send_store = Store::new(&engine, Rc::new(()));
+        let no_imports = NoImports::instantiate(&mut non_send_store, &component, &linker)?;
+        no_imports.call_bar(&mut non_send_store)?;
+        no_imports.foo().call_foo(&mut non_send_store)?;
         Ok(())
+    }
+}
+
+mod no_imports_concurrent {
+    use super::*;
+    use futures::{
+        FutureExt,
+        stream::{FuturesUnordered, TryStreamExt},
+    };
+
+    wasmtime::component::bindgen!({
+        inline: "
+            package foo:foo;
+
+            world no-imports {
+                export foo: interface {
+                    foo: async func();
+                }
+
+                export bar: async func();
+            }
+        ",
+    });
+
+    #[tokio::test]
+    async fn run() -> Result<()> {
+        let mut config = Config::new();
+        config.wasm_component_model_async(true);
+        let engine = &Engine::new(&config)?;
+
+        let component = Component::new(
+            &engine,
+            r#"
+                (component
+                    (core module $m
+                        (import "" "task.return" (func $task-return))
+                        (func (export "bar") (result i32)
+                            call $task-return
+                            i32.const 0
+                        )
+                        (func (export "callback") (param i32 i32 i32) (result i32) unreachable)
+                    )
+                    (core func $task-return (canon task.return))
+                    (core instance $i (instantiate $m
+                        (with "" (instance (export "task.return" (func $task-return))))
+                    ))
+
+                    (func $f (export "bar")
+                        (canon lift (core func $i "bar") async (callback (func $i "callback")))
+                    )
+
+                    (instance $i (export "foo" (func $f)))
+                    (export "foo" (instance $i))
+                )
+            "#,
+        )?;
+
+        let linker = Linker::new(&engine);
+        let mut store = Store::new(&engine, ());
+        let no_imports = NoImports::instantiate_async(&mut store, &component, &linker).await?;
+        store
+            .run_concurrent(async move |accessor| {
+                let mut futures = FuturesUnordered::new();
+                futures.push(no_imports.call_bar(accessor).boxed());
+                futures.push(no_imports.foo().call_foo(accessor).boxed());
+                assert!(futures.try_next().await?.is_some());
+                assert!(futures.try_next().await?.is_some());
+                Ok(())
+            })
+            .await?
     }
 }
 
 mod one_import {
     use super::*;
+    use wasmtime::component::HasSelf;
 
     wasmtime::component::bindgen!({
         inline: "
@@ -112,7 +189,7 @@ mod one_import {
         }
 
         let mut linker = Linker::new(&engine);
-        foo::add_to_linker(&mut linker, |f: &mut MyImports| f)?;
+        foo::add_to_linker::<_, HasSelf<_>>(&mut linker, |f| f)?;
         let mut store = Store::new(&engine, MyImports::default());
         let one_import = OneImport::instantiate(&mut store, &component, &linker)?;
         one_import.call_bar(&mut store)?;
@@ -121,9 +198,103 @@ mod one_import {
     }
 }
 
+mod one_import_concurrent {
+    use super::*;
+    use wasmtime::component::{Accessor, HasData};
+
+    wasmtime::component::bindgen!({
+        inline: "
+            package foo:foo;
+
+            world no-imports {
+                import foo: interface {
+                    foo: async func();
+                }
+
+                export bar: async func();
+            }
+        "
+    });
+
+    #[tokio::test]
+    async fn run() -> Result<()> {
+        let mut config = Config::new();
+        config.wasm_component_model_async(true);
+        let engine = &Engine::new(&config)?;
+
+        let component = Component::new(
+            &engine,
+            r#"
+                (component
+                    (import "foo" (instance $foo-instance
+                        (export "foo" (func async))
+                    ))
+                    (core module $libc
+                        (memory (export "memory") 1)
+                    )
+                    (core instance $libc-instance (instantiate $libc))
+                    (core module $m
+                        (import "" "foo" (func $foo (param) (result i32)))
+                        (import "" "task.return" (func $task-return))
+                        (func (export "bar") (result i32)
+                            call $foo
+                            drop
+                            call $task-return
+                            i32.const 0
+                        )
+                        (func (export "callback") (param i32 i32 i32) (result i32) unreachable)
+                    )
+                    (core func $foo (canon lower (func $foo-instance "foo") async (memory $libc-instance "memory")))
+                    (core func $task-return (canon task.return))
+                    (core instance $i (instantiate $m
+                        (with "" (instance
+                            (export "task.return" (func $task-return))
+                            (export "foo" (func $foo))
+                        ))
+                    ))
+
+                    (func $f (export "bar") async
+                        (canon lift (core func $i "bar") async (callback (func $i "callback")))
+                    )
+
+                    (instance $i (export "foo" (func $f)))
+                    (export "foo" (instance $i))
+                )
+            "#,
+        )?;
+
+        #[derive(Default)]
+        struct MyImports {
+            hit: bool,
+        }
+
+        impl HasData for MyImports {
+            type Data<'a> = &'a mut MyImports;
+        }
+
+        impl foo::HostWithStore for MyImports {
+            async fn foo<T>(accessor: &Accessor<T, Self>) {
+                accessor.with(|mut view| view.get().hit = true);
+            }
+        }
+
+        impl foo::Host for MyImports {}
+
+        let mut linker = Linker::new(&engine);
+        foo::add_to_linker::<_, MyImports>(&mut linker, |x| x)?;
+        let mut store = Store::new(&engine, MyImports::default());
+        let no_imports = NoImports::instantiate_async(&mut store, &component, &linker).await?;
+        store
+            .run_concurrent(async move |accessor| no_imports.call_bar(accessor).await)
+            .await??;
+        assert!(store.data().hit);
+        Ok(())
+    }
+}
+
 mod resources_at_world_level {
     use super::*;
-    use wasmtime::component::Resource;
+    use wasmtime::component::{HasSelf, Resource};
 
     wasmtime::component::bindgen!({
         inline: "
@@ -200,7 +371,7 @@ mod resources_at_world_level {
         impl ResourcesImports for MyImports {}
 
         let mut linker = Linker::new(&engine);
-        Resources::add_to_linker(&mut linker, |f: &mut MyImports| f)?;
+        Resources::add_to_linker::<_, HasSelf<_>>(&mut linker, |f| f)?;
         let mut store = Store::new(&engine, MyImports::default());
         let one_import = Resources::instantiate(&mut store, &component, &linker)?;
         one_import.call_y(&mut store, Resource::new_own(40))?;
@@ -212,7 +383,7 @@ mod resources_at_world_level {
 
 mod resources_at_interface_level {
     use super::*;
-    use wasmtime::component::Resource;
+    use wasmtime::component::{HasSelf, Resource};
 
     wasmtime::component::bindgen!({
         inline: "
@@ -245,7 +416,7 @@ mod resources_at_interface_level {
             r#"
                 (component
                     (import (interface "foo:foo/def") (instance $i
-                        (export $x "x" (type (sub resource)))
+                        (export "x" (type $x (sub resource)))
                         (export "[constructor]x" (func (result (own $x))))
                     ))
                     (alias export $i "x" (type $x))
@@ -305,7 +476,7 @@ mod resources_at_interface_level {
         impl foo::foo::def::Host for MyImports {}
 
         let mut linker = Linker::new(&engine);
-        Resources::add_to_linker(&mut linker, |f: &mut MyImports| f)?;
+        Resources::add_to_linker::<_, HasSelf<_>>(&mut linker, |f| f)?;
         let mut store = Store::new(&engine, MyImports::default());
         let one_import = Resources::instantiate(&mut store, &component, &linker)?;
         one_import
@@ -333,12 +504,13 @@ mod async_config {
                 export z: func();
             }
         ",
-        async: true,
+        imports: { default: async },
+        exports: { default: async },
     });
 
+    #[expect(dead_code, reason = "just here for bindings")]
     struct T;
 
-    #[async_trait::async_trait]
     impl T1Imports for T {
         async fn x(&mut self) {}
 
@@ -359,12 +531,13 @@ mod async_config {
                 export z: func();
             }
         ",
-        async: {
-            except_imports: ["x"],
+        imports: {
+            "x": tracing,
+            default: async,
         },
+        exports: { default: async },
     });
 
-    #[async_trait::async_trait]
     impl T2Imports for T {
         fn x(&mut self) {}
 
@@ -385,12 +558,10 @@ mod async_config {
                 export z: func();
             }
         ",
-        async: {
-            only_imports: ["x"],
-        },
+        imports: { "x": async },
+        exports: { default: async },
     });
 
-    #[async_trait::async_trait]
     impl T3Imports for T {
         async fn x(&mut self) {}
 
@@ -405,7 +576,7 @@ mod async_config {
 mod exported_resources {
     use super::*;
     use std::mem;
-    use wasmtime::component::Resource;
+    use wasmtime::component::{HasSelf, Resource};
 
     wasmtime::component::bindgen!({
         inline: "
@@ -484,7 +655,7 @@ mod exported_resources {
 (component
   ;; setup the `foo:foo/a` import
   (import (interface "foo:foo/a") (instance $a
-    (export $x "x" (type (sub resource)))
+    (export "x" (type $x (sub resource)))
     (export "[constructor]x" (func (result (own $x))))
   ))
   (alias export $a "x" (type $a-x))
@@ -594,7 +765,7 @@ mod exported_resources {
         )?;
 
         let mut linker = Linker::new(&engine);
-        Resources::add_to_linker(&mut linker, |f: &mut MyImports| f)?;
+        Resources::add_to_linker::<_, HasSelf<_>>(&mut linker, |f| f)?;
         let mut store = Store::new(&engine, MyImports::default());
         let i = Resources::instantiate(&mut store, &component, &linker)?;
 
@@ -626,6 +797,207 @@ mod exported_resources {
             mem::take(&mut store.data_mut().hostcalls),
             [Hostcall::DropAX(0)],
         );
+        Ok(())
+    }
+}
+
+mod unstable_import {
+    use super::*;
+    use wasmtime::component::HasSelf;
+
+    wasmtime::component::bindgen!({
+        inline: "
+            package foo:foo;
+
+            @unstable(feature = experimental-interface)
+            interface my-interface {
+                @unstable(feature = experimental-function)
+                my-function: func();
+            }
+
+            world my-world {
+                @unstable(feature = experimental-import)
+                import my-interface;
+
+                export bar: func();
+            }
+        ",
+    });
+
+    #[test]
+    fn run() -> Result<()> {
+        // In the example above, all features are required for `my-function` to be imported:
+        assert_success(
+            LinkOptions::default()
+                .experimental_interface(true)
+                .experimental_import(true)
+                .experimental_function(true),
+        );
+
+        // And every other incomplete combination should fail:
+        assert_failure(&LinkOptions::default());
+        assert_failure(LinkOptions::default().experimental_function(true));
+        assert_failure(LinkOptions::default().experimental_interface(true));
+        assert_failure(
+            LinkOptions::default()
+                .experimental_interface(true)
+                .experimental_function(true),
+        );
+        assert_failure(
+            LinkOptions::default()
+                .experimental_interface(true)
+                .experimental_import(true),
+        );
+        assert_failure(LinkOptions::default().experimental_import(true));
+        assert_failure(
+            LinkOptions::default()
+                .experimental_import(true)
+                .experimental_function(true),
+        );
+
+        Ok(())
+    }
+
+    fn assert_success(link_options: &LinkOptions) {
+        run_with_options(link_options).unwrap();
+    }
+    fn assert_failure(link_options: &LinkOptions) {
+        let err = run_with_options(link_options).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "component imports instance `foo:foo/my-interface`, but a matching implementation was not found in the linker"
+        );
+    }
+
+    fn run_with_options(link_options: &LinkOptions) -> Result<()> {
+        let engine = engine();
+
+        let component = Component::new(
+            &engine,
+            r#"
+                (component
+                    (import "foo:foo/my-interface" (instance $i
+                        (export "my-function" (func))
+                    ))
+                    (core module $m
+                        (import "" "" (func))
+                        (export "" (func 0))
+                    )
+                    (core func $f (canon lower (func $i "my-function")))
+                    (core instance $r (instantiate $m
+                        (with "" (instance (export "" (func $f))))
+                    ))
+
+                    (func $f (export "bar") (canon lift (core func $r "")))
+                )
+            "#,
+        )?;
+
+        #[derive(Default)]
+        struct MyHost;
+
+        impl foo::foo::my_interface::Host for MyHost {
+            fn my_function(&mut self) {}
+        }
+
+        let mut linker = Linker::new(&engine);
+        MyWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, link_options, |h| h)?;
+        let mut store = Store::new(&engine, MyHost::default());
+        let one_import = MyWorld::instantiate(&mut store, &component, &linker)?;
+        one_import.call_bar(&mut store)?;
+        Ok(())
+    }
+}
+
+mod anyhow_errors {
+    use super::*;
+    use crate::ErrorExt;
+    use wasmtime::component::HasSelf;
+    use wasmtime::error::Context as _;
+
+    wasmtime::component::bindgen!({
+        anyhow: true,
+        imports: { default: trappable },
+        inline: "
+            package foo:foo;
+
+            interface my-interface {
+                ok: func() -> u32;
+                trap: func() -> u32;
+            }
+
+            world my-world {
+                import my-interface;
+                export ok: func() -> u32;
+                export trap: func() -> u32;
+            }
+        ",
+    });
+
+    #[test]
+    fn run() -> Result<()> {
+        let engine = engine();
+
+        let component = Component::new(
+            &engine,
+            r#"
+                (component
+                    (import "foo:foo/my-interface" (instance $i
+                        (export "ok" (func (result u32)))
+                        (export "trap" (func (result u32)))
+                    ))
+
+                    (core module $m
+                        (import "" "ok" (func (result i32)))
+                        (import "" "trap" (func (result i32)))
+                        (export "ok" (func 0))
+                        (export "trap" (func 1))
+                    )
+
+                    (core func $ok (canon lower (func $i "ok")))
+                    (core func $trap (canon lower (func $i "trap")))
+
+                    (core instance $r (instantiate $m
+                        (with "" (instance (export "ok" (func $ok))
+                                           (export "trap" (func $trap))))
+                    ))
+
+                    (func (export "ok") (result u32) (canon lift (core func $r "ok")))
+                    (func (export "trap") (result u32) (canon lift (core func $r "trap")))
+                )
+            "#,
+        )?;
+
+        #[derive(Default)]
+        struct MyHost;
+
+        impl foo::foo::my_interface::Host for MyHost {
+            // NB: these must return an `anyhow::Result` since we `bindgen!`ed
+            // with `anyhow: true`.
+            fn ok(&mut self) -> anyhow_for_testing::Result<u32> {
+                Ok(42)
+            }
+            fn trap(&mut self) -> anyhow_for_testing::Result<u32> {
+                anyhow_for_testing::bail!("anyhow error")
+            }
+        }
+
+        let mut linker = Linker::new(&engine);
+        MyWorld::add_to_linker::<_, HasSelf<_>>(&mut linker, |h| h)
+            .context("failed to add to linker")?;
+        let mut store = Store::new(&engine, MyHost::default());
+        let instance = MyWorld::instantiate(&mut store, &component, &linker)
+            .context("failed to instantiate")?;
+
+        let x = instance
+            .call_ok(&mut store)
+            .context("failed to call `ok` function")?;
+        assert_eq!(x, 42);
+
+        let result = instance.call_trap(&mut store);
+        let error = result.unwrap_err();
+        error.assert_contains("anyhow error");
+
         Ok(())
     }
 }

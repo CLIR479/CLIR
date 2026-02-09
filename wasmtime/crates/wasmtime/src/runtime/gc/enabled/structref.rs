@@ -1,17 +1,19 @@
 //! Working with GC `struct` objects.
 
 use crate::runtime::vm::VMGcRef;
-use crate::store::StoreId;
-use crate::vm::{GcLayout, GcStructLayout, VMGcHeader, VMStructRef};
-use crate::{
-    prelude::*,
-    store::{AutoAssertNoGc, StoreContextMut, StoreOpaque},
-    AsContext, AsContextMut, GcHeapOutOfMemory, GcRefImpl, GcRootIndex, HeapType, ManuallyRooted,
-    RefType, Rooted, StructType, Val, ValRaw, ValType, WasmTy,
-};
+use crate::store::{Asyncness, StoreId};
+#[cfg(feature = "async")]
+use crate::vm::VMStore;
+use crate::vm::{self, VMGcHeader, VMStructRef};
 use crate::{AnyRef, FieldType};
+use crate::{
+    AsContext, AsContextMut, EqRef, GcHeapOutOfMemory, GcRefImpl, GcRootIndex, HeapType,
+    OwnedRooted, RefType, Rooted, StructType, Val, ValRaw, ValType, WasmTy,
+    prelude::*,
+    store::{AutoAssertNoGc, StoreContextMut, StoreOpaque, StoreResourceLimiter},
+};
 use core::mem::{self, MaybeUninit};
-use wasmtime_environ::{VMGcKind, VMSharedTypeIndex};
+use wasmtime_environ::{GcLayout, GcStructLayout, VMGcKind, VMSharedTypeIndex};
 
 /// An allocator for a particular Wasm GC struct type.
 ///
@@ -103,7 +105,7 @@ impl StructRefPre {
 /// the host into dereferencing it and segfaulting or worse.
 ///
 /// Note that you can also use `Rooted<StructRef>` and
-/// `ManuallyRooted<StructRef>` as a type parameter with
+/// `OwnedRooted<StructRef>` as a type parameter with
 /// [`Func::typed`][crate::Func::typed]- and
 /// [`Func::wrap`][crate::Func::wrap]-style APIs.
 ///
@@ -133,18 +135,7 @@ impl StructRefPre {
 ///     let mut scope = RootScope::new(&mut store);
 ///
 ///     // Allocate an instance of the struct type.
-///     let my_struct = match StructRef::new(&mut scope, &allocator, &[Val::I32(42)]) {
-///         Ok(s) => s,
-///         // If the heap is out of memory, then do a GC and try again.
-///         Err(e) if e.is::<GcHeapOutOfMemory<()>>() => {
-///             // Do a GC! Note: in an async context, you'd want to do
-///             // `scope.as_context_mut().gc_async().await`.
-///             scope.as_context_mut().gc();
-///
-///             StructRef::new(&mut scope, &allocator, &[Val::I32(42)])?
-///         }
-///         Err(e) => return Err(e),
-///     };
+///     let my_struct = StructRef::new(&mut scope, &allocator, &[Val::I32(42)])?;
 ///
 ///     // That instance's field should have the expected value.
 ///     let val = my_struct.field(&mut scope, 0)?.unwrap_i32();
@@ -166,7 +157,6 @@ pub struct StructRef {
 }
 
 unsafe impl GcRefImpl for StructRef {
-    #[allow(private_interfaces)]
     fn transmute_ref(index: &GcRootIndex) -> &Self {
         // Safety: `StructRef` is a newtype of a `GcRootIndex`.
         let me: &Self = unsafe { mem::transmute(index) };
@@ -189,18 +179,36 @@ impl Rooted<StructRef> {
     pub fn to_anyref(self) -> Rooted<AnyRef> {
         self.unchecked_cast()
     }
+
+    /// Upcast this `structref` into an `eqref`.
+    #[inline]
+    pub fn to_eqref(self) -> Rooted<EqRef> {
+        self.unchecked_cast()
+    }
 }
 
-impl ManuallyRooted<StructRef> {
+impl OwnedRooted<StructRef> {
     /// Upcast this `structref` into an `anyref`.
     #[inline]
-    pub fn to_anyref(self) -> ManuallyRooted<AnyRef> {
+    pub fn to_anyref(self) -> OwnedRooted<AnyRef> {
+        self.unchecked_cast()
+    }
+
+    /// Upcast this `structref` into an `eqref`.
+    #[inline]
+    pub fn to_eqref(self) -> OwnedRooted<EqRef> {
         self.unchecked_cast()
     }
 }
 
 impl StructRef {
-    /// Allocate a new `struct` and get a reference to it.
+    /// Synchronously allocate a new `struct` and get a reference to it.
+    ///
+    /// # Automatic Garbage Collection
+    ///
+    /// If the GC heap is at capacity, and there isn't room for allocating this
+    /// new struct, then this method will automatically trigger a synchronous
+    /// collection in an attempt to free up space in the GC heap.
     ///
     /// # Errors
     ///
@@ -208,9 +216,14 @@ impl StructRef {
     /// `allocator`'s struct type, an error is returned.
     ///
     /// If the allocation cannot be satisfied because the GC heap is currently
-    /// out of memory, but performing a garbage collection might free up space
-    /// such that retrying the allocation afterwards might succeed, then a
-    /// [`GcHeapOutOfMemory<()>`][crate::GcHeapOutOfMemory] error is returned.
+    /// out of memory, then a [`GcHeapOutOfMemory<()>`][crate::GcHeapOutOfMemory]
+    /// error is returned. The allocation might succeed on a second attempt if
+    /// you drop some rooted GC references and try again.
+    ///
+    /// If `store` is configured with a
+    /// [`ResourceLimiterAsync`](crate::ResourceLimiterAsync) then an error
+    /// will be returned because [`StructRef::new_async`] should be used
+    /// instead.
     ///
     /// # Panics
     ///
@@ -221,21 +234,72 @@ impl StructRef {
         allocator: &StructRefPre,
         fields: &[Val],
     ) -> Result<Rooted<StructRef>> {
-        Self::_new(store.as_context_mut().0, allocator, fields)
+        let (mut limiter, store) = store
+            .as_context_mut()
+            .0
+            .validate_sync_resource_limiter_and_store_opaque()?;
+        vm::assert_ready(Self::_new_async(
+            store,
+            limiter.as_mut(),
+            allocator,
+            fields,
+            Asyncness::No,
+        ))
     }
 
-    pub(crate) fn _new(
-        store: &mut StoreOpaque,
+    /// Asynchronously allocate a new `struct` and get a reference to it.
+    ///
+    /// # Automatic Garbage Collection
+    ///
+    /// If the GC heap is at capacity, and there isn't room for allocating this
+    /// new struct, then this method will automatically trigger a synchronous
+    /// collection in an attempt to free up space in the GC heap.
+    ///
+    /// # Errors
+    ///
+    /// If the given `fields` values' types do not match the field types of the
+    /// `allocator`'s struct type, an error is returned.
+    ///
+    /// If the allocation cannot be satisfied because the GC heap is currently
+    /// out of memory, then a [`GcHeapOutOfMemory<()>`][crate::GcHeapOutOfMemory]
+    /// error is returned. The allocation might succeed on a second attempt if
+    /// you drop some rooted GC references and try again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the allocator, or any of the field values, is not associated
+    /// with the given store.
+    #[cfg(feature = "async")]
+    pub async fn new_async(
+        mut store: impl AsContextMut,
         allocator: &StructRefPre,
         fields: &[Val],
     ) -> Result<Rooted<StructRef>> {
-        assert_eq!(
-            store.id(),
-            allocator.store_id,
-            "attempted to use a `StructRefPre` with the wrong store"
-        );
+        let (mut limiter, store) = store.as_context_mut().0.resource_limiter_and_store_opaque();
+        Self::_new_async(store, limiter.as_mut(), allocator, fields, Asyncness::Yes).await
+    }
 
-        // Type check the given values against the field types.
+    pub(crate) async fn _new_async(
+        store: &mut StoreOpaque,
+        limiter: Option<&mut StoreResourceLimiter<'_>>,
+        allocator: &StructRefPre,
+        fields: &[Val],
+        asyncness: Asyncness,
+    ) -> Result<Rooted<StructRef>> {
+        Self::type_check_fields(store, allocator, fields)?;
+        store
+            .retry_after_gc_async(limiter, (), asyncness, |store, ()| {
+                Self::new_unchecked(store, allocator, fields)
+            })
+            .await
+    }
+
+    /// Type check the field values before allocating a new struct.
+    fn type_check_fields(
+        store: &mut StoreOpaque,
+        allocator: &StructRefPre,
+        fields: &[Val],
+    ) -> Result<(), Error> {
         let expected_len = allocator.ty.fields().len();
         let actual_len = fields.len();
         ensure!(
@@ -251,16 +315,31 @@ impl StructRef {
             val.ensure_matches_ty(store, ty)
                 .context("field type mismatch")?;
         }
+        Ok(())
+    }
+
+    /// Given that the field values have already been type checked, allocate a
+    /// new struct.
+    ///
+    /// Does not attempt GC+retry on OOM, that is the caller's responsibility.
+    fn new_unchecked(
+        store: &mut StoreOpaque,
+        allocator: &StructRefPre,
+        fields: &[Val],
+    ) -> Result<Rooted<StructRef>> {
+        assert_eq!(
+            store.id(),
+            allocator.store_id,
+            "attempted to use a `StructRefPre` with the wrong store"
+        );
 
         // Allocate the struct and write each field value into the appropriate
         // offset.
         let structref = store
-            .gc_store_mut()?
+            .require_gc_store_mut()?
             .alloc_uninit_struct(allocator.type_index(), &allocator.layout())
-            .err2anyhow()
             .context("unrecoverable error when allocating new `structref`")?
-            .ok_or_else(|| GcHeapOutOfMemory::new(()))
-            .err2anyhow()?;
+            .map_err(|n| GcHeapOutOfMemory::new((), n))?;
 
         // From this point on, if we get any errors, then the struct is not
         // fully initialized, so we need to eagerly deallocate it before the
@@ -281,7 +360,9 @@ impl StructRef {
         })() {
             Ok(()) => Ok(Rooted::new(&mut store, structref.into())),
             Err(e) => {
-                store.gc_store_mut()?.dealloc_uninit_struct(structref);
+                store
+                    .require_gc_store_mut()?
+                    .dealloc_uninit_struct(structref);
                 Err(e)
             }
         }
@@ -356,7 +437,7 @@ impl StructRef {
     /// # Panics
     ///
     /// Panics if this reference is associated with a different store.
-    pub fn fields<'a, T: 'a>(
+    pub fn fields<'a, T: 'static>(
         &'a self,
         store: impl Into<StoreContextMut<'a, T>>,
     ) -> Result<impl ExactSizeIterator<Item = Val> + 'a> {
@@ -371,7 +452,7 @@ impl StructRef {
         let store = AutoAssertNoGc::new(store);
 
         let gc_ref = self.inner.try_gc_ref(&store)?;
-        let header = store.gc_store()?.header(gc_ref);
+        let header = store.require_gc_store()?.header(gc_ref);
         debug_assert!(header.kind().matches(VMGcKind::StructRef));
 
         let index = header.ty().expect("structrefs should have concrete types");
@@ -424,7 +505,7 @@ impl StructRef {
     fn header<'a>(&self, store: &'a AutoAssertNoGc<'_>) -> Result<&'a VMGcHeader> {
         assert!(self.comes_from_same_store(&store));
         let gc_ref = self.inner.try_gc_ref(store)?;
-        Ok(store.gc_store()?.header(gc_ref))
+        Ok(store.require_gc_store()?.header(gc_ref))
     }
 
     fn structref<'a>(&self, store: &'a AutoAssertNoGc<'_>) -> Result<&'a VMStructRef> {
@@ -535,7 +616,7 @@ impl StructRef {
 
     pub(crate) fn type_index(&self, store: &StoreOpaque) -> Result<VMSharedTypeIndex> {
         let gc_ref = self.inner.try_gc_ref(store)?;
-        let header = store.gc_store()?.header(gc_ref);
+        let header = store.require_gc_store()?.header(gc_ref);
         debug_assert!(header.kind().matches(VMGcKind::StructRef));
         Ok(header.ty().expect("structrefs should have concrete types"))
     }
@@ -549,7 +630,7 @@ impl StructRef {
         store: &mut AutoAssertNoGc<'_>,
         gc_ref: VMGcRef,
     ) -> Rooted<Self> {
-        debug_assert!(!gc_ref.is_i31());
+        debug_assert!(gc_ref.is_structref(&*store.unwrap_gc_store().gc_heap));
         Rooted::new(store, gc_ref)
     }
 }
@@ -584,7 +665,13 @@ unsafe impl WasmTy for Rooted<StructRef> {
             | HeapType::I31
             | HeapType::Array
             | HeapType::ConcreteArray(_)
-            | HeapType::None => bail!(
+            | HeapType::None
+            | HeapType::NoCont
+            | HeapType::Cont
+            | HeapType::ConcreteCont(_)
+            | HeapType::NoExn
+            | HeapType::Exn
+            | HeapType::ConcreteExn(_) => bail!(
                 "type mismatch: expected `(ref {ty})`, got `(ref {})`",
                 self._ty(store)?,
             ),
@@ -648,7 +735,7 @@ unsafe impl WasmTy for Option<Rooted<StructRef>> {
     }
 }
 
-unsafe impl WasmTy for ManuallyRooted<StructRef> {
+unsafe impl WasmTy for OwnedRooted<StructRef> {
     #[inline]
     fn valtype() -> ValType {
         ValType::Ref(RefType::new(false, HeapType::Struct))
@@ -678,7 +765,13 @@ unsafe impl WasmTy for ManuallyRooted<StructRef> {
             | HeapType::I31
             | HeapType::Array
             | HeapType::ConcreteArray(_)
-            | HeapType::None => bail!(
+            | HeapType::None
+            | HeapType::NoCont
+            | HeapType::Cont
+            | HeapType::ConcreteCont(_)
+            | HeapType::NoExn
+            | HeapType::Exn
+            | HeapType::ConcreteExn(_) => bail!(
                 "type mismatch: expected `(ref {ty})`, got `(ref {})`",
                 self._ty(store)?,
             ),
@@ -694,7 +787,7 @@ unsafe impl WasmTy for ManuallyRooted<StructRef> {
     }
 }
 
-unsafe impl WasmTy for Option<ManuallyRooted<StructRef>> {
+unsafe impl WasmTy for Option<OwnedRooted<StructRef>> {
     #[inline]
     fn valtype() -> ValType {
         ValType::STRUCTREF
@@ -715,7 +808,7 @@ unsafe impl WasmTy for Option<ManuallyRooted<StructRef>> {
     ) -> Result<()> {
         match self {
             Some(s) => {
-                ManuallyRooted::<StructRef>::dynamic_concrete_type_check(s, store, nullable, ty)
+                OwnedRooted::<StructRef>::dynamic_concrete_type_check(s, store, nullable, ty)
             }
             None => {
                 ensure!(
@@ -733,11 +826,11 @@ unsafe impl WasmTy for Option<ManuallyRooted<StructRef>> {
     }
 
     fn store(self, store: &mut AutoAssertNoGc<'_>, ptr: &mut MaybeUninit<ValRaw>) -> Result<()> {
-        <ManuallyRooted<StructRef>>::wasm_ty_option_store(self, store, ptr, ValRaw::anyref)
+        <OwnedRooted<StructRef>>::wasm_ty_option_store(self, store, ptr, ValRaw::anyref)
     }
 
     unsafe fn load(store: &mut AutoAssertNoGc<'_>, ptr: &ValRaw) -> Self {
-        <ManuallyRooted<StructRef>>::wasm_ty_option_load(
+        <OwnedRooted<StructRef>>::wasm_ty_option_load(
             store,
             ptr.get_anyref(),
             StructRef::from_cloned_gc_ref,

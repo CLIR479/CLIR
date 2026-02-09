@@ -1,16 +1,13 @@
 //! The module that implements the `wasmtime compile` command.
 
-use anyhow::{bail, Context, Result};
 use clap::Parser;
-use once_cell::sync::Lazy;
 use std::fs;
 use std::path::PathBuf;
-use wasmtime::{CodeBuilder, CodeHint, Engine};
+use wasmtime::{CodeBuilder, CodeHint, Engine, Result, bail, error::Context as _};
 use wasmtime_cli_flags::CommonOptions;
 
-static AFTER_HELP: Lazy<String> = Lazy::new(|| {
-    format!(
-        "By default, no CPU features or presets will be enabled for the compilation.\n\
+const AFTER_HELP: &str =
+    "By default, no CPU features or presets will be enabled for the compilation.\n\
         \n\
         Usage examples:\n\
         \n\
@@ -24,24 +21,18 @@ static AFTER_HELP: Lazy<String> = Lazy::new(|| {
         \n\
         Compiling for a specific platform (Linux) and CPU preset (Skylake):\n\
         \n  \
-        wasmtime compile --target x86_64-unknown-linux -Ccranelift-skylake foo.wasm\n",
-    )
-});
+        wasmtime compile --target x86_64-unknown-linux -Ccranelift-skylake foo.wasm\n";
 
 /// Compiles a WebAssembly module.
-#[derive(Parser, PartialEq)]
+#[derive(Parser)]
 #[command(
     version,
-    after_help = AFTER_HELP.as_str()
+    after_help = AFTER_HELP,
 )]
 pub struct CompileCommand {
     #[command(flatten)]
-    #[allow(missing_docs)]
+    #[expect(missing_docs, reason = "don't want to mess with clap doc-strings")]
     pub common: CommonOptions,
-
-    /// The target triple; default is the host triple
-    #[arg(long, value_name = "TARGET")]
-    pub target: Option<String>,
 
     /// The path of the output compiled module; defaults to `<MODULE>.cwasm`
     #[arg(short = 'o', long, value_name = "OUTPUT")]
@@ -61,7 +52,7 @@ impl CompileCommand {
     pub fn execute(mut self) -> Result<()> {
         self.common.init_logging()?;
 
-        let mut config = self.common.config(self.target.as_deref(), None)?;
+        let mut config = self.common.config(None)?;
 
         if let Some(path) = self.emit_clif {
             if !path.exists() {

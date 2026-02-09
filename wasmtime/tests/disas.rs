@@ -39,26 +39,38 @@
 //! at the start of the file. These comments are then parsed as TOML and
 //! deserialized into `TestConfig` in this crate.
 
-use anyhow::{bail, Context, Result};
 use clap::Parser;
-use cranelift_codegen::ir::{Function, UserExternalName, UserFuncName};
-use cranelift_codegen::isa::{lookup_by_name, TargetIsa};
-use cranelift_codegen::settings::{Configurable, Flags, SetError};
+use cranelift_codegen::ir::Function;
 use libtest_mimic::{Arguments, Trial};
-use serde::de::DeserializeOwned;
 use serde_derive::Deserialize;
 use similar::TextDiff;
-use std::fmt::Write;
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::process::Stdio;
 use tempfile::TempDir;
-use wasmtime::{Engine, OptLevel, Strategy};
+use wasmtime::{
+    CodeBuilder, CodeHint, Engine, OptLevel, Result, Strategy, bail, error::Context as _,
+};
 use wasmtime_cli_flags::CommonOptions;
 
 fn main() -> Result<()> {
-    if cfg!(miri) {
+    if cfg!(miri) || cfg!(asan) {
         return Ok(());
     }
+
+    // There's not a ton of use in emulating these tests on other architectures
+    // since they only exercise architecture-independent code of compiling to
+    // multiple architectures. Additionally CI seems to occasionally deadlock or
+    // get stuck in these tests when using QEMU, and it's not entirely clear
+    // why. Finally QEMU-emulating these tests is relatively slow and without
+    // much benefit from emulation it's hard to justify this. In the end disable
+    // this test suite when QEMU is enabled.
+    if std::env::var("WASMTIME_TEST_NO_HOG_MEMORY").is_ok() {
+        return Ok(());
+    }
+
+    let _ = env_logger::try_init();
 
     let mut tests = Vec::new();
     find_tests("./tests/disas".as_ref(), &mut tests)?;
@@ -99,9 +111,8 @@ fn find_tests(path: &Path, dst: &mut Vec<PathBuf>) -> Result<()> {
 fn run_test(path: &Path) -> Result<()> {
     let mut test = Test::new(path)?;
     let output = test.compile()?;
-    let isa = test.build_target_isa()?;
 
-    assert_output(&test.path, &test.contents, &*isa, test.config.test, output)?;
+    assert_output(&test, output)?;
 
     Ok(())
 }
@@ -112,6 +123,9 @@ struct TestConfig {
     #[serde(default)]
     test: TestKind,
     flags: Option<TestConfigFlags>,
+    objdump: Option<TestConfigFlags>,
+    filter: Option<String>,
+    unsafe_intrinsics: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,6 +133,15 @@ struct TestConfig {
 enum TestConfigFlags {
     SpaceSeparated(String),
     List(Vec<String>),
+}
+
+impl TestConfigFlags {
+    fn to_vec(&self) -> Vec<&str> {
+        match self {
+            TestConfigFlags::SpaceSeparated(s) => s.split_whitespace().collect(),
+            TestConfigFlags::List(s) => s.iter().map(|s| s.as_str()).collect(),
+        }
+    }
 }
 
 struct Test {
@@ -149,15 +172,14 @@ impl Test {
     fn new(path: &Path) -> Result<Test> {
         let contents =
             std::fs::read_to_string(path).with_context(|| format!("failed to read {path:?}"))?;
-        let config: TestConfig = Test::parse_test_config(&contents)
+        let config: TestConfig = wasmtime_test_util::wast::parse_test_config(&contents, ";;!")
             .context("failed to parse test configuration as TOML")?;
         let mut flags = vec!["wasmtime"];
-        match &config.flags {
-            Some(TestConfigFlags::SpaceSeparated(s)) => flags.extend(s.split_whitespace()),
-            Some(TestConfigFlags::List(s)) => flags.extend(s.iter().map(|s| s.as_str())),
-            None => {}
+        if let Some(config) = &config.flags {
+            flags.extend(config.to_vec());
         }
-        let opts = wasmtime_cli_flags::CommonOptions::try_parse_from(&flags)?;
+        let mut opts = wasmtime_cli_flags::CommonOptions::try_parse_from(&flags)?;
+        opts.codegen.cranelift_debug_verifier = Some(true);
 
         Ok(Test {
             path: path.to_path_buf(),
@@ -167,32 +189,19 @@ impl Test {
         })
     }
 
-    /// Parse test configuration from the specified test, comments starting with
-    /// `;;!`.
-    fn parse_test_config<T>(wat: &str) -> Result<T>
-    where
-        T: DeserializeOwned,
-    {
-        // The test config source is the leading lines of the WAT file that are
-        // prefixed with `;;!`.
-        let config_lines: Vec<_> = wat
-            .lines()
-            .take_while(|l| l.starts_with(";;!"))
-            .map(|l| &l[3..])
-            .collect();
-        let config_text = config_lines.join("\n");
-
-        toml::from_str(&config_text).context("failed to parse the test configuration")
-    }
-
     /// Generates CLIF for all the wasm functions in this test.
     fn compile(&mut self) -> Result<CompileOutput> {
         // Use wasmtime::Config with its `emit_clif` option to get Wasmtime's
         // code generator to jettison CLIF out the back.
         let tempdir = TempDir::new().context("failed to make a tempdir")?;
-        let mut config = self.opts.config(Some(&self.config.target), None)?;
+        let mut config = self.opts.config(None)?;
+        config.target(&self.config.target)?;
         match self.config.test {
-            TestKind::Clif | TestKind::Optimize => {
+            TestKind::Clif => {
+                config.emit_clif(tempdir.path());
+                config.cranelift_opt_level(OptLevel::None);
+            }
+            TestKind::Optimize => {
                 config.emit_clif(tempdir.path());
             }
             TestKind::Compile => {}
@@ -201,23 +210,52 @@ impl Test {
             }
         }
         let engine = Engine::new(&config).context("failed to create engine")?;
-        let module = wat::parse_file(&self.path)?;
-        let elf = engine
-            .precompile_module(&module)
-            .context("failed to compile module")?;
+
+        let mut builder = CodeBuilder::new(&engine);
+        builder.wasm_binary_or_text_file(&self.path)?;
+        if let Some(name) = self.config.unsafe_intrinsics.as_deref() {
+            unsafe {
+                builder.expose_unsafe_intrinsics(name);
+            }
+        }
+
+        let elf = match builder.hint() {
+            Some(CodeHint::Component) => builder
+                .compile_component_serialized()
+                .context("failed to compile component")?,
+            Some(CodeHint::Module) => builder
+                .compile_module_serialized()
+                .context("failed to compile module")?,
+            None => bail!(
+                "contents of `{}` do not look like a Wasm component or module",
+                self.path.display()
+            ),
+        };
 
         match self.config.test {
             TestKind::Clif | TestKind::Optimize => {
                 // Read all `*.clif` files from the clif directory that the
                 // compilation process just emitted.
                 let mut clifs = Vec::new();
-                for entry in tempdir
+
+                // Sort entries for determinism; multiple wasm modules can
+                // generate clif functions with the same names, so sorting the
+                // resulting clif functions alone isn't good enough.
+                let mut entries = tempdir
                     .path()
                     .read_dir()
                     .context("failed to read tempdir")?
-                {
-                    let entry = entry.context("failed to iterate over tempdir")?;
-                    let path = entry.path();
+                    .map(|e| Ok(e.context("failed to iterate over tempdir")?.path()))
+                    .collect::<Result<Vec<_>>>()?;
+                entries.sort();
+
+                for path in entries {
+                    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                        let filter = self.config.filter.as_deref().unwrap_or("wasm[0]--function");
+                        if !name.contains(filter) {
+                            continue;
+                        }
+                    }
                     let clif = std::fs::read_to_string(&path)
                         .with_context(|| format!("failed to read clif file {path:?}"))?;
                     clifs.push(clif);
@@ -225,56 +263,24 @@ impl Test {
 
                 // Parse the text format CLIF which is emitted by Wasmtime back
                 // into in-memory data structures.
-                let mut functions = clifs
+                let functions = clifs
                     .iter()
                     .map(|clif| {
-                        let mut funcs = cranelift_reader::parse_functions(clif)?;
+                        let mut funcs =
+                            cranelift_reader::parse_functions(clif).with_context(|| {
+                                format!("failed to parse CLIF:\n\"\"\"\n{clif}\n\"\"\"")
+                            })?;
                         if funcs.len() != 1 {
                             bail!("expected one function per clif");
                         }
                         Ok(funcs.remove(0))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                functions.sort_by_key(|f| match f.name {
-                    UserFuncName::User(UserExternalName { namespace, index }) => (namespace, index),
-                    UserFuncName::Testcase(_) => unreachable!(),
-                });
+
                 Ok(CompileOutput::Clif(functions))
             }
             TestKind::Compile | TestKind::Winch => Ok(CompileOutput::Elf(elf)),
         }
-    }
-
-    /// Use the test configuration present with CLI flags to build a
-    /// `TargetIsa` to compile/optimize the CLIF.
-    fn build_target_isa(&self) -> Result<Arc<dyn TargetIsa>> {
-        let mut builder = lookup_by_name(&self.config.target)?;
-        let mut flags = cranelift_codegen::settings::builder();
-        let opt_level = match self.opts.opts.opt_level {
-            None | Some(OptLevel::Speed) => "speed",
-            Some(OptLevel::SpeedAndSize) => "speed_and_size",
-            Some(OptLevel::None) => "none",
-            _ => unreachable!(),
-        };
-        flags.set("opt_level", opt_level)?;
-        for (key, val) in self.opts.codegen.cranelift.iter() {
-            let key = &key.replace("-", "_");
-            let target_res = match val {
-                Some(val) => builder.set(key, val),
-                None => builder.enable(key),
-            };
-            match target_res {
-                Ok(()) => continue,
-                Err(SetError::BadName(_)) => {}
-                Err(e) => bail!(e),
-            }
-            match val {
-                Some(val) => flags.set(key, val)?,
-                None => flags.enable(key)?,
-            }
-        }
-        let isa = builder.finish(Flags::new(flags))?;
-        Ok(isa)
     }
 }
 
@@ -284,123 +290,57 @@ enum CompileOutput {
 }
 
 /// Assert that `wat` contains the test expectations necessary for `funcs`.
-fn assert_output(
-    path: &Path,
-    wat: &str,
-    isa: &dyn TargetIsa,
-    kind: TestKind,
-    output: CompileOutput,
-) -> Result<()> {
+fn assert_output(test: &Test, output: CompileOutput) -> Result<()> {
     let mut actual = String::new();
     match output {
         CompileOutput::Clif(funcs) => {
             for mut func in funcs {
-                match kind {
-                    TestKind::Compile | TestKind::Winch => unreachable!(),
-                    TestKind::Optimize => {
-                        let mut ctx = cranelift_codegen::Context::for_function(func.clone());
-                        ctx.optimize(isa, &mut Default::default())
-                            .map_err(|e| codegen_error_to_anyhow_error(&ctx.func, e))?;
-                        ctx.func.dfg.resolve_all_aliases();
-                        writeln!(&mut actual, "{}", ctx.func.display()).unwrap();
-                    }
-                    TestKind::Clif => {
-                        func.dfg.resolve_all_aliases();
-                        writeln!(&mut actual, "{}", func.display()).unwrap();
-                    }
-                }
+                func.dfg.resolve_all_aliases();
+                writeln!(&mut actual, "{}", func.display()).unwrap();
             }
         }
         CompileOutput::Elf(bytes) => {
-            let disas = isa.to_capstone()?;
-            disas_elf(&disas, &mut actual, &bytes)?;
+            let mut cmd = wasmtime_test_util::command(env!("CARGO_BIN_EXE_wasmtime"));
+            cmd.arg("objdump")
+                .arg("--address-width=4")
+                .arg("--address-jumps")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            match &test.config.objdump {
+                Some(args) => {
+                    cmd.args(args.to_vec());
+                }
+                None => {
+                    cmd.arg("--traps=false");
+                }
+            }
+            if let Some(filter) = &test.config.filter {
+                cmd.arg("--filter").arg(filter);
+            }
+
+            let mut child = cmd.spawn().context("failed to run wasmtime")?;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(&bytes)
+                .context("failed to write stdin")?;
+            let output = child
+                .wait_with_output()
+                .context("failed to wait for child")?;
+            if !output.status.success() {
+                bail!(
+                    "objdump failed: {}\nstderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            actual = String::from_utf8(output.stdout).unwrap();
         }
     }
     let actual = actual.trim();
-    assert_or_bless_output(path, wat, actual)
-}
-
-fn disas_elf(disas: &capstone::Capstone, result: &mut String, elf: &[u8]) -> Result<()> {
-    use capstone::InsnGroupType::{CS_GRP_JUMP, CS_GRP_RET};
-    use object::{Endianness, Object, ObjectSection, ObjectSymbol};
-
-    let elf = object::read::elf::ElfFile64::<Endianness>::parse(elf)?;
-    let text = elf.section_by_name(".text").unwrap();
-    let text = text.data()?;
-    let mut first = true;
-    for sym in elf.symbols() {
-        let name = match sym.name() {
-            Ok(name) => name,
-            Err(_) => continue,
-        };
-        if !name.contains("wasm") || !name.contains("function") {
-            continue;
-        }
-
-        let bytes = &text[sym.address() as usize..][..sym.size() as usize];
-
-        if first {
-            first = false;
-        } else {
-            result.push_str("\n");
-        }
-        writeln!(result, "{name}:")?;
-
-        // By default don't write all the offsets of all the instructions. That
-        // means that small changes in the instruction sequence cause large
-        // diffs which aren't always the most readable. As a rough balance,
-        // print offset of instructions-after-jumps and anything-after-ret as
-        // that's a decent-enough heuristic for jump targets.
-        let mut prev_jump = false;
-        let mut write_offsets = false;
-
-        for inst in disas.disasm_all(bytes, sym.address())?.iter() {
-            let detail = disas.insn_detail(&inst).ok();
-            let detail = detail.as_ref();
-            let is_jump = detail
-                .map(|d| {
-                    d.groups()
-                        .iter()
-                        .find(|g| g.0 as u32 == CS_GRP_JUMP)
-                        .is_some()
-                })
-                .unwrap_or(false);
-
-            if write_offsets || (prev_jump && !is_jump) {
-                write!(result, "{:>4x}: ", inst.address())?;
-            } else {
-                write!(result, "      ")?;
-            }
-
-            match (inst.mnemonic(), inst.op_str()) {
-                (Some(i), Some(o)) => {
-                    if o.is_empty() {
-                        writeln!(result, "{i}")?;
-                    } else {
-                        writeln!(result, "{i:7} {o}")?;
-                    }
-                }
-                (Some(i), None) => writeln!(result, "{i}")?,
-                _ => unreachable!(),
-            }
-
-            prev_jump = is_jump;
-
-            // Flip write_offsets to true once we've seen a `ret`, as
-            // instructions that follow the return are often related to trap
-            // tables.
-            write_offsets = write_offsets
-                || detail
-                    .map(|d| {
-                        d.groups()
-                            .iter()
-                            .find(|g| g.0 as u32 == CS_GRP_RET)
-                            .is_some()
-                    })
-                    .unwrap_or(false);
-        }
-    }
-    Ok(())
+    assert_or_bless_output(&test.path, &test.contents, actual)
 }
 
 fn assert_or_bless_output(path: &Path, wat: &str, actual: &str) -> Result<()> {
@@ -456,12 +396,4 @@ fn assert_or_bless_output(path: &Path, wat: &str, actual: &str) -> Result<()> {
             .unified_diff()
             .header("expected", "actual")
     )
-}
-
-fn codegen_error_to_anyhow_error(
-    func: &cranelift_codegen::ir::Function,
-    err: cranelift_codegen::CodegenError,
-) -> anyhow::Error {
-    let s = cranelift_codegen::print_errors::pretty_error(func, err);
-    anyhow::anyhow!("{}", s)
 }

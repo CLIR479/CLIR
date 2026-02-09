@@ -7,7 +7,7 @@
 //! Some legalization may be ISA-specific, so this requires an ISA
 //! (for now).
 
-use crate::subtest::{check_precise_output, run_filecheck, Context, SubTest};
+use crate::subtest::{Context, SubTest, check_precise_output, run_filecheck};
 use anyhow::Result;
 use cranelift_codegen::ir;
 use cranelift_control::ControlPlane;
@@ -30,7 +30,7 @@ pub fn subtest(parsed: &TestCommand) -> Result<Box<dyn SubTest>> {
     for option in parsed.options.iter() {
         match option {
             TestOption::Flag("precise-output") => test.precise_output = true,
-            _ => anyhow::bail!("unknown option on {}", parsed),
+            _ => anyhow::bail!("unknown option on {parsed}"),
         }
     }
     Ok(Box::new(test))

@@ -10,6 +10,8 @@
 //! When an oracle finds a bug, it should report it to the fuzzing engine by
 //! panicking.
 
+pub mod component_api;
+pub mod component_async;
 #[cfg(feature = "fuzz-spec-interpreter")]
 pub mod diff_spec;
 pub mod diff_wasmi;
@@ -21,8 +23,10 @@ mod stacks;
 
 use self::diff_wasmtime::WasmtimeInstance;
 use self::engine::{DiffEngine, DiffInstance};
-use crate::generators::{self, DiffValue, DiffValueType};
+use crate::generators::GcOps;
+use crate::generators::{self, CompilerStrategy, DiffValue, DiffValueType};
 use crate::single_module_fuzzer::KnownValid;
+use crate::{YieldN, block_on};
 use arbitrary::Arbitrary;
 pub use stacks::check_stacks;
 use std::future::Future;
@@ -51,14 +55,20 @@ pub fn log_wasm(wasm: &[u8]) {
     let i = CNT.fetch_add(1, SeqCst);
     let name = format!("testcase{i}.wasm");
     std::fs::write(&name, wasm).expect("failed to write wasm file");
-    log::debug!("wrote wasm file to `{}`", name);
+    log::debug!("wrote wasm file to `{name}`");
     let wat = format!("testcase{i}.wat");
     match wasmprinter::print_bytes(wasm) {
-        Ok(s) => std::fs::write(&wat, s).expect("failed to write wat file"),
+        Ok(s) => {
+            std::fs::write(&wat, s).expect("failed to write wat file");
+            log::debug!("wrote wat file to `{wat}`");
+        }
         // If wasmprinter failed remove a `*.wat` file, if any, to avoid
         // confusing a preexisting one with this wasm which failed to get
         // printed.
-        Err(_) => drop(std::fs::remove_file(&wat)),
+        Err(e) => {
+            log::debug!("failed to print to wat: {e}");
+            drop(std::fs::remove_file(&wat));
+        }
     }
 }
 
@@ -70,23 +80,57 @@ pub struct StoreLimits(Arc<LimitsState>);
 struct LimitsState {
     /// Remaining memory, in bytes, left to allocate
     remaining_memory: AtomicUsize,
+    /// Remaining amount of memory that's allowed to be copied via a growth.
+    remaining_copy_allowance: AtomicUsize,
     /// Whether or not an allocation request has been denied
     oom: AtomicBool,
 }
+
+/// Allow up to 1G which is well below the 2G limit on OSS-Fuzz and should allow
+/// most interesting behavior.
+const MAX_MEMORY: usize = 1 << 30;
+
+/// Allow up to 4G of bytes to be copied (conservatively) which should enable
+/// growth up to `MAX_MEMORY` or at least up to a relatively large amount.
+const MAX_MEMORY_MOVED: usize = 4 << 30;
 
 impl StoreLimits {
     /// Creates the default set of limits for all fuzzing stores.
     pub fn new() -> StoreLimits {
         StoreLimits(Arc::new(LimitsState {
-            // Limits tables/memories within a store to at most 1gb for now to
-            // exercise some larger address but not overflow various limits.
-            remaining_memory: AtomicUsize::new(1 << 30),
+            remaining_memory: AtomicUsize::new(MAX_MEMORY),
+            remaining_copy_allowance: AtomicUsize::new(MAX_MEMORY_MOVED),
             oom: AtomicBool::new(false),
         }))
     }
 
     fn alloc(&mut self, amt: usize) -> bool {
         log::trace!("alloc {amt:#x} bytes");
+
+        // Assume that on each allocation of memory that all previous
+        // allocations of memory are moved. This is pretty coarse but is used to
+        // help prevent against fuzz test cases that just move tons of bytes
+        // around continuously. This assumes that all previous memory was
+        // allocated in a single linear memory and growing by `amt` will require
+        // moving all the bytes to a new location. This isn't actually required
+        // all the time nor does it accurately reflect what happens all the
+        // time, but it's a coarse approximation that should be "good enough"
+        // for allowing interesting fuzz behaviors to happen while not timing
+        // out just copying bytes around.
+        let prev_size = MAX_MEMORY - self.0.remaining_memory.load(SeqCst);
+        if self
+            .0
+            .remaining_copy_allowance
+            .fetch_update(SeqCst, SeqCst, |remaining| remaining.checked_sub(prev_size))
+            .is_err()
+        {
+            self.0.oom.store(true, SeqCst);
+            log::debug!("-> too many bytes moved, rejecting allocation");
+            return false;
+        }
+
+        // If we're allowed to move the bytes, then also check if we're allowed
+        // to actually have this much residence at once.
         match self
             .0
             .remaining_memory
@@ -95,7 +139,7 @@ impl StoreLimits {
             Ok(_) => true,
             Err(_) => {
                 self.0.oom.store(true, SeqCst);
-                log::debug!("OOM hit");
+                log::debug!("-> OOM hit");
                 false
             }
         }
@@ -116,8 +160,13 @@ impl ResourceLimiter for StoreLimits {
         Ok(self.alloc(desired - current))
     }
 
-    fn table_growing(&mut self, current: u32, desired: u32, _maximum: Option<u32>) -> Result<bool> {
-        let delta = (desired - current) as usize * std::mem::size_of::<usize>();
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool> {
+        let delta = (desired - current).saturating_mul(std::mem::size_of::<usize>());
         Ok(self.alloc(delta))
     }
 }
@@ -207,13 +256,27 @@ pub fn instantiate_many(
     config: &generators::Config,
     commands: &[Command],
 ) {
+    log::debug!("instantiate_many: {commands:#?}");
+
     assert!(!config.module_config.config.allow_start_export);
 
     let engine = Engine::new(&config.to_wasmtime()).unwrap();
 
     let modules = modules
         .iter()
-        .filter_map(|bytes| compile_module(&engine, bytes, known_valid, config))
+        .enumerate()
+        .filter_map(
+            |(i, bytes)| match compile_module(&engine, bytes, known_valid, config) {
+                Some(m) => {
+                    log::debug!("successfully compiled module {i}");
+                    Some(m)
+                }
+                None => {
+                    log::debug!("failed to compile module {i}");
+                    None
+                }
+            },
+        )
         .collect::<Vec<_>>();
 
     // If no modules were valid, we're done
@@ -229,7 +292,7 @@ pub fn instantiate_many(
         match command {
             Command::Instantiate(index) => {
                 let index = *index % modules.len();
-                log::info!("instantiating {}", index);
+                log::info!("instantiating {index}");
                 let module = &modules[index];
                 let mut store = Store::new(&engine, limits.clone());
                 config.configure_store(&mut store);
@@ -246,7 +309,7 @@ pub fn instantiate_many(
                 }
                 let index = *index % stores.len();
 
-                log::info!("dropping {}", index);
+                log::info!("dropping {index}");
                 stores.swap_remove(index);
             }
         }
@@ -261,7 +324,7 @@ fn compile_module(
 ) -> Option<Module> {
     log_wasm(bytes);
 
-    fn is_pcc_error(e: &anyhow::Error) -> bool {
+    fn is_pcc_error(e: &wasmtime::Error) -> bool {
         // NOTE: please keep this predicate in sync with the display format of CodegenError,
         // defined in `wasmtime/cranelift/codegen/src/result.rs`
         e.to_string().to_lowercase().contains("proof-carrying-code")
@@ -279,7 +342,7 @@ fn compile_module(
                 // when arbitrary table element limits have been exceeded as
                 // there is currently no way to constrain the generated module
                 // table types.
-                let string = e.to_string();
+                let string = format!("{e:?}");
                 if string.contains("minimum element size") {
                     return None;
                 }
@@ -330,47 +393,52 @@ pub fn instantiate_with_dummy(store: &mut Store<StoreLimits>, module: &Module) -
     // Creation of imports can fail due to resource limit constraints, and then
     // instantiation can naturally fail for a number of reasons as well. Bundle
     // the two steps together to match on the error below.
-    let instance =
-        dummy::dummy_linker(store, module).and_then(|l| l.instantiate(&mut *store, module));
+    let linker = dummy::dummy_linker(store, module);
+    if let Err(e) = &linker {
+        log::warn!("failed to create dummy linker: {e:?}");
+    }
+    let instance = linker.and_then(|l| l.instantiate(&mut *store, module));
     unwrap_instance(store, instance)
 }
 
 fn unwrap_instance(
     store: &Store<StoreLimits>,
-    instance: anyhow::Result<Instance>,
+    instance: wasmtime::Result<Instance>,
 ) -> Option<Instance> {
     let e = match instance {
         Ok(i) => return Some(i),
         Err(e) => e,
     };
 
+    log::debug!("failed to instantiate: {e:?}");
+
     // If the instantiation hit OOM for some reason then that's ok, it's
     // expected that fuzz-generated programs try to allocate lots of
     // stuff.
     if store.data().is_oom() {
-        log::debug!("failed to instantiate: OOM");
         return None;
     }
 
-    // Allow traps which can happen normally with `unreachable` or a
-    // timeout or such
-    if let Some(trap) = e.downcast_ref::<Trap>() {
-        log::debug!("failed to instantiate: {}", trap);
+    // Allow traps which can happen normally with `unreachable` or a timeout or
+    // such.
+    if e.is::<Trap>()
+        // Also allow failures to instantiate as a result of hitting pooling
+        // limits.
+        || e.is::<wasmtime::PoolConcurrencyLimitError>()
+        // And GC heap OOMs.
+        || e.is::<wasmtime::GcHeapOutOfMemory<()>>()
+        // And thrown exceptions.
+        || e.is::<wasmtime::ThrownException>()
+    {
         return None;
     }
 
     let string = e.to_string();
+
     // Currently we instantiate with a `Linker` which can't instantiate
     // every single module under the sun due to using name-based resolution
     // rather than positional-based resolution
     if string.contains("incompatible import type") {
-        log::debug!("failed to instantiate: {}", string);
-        return None;
-    }
-
-    // Also allow failures to instantiate as a result of hitting pooling limits.
-    if e.is::<wasmtime::PoolConcurrencyLimitError>() {
-        log::debug!("failed to instantiate: {}", string);
         return None;
     }
 
@@ -395,8 +463,8 @@ pub fn differential(
     name: &str,
     args: &[DiffValue],
     result_tys: &[DiffValueType],
-) -> anyhow::Result<bool> {
-    log::debug!("Evaluating: `{}` with {:?}", name, args);
+) -> wasmtime::Result<bool> {
+    log::debug!("Evaluating: `{name}` with {args:?}");
     let lhs_results = match lhs.evaluate(name, args, result_tys) {
         Ok(Some(results)) => Ok(results),
         Err(e) => Err(e),
@@ -404,13 +472,13 @@ pub fn differential(
         // execution by returning success.
         Ok(None) => return Ok(true),
     };
-    log::debug!(" -> results on {}: {:?}", lhs.name(), &lhs_results);
+    log::debug!(" -> lhs results on {}: {:?}", lhs.name(), &lhs_results);
 
     let rhs_results = rhs
         .evaluate(name, args, result_tys)
         // wasmtime should be able to invoke any signature, so unwrap this result
         .map(|results| results.unwrap());
-    log::debug!(" -> results on {}: {:?}", rhs.name(), &rhs_results);
+    log::debug!(" -> rhs results on {}: {:?}", rhs.name(), &rhs_results);
 
     // If Wasmtime hit its OOM condition, which is possible since it's set
     // somewhat low while fuzzing, then don't return an error but return
@@ -468,6 +536,32 @@ pub enum DiffEqResult<T, U> {
     Failed,
 }
 
+fn wasmtime_trap_is_non_deterministic(trap: &Trap) -> bool {
+    match trap {
+        // Allocations being too large for the GC are
+        // implementation-defined.
+        Trap::AllocationTooLarge |
+        // Stack size, and therefore when overflow happens, is
+        // implementation-defined.
+        Trap::StackOverflow => true,
+        _ => false,
+    }
+}
+
+fn wasmtime_error_is_non_deterministic(error: &wasmtime::Error) -> bool {
+    match error.downcast_ref::<Trap>() {
+        Some(trap) => wasmtime_trap_is_non_deterministic(trap),
+
+        // For general, unknown errors, we can't rely on this being
+        // a deterministic Wasm failure that both engines handled
+        // identically, leaving Wasm in identical states. We could
+        // just as easily be hitting engine-specific failures, like
+        // different implementation-defined limits. So simply poison
+        // this execution and move on to the next test.
+        None => true,
+    }
+}
+
 impl<T, U> DiffEqResult<T, U> {
     /// Computes the differential result from executing in two different
     /// engines.
@@ -479,23 +573,40 @@ impl<T, U> DiffEqResult<T, U> {
         match (lhs_result, rhs_result) {
             (Ok(lhs_result), Ok(rhs_result)) => DiffEqResult::Success(lhs_result, rhs_result),
 
-            // Both sides failed. If either one hits a stack overflow then that's an
-            // engine defined limit which means we can no longer compare the state
-            // of the two instances, so `None` is returned and nothing else is
-            // compared.
-            (Err(lhs), Err(rhs)) => {
-                let err = rhs.downcast::<Trap>().expect("not a trap");
-                let poisoned = err == Trap::StackOverflow || lhs_engine.is_stack_overflow(&lhs);
+            // Handle all non-deterministic errors by poisoning this execution's
+            // state, so that we simply move on to the next test.
+            (Err(lhs), _) if lhs_engine.is_non_deterministic_error(&lhs) => {
+                log::debug!("lhs failed non-deterministically: {lhs:?}");
+                DiffEqResult::Poisoned
+            }
+            (_, Err(rhs)) if wasmtime_error_is_non_deterministic(&rhs) => {
+                log::debug!("rhs failed non-deterministically: {rhs:?}");
+                DiffEqResult::Poisoned
+            }
 
-                if poisoned {
-                    return DiffEqResult::Poisoned;
-                }
-                lhs_engine.assert_error_match(&err, &lhs);
+            // Both sides failed deterministically. Check that the trap and
+            // state at the time of failure is the same.
+            (Err(lhs), Err(rhs)) => {
+                let rhs = rhs
+                    .downcast::<Trap>()
+                    .expect("non-traps handled in earlier match arm");
+
+                debug_assert!(
+                    !lhs_engine.is_non_deterministic_error(&lhs),
+                    "non-deterministic traps handled in earlier match arm",
+                );
+                debug_assert!(
+                    !wasmtime_trap_is_non_deterministic(&rhs),
+                    "non-deterministic traps handled in earlier match arm",
+                );
+
+                lhs_engine.assert_error_match(&lhs, &rhs);
                 DiffEqResult::Failed
             }
+
             // A real bug is found if only one side fails.
-            (Ok(_), Err(_)) => panic!("only the `rhs` failed for this input"),
-            (Err(_), Ok(_)) => panic!("only the `lhs` failed for this input"),
+            (Ok(_), Err(err)) => panic!("only the `rhs` failed for this input: {err:?}"),
+            (Err(err), Ok(_)) => panic!("only the `lhs` failed for this input: {err:?}"),
         }
     }
 }
@@ -518,7 +629,7 @@ pub fn make_api_calls(api: generators::api::ApiCalls) {
             }
 
             ApiCall::ModuleNew { id, wasm } => {
-                log::debug!("creating module: {}", id);
+                log::debug!("creating module: {id}");
                 log_wasm(&wasm);
                 let module = match Module::new(store.as_ref().unwrap().engine(), &wasm) {
                     Ok(m) => m,
@@ -529,12 +640,12 @@ pub fn make_api_calls(api: generators::api::ApiCalls) {
             }
 
             ApiCall::ModuleDrop { id } => {
-                log::trace!("dropping module: {}", id);
+                log::trace!("dropping module: {id}");
                 drop(modules.remove(&id));
             }
 
             ApiCall::InstanceNew { id, module } => {
-                log::trace!("instantiating module {} as {}", module, id);
+                log::trace!("instantiating module {module} as {id}");
                 let module = match modules.get(&module) {
                     Some(m) => m,
                     None => continue,
@@ -547,12 +658,12 @@ pub fn make_api_calls(api: generators::api::ApiCalls) {
             }
 
             ApiCall::InstanceDrop { id } => {
-                log::trace!("dropping instance {}", id);
+                log::trace!("dropping instance {id}");
                 instances.remove(&id);
             }
 
             ApiCall::CallExportedFunc { instance, nth } => {
-                log::trace!("calling instance export {} / {}", instance, nth);
+                log::trace!("calling instance export {instance} / {nth}");
                 let instance = match instances.get(&instance) {
                     Some(i) => i,
                     None => {
@@ -582,7 +693,11 @@ pub fn make_api_calls(api: generators::api::ApiCalls) {
                 let nth = nth % funcs.len();
                 let f = &funcs[nth];
                 let ty = f.ty(&store);
-                if let Ok(params) = dummy::dummy_values(ty.params()) {
+                if let Some(params) = ty
+                    .params()
+                    .map(|p| p.default_value())
+                    .collect::<Option<Vec<_>>>()
+                {
                     let mut results = vec![Val::I32(0); ty.results().len()];
                     let _ = f.call(store, &params, &mut results);
                 }
@@ -594,42 +709,89 @@ pub fn make_api_calls(api: generators::api::ApiCalls) {
 /// Executes the wast `test` with the `config` specified.
 ///
 /// Ensures that wast tests pass regardless of the `Config`.
-pub fn wast_test(fuzz_config: generators::Config, test: generators::WastTest) {
+pub fn wast_test(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<()> {
     crate::init_fuzzing();
-    if !fuzz_config.is_wast_test_compliant() {
-        return;
+
+    let mut fuzz_config: generators::Config = u.arbitrary()?;
+    fuzz_config.module_config.shared_memory = true;
+    let test: generators::WastTest = u.arbitrary()?;
+
+    let test = &test.test;
+
+    if test.config.component_model_async() || u.arbitrary()? {
+        fuzz_config.enable_async(u)?;
+    }
+
+    // Discard tests that allocate a lot of memory as we don't want to OOM the
+    // fuzzer and we also limit memory growth which would cause the test to
+    // fail.
+    if test.config.hogs_memory.unwrap_or(false) {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+
+    // Transform `fuzz_config` to be valid for `test` and make sure that this
+    // test is supposed to pass.
+    let wast_config = fuzz_config.make_wast_test_compliant(test);
+    if test.should_fail(&wast_config) {
+        return Err(arbitrary::Error::IncorrectFormat);
+    }
+
+    // Winch requires AVX and AVX2 for SIMD tests to pass so don't run the test
+    // if either isn't enabled.
+    if fuzz_config.wasmtime.compiler_strategy == CompilerStrategy::Winch
+        && test.config.simd()
+        && (fuzz_config
+            .wasmtime
+            .codegen_flag("has_avx")
+            .is_some_and(|value| value == "false")
+            || fuzz_config
+                .wasmtime
+                .codegen_flag("has_avx2")
+                .is_some_and(|value| value == "false"))
+    {
+        log::warn!(
+            "Skipping Wast test because Winch doesn't support SIMD tests with AVX or AVX2 disabled"
+        );
+        return Err(arbitrary::Error::IncorrectFormat);
     }
 
     // Fuel and epochs don't play well with threads right now, so exclude any
     // thread-spawning test if it looks like threads are spawned in that case.
     if fuzz_config.wasmtime.consume_fuel || fuzz_config.wasmtime.epoch_interruption {
         if test.contents.contains("(thread") {
-            return;
+            return Err(arbitrary::Error::IncorrectFormat);
         }
     }
 
-    log::debug!("running {:?}", test.file);
-    let mut wast_context = WastContext::new(fuzz_config.to_store());
+    log::debug!("running {:?}", test.path);
+    let async_ = if fuzz_config.wasmtime.async_config == generators::AsyncConfig::Disabled {
+        wasmtime_wast::Async::No
+    } else {
+        wasmtime_wast::Async::Yes
+    };
+    log::debug!("async: {async_:?}");
+    let engine = Engine::new(&fuzz_config.to_wasmtime()).unwrap();
+    let mut wast_context = WastContext::new(&engine, async_, move |store| {
+        fuzz_config.configure_store_epoch_and_fuel(store);
+    });
     wast_context
         .register_spectest(&wasmtime_wast::SpectestConfig {
-            use_shared_memory: false,
+            use_shared_memory: true,
             suppress_prints: true,
         })
         .unwrap();
     wast_context
-        .run_buffer(test.file, test.contents.as_bytes())
+        .run_wast(test.path.to_str().unwrap(), test.contents.as_bytes())
         .unwrap();
+    Ok(())
 }
 
-/// Execute a series of `table.get` and `table.set` operations.
+/// Execute a series of `gc` operations.
 ///
 /// Returns the number of `gc` operations which occurred throughout the test
 /// case -- used to test below that gc happens reasonably soon and eventually.
-pub fn table_ops(
-    mut fuzz_config: generators::Config,
-    ops: generators::table_ops::TableOps,
-) -> Result<usize> {
-    let expected_drops = Arc::new(AtomicUsize::new(ops.num_params as usize));
+pub fn gc_ops(mut fuzz_config: generators::Config, mut ops: GcOps) -> Result<usize> {
+    let expected_drops = Arc::new(AtomicUsize::new(0));
     let num_dropped = Arc::new(AtomicUsize::new(0));
 
     let num_gcs = Arc::new(AtomicUsize::new(0));
@@ -661,18 +823,25 @@ pub fn table_ops(
             let expected_drops = expected_drops.clone();
             let num_gcs = num_gcs.clone();
             move |mut caller: Caller<'_, StoreLimits>, _params, results| {
-                log::info!("table_ops: GC");
+                log::info!("gc_ops: GC");
                 if num_gcs.fetch_add(1, SeqCst) < MAX_GCS {
-                    caller.gc();
+                    caller.gc(None)?;
                 }
 
-                let a = ExternRef::new(&mut caller, CountDrops(num_dropped.clone()))?;
-                let b = ExternRef::new(&mut caller, CountDrops(num_dropped.clone()))?;
-                let c = ExternRef::new(&mut caller, CountDrops(num_dropped.clone()))?;
+                let a = ExternRef::new(
+                    &mut caller,
+                    CountDrops::new(&expected_drops, num_dropped.clone()),
+                )?;
+                let b = ExternRef::new(
+                    &mut caller,
+                    CountDrops::new(&expected_drops, num_dropped.clone()),
+                )?;
+                let c = ExternRef::new(
+                    &mut caller,
+                    CountDrops::new(&expected_drops, num_dropped.clone()),
+                )?;
 
-                log::info!("table_ops: gc() -> ({:?}, {:?}, {:?})", a, b, c);
-
-                expected_drops.fetch_add(3, SeqCst);
+                log::info!("gc_ops: gc() -> ({a:?}, {b:?}, {c:?})");
                 results[0] = Some(a).into();
                 results[1] = Some(b).into();
                 results[2] = Some(c).into();
@@ -689,22 +858,34 @@ pub fn table_ops(
                       b: Option<Rooted<ExternRef>>,
                       c: Option<Rooted<ExternRef>>|
                       -> Result<()> {
-                    log::info!("table_ops: take_refs({a:?}, {b:?}, {c:?})",);
+                    log::info!("gc_ops: take_refs({a:?}, {b:?}, {c:?})",);
 
                     // Do the assertion on each ref's inner data, even though it
                     // all points to the same atomic, so that if we happen to
                     // run into a use-after-free bug with one of these refs we
                     // are more likely to trigger a segfault.
                     if let Some(a) = a {
-                        let a = a.data(&caller)?.downcast_ref::<CountDrops>().unwrap();
+                        let a = a
+                            .data(&caller)?
+                            .unwrap()
+                            .downcast_ref::<CountDrops>()
+                            .unwrap();
                         assert!(a.0.load(SeqCst) <= expected_drops.load(SeqCst));
                     }
                     if let Some(b) = b {
-                        let b = b.data(&caller)?.downcast_ref::<CountDrops>().unwrap();
+                        let b = b
+                            .data(&caller)?
+                            .unwrap()
+                            .downcast_ref::<CountDrops>()
+                            .unwrap();
                         assert!(b.0.load(SeqCst) <= expected_drops.load(SeqCst));
                     }
                     if let Some(c) = c {
-                        let c = c.data(&caller)?.downcast_ref::<CountDrops>().unwrap();
+                        let c = c
+                            .data(&caller)?
+                            .unwrap()
+                            .downcast_ref::<CountDrops>()
+                            .unwrap();
                         assert!(c.0.load(SeqCst) <= expected_drops.load(SeqCst));
                     }
                     Ok(())
@@ -721,14 +902,22 @@ pub fn table_ops(
             let num_dropped = num_dropped.clone();
             let expected_drops = expected_drops.clone();
             move |mut caller, _params, results| {
-                log::info!("table_ops: make_refs");
+                log::info!("gc_ops: make_refs");
 
-                let a = ExternRef::new(&mut caller, CountDrops(num_dropped.clone()))?;
-                let b = ExternRef::new(&mut caller, CountDrops(num_dropped.clone()))?;
-                let c = ExternRef::new(&mut caller, CountDrops(num_dropped.clone()))?;
-                expected_drops.fetch_add(3, SeqCst);
+                let a = ExternRef::new(
+                    &mut caller,
+                    CountDrops::new(&expected_drops, num_dropped.clone()),
+                )?;
+                let b = ExternRef::new(
+                    &mut caller,
+                    CountDrops::new(&expected_drops, num_dropped.clone()),
+                )?;
+                let c = ExternRef::new(
+                    &mut caller,
+                    CountDrops::new(&expected_drops, num_dropped.clone()),
+                )?;
 
-                log::info!("table_ops: make_refs() -> ({:?}, {:?}, {:?})", a, b, c);
+                log::info!("gc_ops: make_refs() -> ({a:?}, {b:?}, {c:?})");
 
                 results[0] = Some(a).into();
                 results[1] = Some(b).into();
@@ -739,6 +928,38 @@ pub fn table_ops(
         });
         linker.define(&store, "", "make_refs", func).unwrap();
 
+        let func_ty = FuncType::new(
+            store.engine(),
+            vec![ValType::Ref(RefType::new(true, HeapType::Struct))],
+            vec![],
+        );
+
+        let func = Func::new(&mut store, func_ty, {
+            move |_caller: Caller<'_, StoreLimits>, _params, _results| {
+                log::info!("gc_ops: take_struct(<ref null struct>)");
+                Ok(())
+            }
+        });
+
+        linker.define(&store, "", "take_struct", func).unwrap();
+
+        for imp in module.imports() {
+            if imp.module() == "" {
+                let name = imp.name();
+                if name.starts_with("take_struct_") {
+                    if let wasmtime::ExternType::Func(ft) = imp.ty() {
+                        let imp_name = name.to_string();
+                        let func =
+                            Func::new(&mut store, ft.clone(), move |_caller, _params, _results| {
+                                log::info!("gc_ops: {imp_name}(<typed structref>)");
+                                Ok(())
+                            });
+                        linker.define(&store, "", name, func).unwrap();
+                    }
+                }
+            }
+        }
+
         let instance = linker.instantiate(&mut store, &module).unwrap();
         let run = instance.get_func(&mut store, "run").unwrap();
 
@@ -746,41 +967,43 @@ pub fn table_ops(
             let mut scope = RootScope::new(&mut store);
 
             log::info!(
-                "table_ops: begin allocating {} externref arguments",
-                ops.num_globals
+                "gc_ops: begin allocating {} externref arguments",
+                ops.limits.num_globals
             );
-            let args: Vec<_> = (0..ops.num_params)
+            let args: Vec<_> = (0..ops.limits.num_params)
                 .map(|_| {
                     Ok(Val::ExternRef(Some(ExternRef::new(
                         &mut scope,
-                        CountDrops(num_dropped.clone()),
+                        CountDrops::new(&expected_drops, num_dropped.clone()),
                     )?)))
                 })
                 .collect::<Result<_>>()?;
             log::info!(
-                "table_ops: end allocating {} externref arguments",
-                ops.num_globals
+                "gc_ops: end allocating {} externref arguments",
+                ops.limits.num_globals
             );
 
             // The generated function should always return a trap. The only two
             // valid traps are table-out-of-bounds which happens through `table.get`
             // and `table.set` generated or an out-of-fuel trap. Otherwise any other
             // error is unexpected and should fail fuzzing.
-            log::info!("table_ops: calling into Wasm `run` function");
-            let trap = run
-                .call(&mut scope, &args, &mut [])
-                .unwrap_err()
-                .downcast::<Trap>()
-                .unwrap();
-
-            match trap {
-                Trap::TableOutOfBounds | Trap::OutOfFuel => {}
-                _ => panic!("unexpected trap: {trap}"),
+            log::info!("gc_ops: calling into Wasm `run` function");
+            let err = run.call(&mut scope, &args, &mut []).unwrap_err();
+            if err.is::<GcHeapOutOfMemory<CountDrops>>() || err.is::<GcHeapOutOfMemory<()>>() {
+                // Accept GC OOM as an allowed outcome for this fuzzer.
+            } else {
+                let trap = err
+                    .downcast::<Trap>()
+                    .expect("if not GC oom, error should be a Wasm trap");
+                match trap {
+                    Trap::TableOutOfBounds | Trap::OutOfFuel | Trap::AllocationTooLarge => {}
+                    _ => panic!("unexpected trap: {trap}"),
+                }
             }
         }
 
         // Do a final GC after running the Wasm.
-        store.gc();
+        store.gc(None)?;
     }
 
     assert_eq!(num_dropped.load(SeqCst), expected_drops.load(SeqCst));
@@ -788,43 +1011,23 @@ pub fn table_ops(
 
     struct CountDrops(Arc<AtomicUsize>);
 
+    impl CountDrops {
+        fn new(expected_drops: &AtomicUsize, num_dropped: Arc<AtomicUsize>) -> Self {
+            let expected = expected_drops.fetch_add(1, SeqCst);
+            log::info!(
+                "CountDrops::new: expected drops: {expected} -> {}",
+                expected + 1
+            );
+            Self(num_dropped)
+        }
+    }
+
     impl Drop for CountDrops {
         fn drop(&mut self) {
-            self.0.fetch_add(1, SeqCst);
+            let drops = self.0.fetch_add(1, SeqCst);
+            log::info!("CountDrops::drop: actual drops: {drops} -> {}", drops + 1);
         }
     }
-}
-
-// Test that the `table_ops` fuzzer eventually runs the gc function in the host.
-// We've historically had issues where this fuzzer accidentally wasn't fuzzing
-// anything for a long time so this is an attempt to prevent that from happening
-// again.
-#[test]
-fn table_ops_eventually_gcs() {
-    use arbitrary::Unstructured;
-    use rand::prelude::*;
-
-    // Skip if we're under emulation because some fuzz configurations will do
-    // large address space reservations that QEMU doesn't handle well.
-    if std::env::var("WASMTIME_TEST_NO_HOG_MEMORY").is_ok() {
-        return;
-    }
-
-    let mut rng = SmallRng::seed_from_u64(0);
-    let mut buf = vec![0; 2048];
-    let n = 100;
-    for _ in 0..n {
-        rng.fill_bytes(&mut buf);
-        let u = Unstructured::new(&buf);
-
-        if let Ok((config, test)) = Arbitrary::arbitrary_take_rest(u) {
-            if table_ops(config, test).unwrap() > 0 {
-                return;
-            }
-        }
-    }
-
-    panic!("after {n} runs nothing ever gc'd, something is probably wrong");
 }
 
 #[derive(Default)]
@@ -879,97 +1082,6 @@ impl Drop for HelperThread {
     }
 }
 
-/// Generate and execute a `crate::generators::component_types::TestCase` using the specified `input` to create
-/// arbitrary types and values.
-pub fn dynamic_component_api_target(input: &mut arbitrary::Unstructured) -> arbitrary::Result<()> {
-    use crate::generators::component_types;
-    use component_fuzz_util::{TestCase, Type, EXPORT_FUNCTION, IMPORT_FUNCTION, MAX_TYPE_DEPTH};
-    use component_test_util::FuncExt;
-    use wasmtime::component::{Component, Linker, Val};
-
-    crate::init_fuzzing();
-
-    let mut types = Vec::new();
-    let mut type_fuel = 500;
-
-    for _ in 0..5 {
-        types.push(Type::generate(input, MAX_TYPE_DEPTH, &mut type_fuel)?);
-    }
-    let params = (0..input.int_in_range(0..=5)?)
-        .map(|_| input.choose(&types))
-        .collect::<arbitrary::Result<Vec<_>>>()?;
-    let results = (0..input.int_in_range(0..=5)?)
-        .map(|_| input.choose(&types))
-        .collect::<arbitrary::Result<Vec<_>>>()?;
-
-    let case = TestCase {
-        params,
-        results,
-        encoding1: input.arbitrary()?,
-        encoding2: input.arbitrary()?,
-    };
-
-    let mut config = component_test_util::config();
-    if case.results.len() > 1 {
-        config.wasm_component_model_multiple_returns(true);
-    }
-    config.debug_adapter_modules(input.arbitrary()?);
-    let engine = Engine::new(&config).unwrap();
-    let mut store = Store::new(&engine, (Vec::new(), None));
-    let wat = case.declarations().make_component();
-    let wat = wat.as_bytes();
-    log_wasm(wat);
-    let component = Component::new(&engine, wat).unwrap();
-    let mut linker = Linker::new(&engine);
-
-    linker
-        .root()
-        .func_new(IMPORT_FUNCTION, {
-            move |mut cx: StoreContextMut<'_, (Vec<Val>, Option<Vec<Val>>)>,
-                  params: &[Val],
-                  results: &mut [Val]|
-                  -> Result<()> {
-                log::trace!("received params {params:?}");
-                let (expected_args, expected_results) = cx.data_mut();
-                assert_eq!(params.len(), expected_args.len());
-                for (expected, actual) in expected_args.iter().zip(params) {
-                    assert_eq!(expected, actual);
-                }
-                results.clone_from_slice(&expected_results.take().unwrap());
-                log::trace!("returning results {results:?}");
-                Ok(())
-            }
-        })
-        .unwrap();
-
-    let instance = linker.instantiate(&mut store, &component).unwrap();
-    let func = instance.get_func(&mut store, EXPORT_FUNCTION).unwrap();
-    let param_tys = func.params(&store);
-    let result_tys = func.results(&store);
-
-    while input.arbitrary()? {
-        let params = param_tys
-            .iter()
-            .map(|ty| component_types::arbitrary_val(ty, input))
-            .collect::<arbitrary::Result<Vec<_>>>()?;
-        let results = result_tys
-            .iter()
-            .map(|ty| component_types::arbitrary_val(ty, input))
-            .collect::<arbitrary::Result<Vec<_>>>()?;
-
-        *store.data_mut() = (params.clone(), Some(results.clone()));
-
-        log::trace!("passing params {params:?}");
-        let mut actual = vec![Val::Bool(false); results.len()];
-        func.call_and_post_return(&mut store, &params, &mut actual)
-            .unwrap();
-        log::trace!("received results {actual:?}");
-        assert_eq!(actual, results);
-    }
-
-    Ok(())
-}
-
 /// Instantiates a wasm module and runs its exports with dummy values, all in
 /// an async fashion.
 ///
@@ -1003,20 +1115,20 @@ pub fn call_async(wasm: &[u8], config: &generators::Config, mut poll_amts: &[u32
                     let ty = ty.clone();
                     Box::new(async move {
                         caller.engine().increment_epoch();
-                        log::info!("yielding {} times in import", poll_amt);
+                        log::info!("yielding {poll_amt} times in import");
                         YieldN(poll_amt).await;
                         for (ret_ty, result) in ty.results().zip(results) {
-                            *result = dummy::dummy_value(ret_ty)?;
+                            *result = ret_ty.default_value().unwrap();
                         }
                         Ok(())
                     })
                 })
                 .into()
             }
-            other_ty => match dummy::dummy_extern(&mut store, other_ty) {
+            other_ty => match other_ty.default_value(&mut store) {
                 Ok(item) => item,
                 Err(e) => {
-                    log::warn!("couldn't create import: {}", e);
+                    log::warn!("couldn't create import for {import:?}: {e:?}");
                     return;
                 }
             },
@@ -1027,7 +1139,7 @@ pub fn call_async(wasm: &[u8], config: &generators::Config, mut poll_amts: &[u32
     // Run the instantiation process, asynchronously, and if everything
     // succeeds then pull out the instance.
     // log::info!("starting instantiation");
-    let instance = run(Timeout {
+    let instance = block_on(Timeout {
         future: Instance::new_async(&mut store, &module, &imports),
         polls: take_poll_amt(&mut poll_amts),
         end: Instant::now() + Duration::from_millis(2_000),
@@ -1064,16 +1176,16 @@ pub fn call_async(wasm: &[u8], config: &generators::Config, mut poll_amts: &[u32
         let ty = func.ty(&store);
         let params = ty
             .params()
-            .map(|ty| dummy::dummy_value(ty).unwrap())
+            .map(|ty| ty.default_value().unwrap())
             .collect::<Vec<_>>();
         let mut results = ty
             .results()
-            .map(|ty| dummy::dummy_value(ty).unwrap())
+            .map(|ty| ty.default_value().unwrap())
             .collect::<Vec<_>>();
 
-        log::info!("invoking export {:?}", name);
+        log::info!("invoking export {name:?}");
         let future = func.call_async(&mut store, &params, &mut results);
-        match run(Timeout {
+        match block_on(Timeout {
             future,
             polls: take_poll_amt(&mut poll_amts),
             end: Instant::now() + Duration::from_millis(2_000),
@@ -1095,23 +1207,6 @@ pub fn call_async(wasm: &[u8], config: &generators::Config, mut poll_amts: &[u32
                 *a
             }
             None => 0,
-        }
-    }
-
-    /// Helper future to yield N times before resolving.
-    struct YieldN(u32);
-
-    impl Future for YieldN {
-        type Output = ();
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-            if self.0 == 0 {
-                Poll::Ready(())
-            } else {
-                self.0 -= 1;
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
         }
     }
 
@@ -1159,15 +1254,104 @@ pub fn call_async(wasm: &[u8], config: &generators::Config, mut poll_amts: &[u32
             }
         }
     }
+}
 
-    fn run<F: Future>(future: F) -> F::Output {
-        let mut f = Box::pin(future);
-        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
-        loop {
-            match f.as_mut().poll(&mut cx) {
-                Poll::Ready(val) => break val,
-                Poll::Pending => {}
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test::{gen_until_pass, test_n_times};
+    use wasmparser::{Validator, WasmFeatures};
+
+    // Test that the `gc_ops` fuzzer eventually runs the gc function in the host.
+    // We've historically had issues where this fuzzer accidentally wasn't fuzzing
+    // anything for a long time so this is an attempt to prevent that from happening
+    // again.
+    #[test]
+    fn gc_ops_eventually_gcs() {
+        // Skip if we're under emulation because some fuzz configurations will do
+        // large address space reservations that QEMU doesn't handle well.
+        if std::env::var("WASMTIME_TEST_NO_HOG_MEMORY").is_ok() {
+            return;
         }
+
+        let ok = gen_until_pass(|(config, test), _| {
+            let result = gc_ops(config, test)?;
+            Ok(result > 0)
+        });
+
+        if !ok {
+            panic!("gc was never found");
+        }
+    }
+
+    #[test]
+    fn module_generation_uses_expected_proposals() {
+        // Proposals that Wasmtime supports. Eventually a module should be
+        // generated that needs these proposals.
+        let mut expected = WasmFeatures::MUTABLE_GLOBAL
+            | WasmFeatures::FLOATS
+            | WasmFeatures::SIGN_EXTENSION
+            | WasmFeatures::SATURATING_FLOAT_TO_INT
+            | WasmFeatures::MULTI_VALUE
+            | WasmFeatures::BULK_MEMORY
+            | WasmFeatures::REFERENCE_TYPES
+            | WasmFeatures::SIMD
+            | WasmFeatures::MULTI_MEMORY
+            | WasmFeatures::RELAXED_SIMD
+            | WasmFeatures::TAIL_CALL
+            | WasmFeatures::WIDE_ARITHMETIC
+            | WasmFeatures::MEMORY64
+            | WasmFeatures::FUNCTION_REFERENCES
+            | WasmFeatures::GC
+            | WasmFeatures::GC_TYPES
+            | WasmFeatures::CUSTOM_PAGE_SIZES
+            | WasmFeatures::EXTENDED_CONST
+            | WasmFeatures::EXCEPTIONS;
+
+        // All other features that wasmparser supports, which is presumably a
+        // superset of the features that wasm-smith supports, are listed here as
+        // unexpected. This means, for example, that if wasm-smith updates to
+        // include a new proposal by default that wasmtime implements then it
+        // will be required to be listed above.
+        let unexpected = WasmFeatures::all() ^ expected;
+
+        let ok = gen_until_pass(|config: generators::Config, u| {
+            let wasm = config.generate(u, None)?.to_bytes();
+
+            // Double-check the module is valid
+            Validator::new_with_features(WasmFeatures::all()).validate_all(&wasm)?;
+
+            // If any of the unexpected features are removed then this module
+            // should always be valid, otherwise something went wrong.
+            for feature in unexpected.iter() {
+                let ok =
+                    Validator::new_with_features(WasmFeatures::all() ^ feature).validate_all(&wasm);
+                if ok.is_err() {
+                    wasmtime::bail!("generated a module with {feature:?} but that wasn't expected");
+                }
+            }
+
+            // If any of `expected` is removed and the module fails to validate,
+            // then that means the module requires that feature. Remove that
+            // from the set of features we're then expecting.
+            for feature in expected.iter() {
+                let ok =
+                    Validator::new_with_features(WasmFeatures::all() ^ feature).validate_all(&wasm);
+                if ok.is_err() {
+                    expected ^= feature;
+                }
+            }
+
+            Ok(expected.is_empty())
+        });
+
+        if !ok {
+            panic!("never generated wasm module using {expected:?}");
+        }
+    }
+
+    #[test]
+    fn wast_smoke_test() {
+        test_n_times(50, |(), u| super::wast_test(u));
     }
 }

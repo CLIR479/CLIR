@@ -1,11 +1,12 @@
 //! Implementation of `anyref` in Wasmtime.
 
+use super::{ExternRef, RootedGcRefImpl};
 use crate::prelude::*;
 use crate::runtime::vm::VMGcRef;
 use crate::{
+    ArrayRef, ArrayType, AsContext, AsContextMut, EqRef, GcRefImpl, GcRootIndex, HeapType, I31,
+    OwnedRooted, RefType, Result, Rooted, StructRef, StructType, ValRaw, ValType, WasmTy,
     store::{AutoAssertNoGc, StoreOpaque},
-    ArrayRef, ArrayType, AsContext, AsContextMut, GcRefImpl, GcRootIndex, HeapType, ManuallyRooted,
-    RefType, Result, Rooted, StructRef, StructType, ValRaw, ValType, WasmTy, I31,
 };
 use core::mem;
 use core::mem::MaybeUninit;
@@ -22,7 +23,7 @@ use wasmtime_environ::VMGcKind;
 /// `0x12345678` into a reference, pretend it is a valid `anyref`, and trick the
 /// host into dereferencing it and segfaulting or worse.
 ///
-/// Note that you can also use `Rooted<AnyRef>` and `ManuallyRooted<AnyRef>` as
+/// Note that you can also use `Rooted<AnyRef>` and `OwnedRooted<AnyRef>` as
 /// a type parameter with [`Func::typed`][crate::Func::typed]- and
 /// [`Func::wrap`][crate::Func::wrap]-style APIs.
 ///
@@ -95,6 +96,20 @@ pub struct AnyRef {
     pub(super) inner: GcRootIndex,
 }
 
+impl From<Rooted<EqRef>> for Rooted<AnyRef> {
+    #[inline]
+    fn from(e: Rooted<EqRef>) -> Self {
+        e.to_anyref()
+    }
+}
+
+impl From<OwnedRooted<EqRef>> for OwnedRooted<AnyRef> {
+    #[inline]
+    fn from(e: OwnedRooted<EqRef>) -> Self {
+        e.to_anyref()
+    }
+}
+
 impl From<Rooted<StructRef>> for Rooted<AnyRef> {
     #[inline]
     fn from(s: Rooted<StructRef>) -> Self {
@@ -102,9 +117,9 @@ impl From<Rooted<StructRef>> for Rooted<AnyRef> {
     }
 }
 
-impl From<ManuallyRooted<StructRef>> for ManuallyRooted<AnyRef> {
+impl From<OwnedRooted<StructRef>> for OwnedRooted<AnyRef> {
     #[inline]
-    fn from(s: ManuallyRooted<StructRef>) -> Self {
+    fn from(s: OwnedRooted<StructRef>) -> Self {
         s.to_anyref()
     }
 }
@@ -116,15 +131,14 @@ impl From<Rooted<ArrayRef>> for Rooted<AnyRef> {
     }
 }
 
-impl From<ManuallyRooted<ArrayRef>> for ManuallyRooted<AnyRef> {
+impl From<OwnedRooted<ArrayRef>> for OwnedRooted<AnyRef> {
     #[inline]
-    fn from(s: ManuallyRooted<ArrayRef>) -> Self {
+    fn from(s: OwnedRooted<ArrayRef>) -> Self {
         s.to_anyref()
     }
 }
 
 unsafe impl GcRefImpl for AnyRef {
-    #[allow(private_interfaces)]
     fn transmute_ref(index: &GcRootIndex) -> &Self {
         // Safety: `AnyRef` is a newtype of a `GcRootIndex`.
         let me: &Self = unsafe { mem::transmute(index) };
@@ -169,6 +183,64 @@ impl AnyRef {
         Rooted::new(store, gc_ref)
     }
 
+    /// Convert an `externref` into an `anyref`.
+    ///
+    /// This is equivalent to the `any.convert_extern` instruction in Wasm.
+    ///
+    /// You can recover the underlying `externref` again via the
+    /// [`ExternRef::convert_any`] method or the `extern.convert_any` Wasm
+    /// instruction.
+    ///
+    /// Returns an error if the `externref` GC reference has been unrooted (eg
+    /// if you attempt to use a `Rooted<ExternRef>` after exiting the scope it
+    /// was rooted within). See the documentation for
+    /// [`Rooted<T>`][crate::Rooted] for more details.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use wasmtime::*;
+    /// # fn foo() -> Result<()> {
+    /// let engine = Engine::default();
+    /// let mut store = Store::new(&engine, ());
+    ///
+    /// // Create an `externref`.
+    /// let externref = ExternRef::new(&mut store, "hello")?;
+    ///
+    /// // Convert that `externref` into an `anyref`.
+    /// let anyref = AnyRef::convert_extern(&mut store, externref)?;
+    ///
+    /// // The converted value is an `anyref` but is not an `eqref`.
+    /// assert_eq!(anyref.matches_ty(&store, &HeapType::Any)?, true);
+    /// assert_eq!(anyref.matches_ty(&store, &HeapType::Eq)?, false);
+    ///
+    /// // We can convert it back to the original `externref` and get its
+    /// // associated host data again.
+    /// let externref = ExternRef::convert_any(&mut store, anyref)?;
+    /// let data = externref
+    ///     .data(&store)?
+    ///     .expect("externref should have host data")
+    ///     .downcast_ref::<&str>()
+    ///     .expect("host data should be a str");
+    /// assert_eq!(*data, "hello");
+    /// # Ok(()) }
+    /// # foo().unwrap();
+    pub fn convert_extern(
+        mut store: impl AsContextMut,
+        externref: Rooted<ExternRef>,
+    ) -> Result<Rooted<Self>> {
+        let mut store = AutoAssertNoGc::new(store.as_context_mut().0);
+        Self::_convert_extern(&mut store, externref)
+    }
+
+    pub(crate) fn _convert_extern(
+        store: &mut AutoAssertNoGc<'_>,
+        externref: Rooted<ExternRef>,
+    ) -> Result<Rooted<Self>> {
+        let gc_ref = externref.try_clone_gc_ref(store)?;
+        Ok(Self::from_cloned_gc_ref(store, gc_ref))
+    }
+
     /// Creates a new strongly-owned [`AnyRef`] from the raw value provided.
     ///
     /// This is intended to be used in conjunction with [`Func::new_unchecked`],
@@ -177,27 +249,30 @@ impl AnyRef {
     /// This function assumes that `raw` is an `anyref` value which is currently
     /// rooted within the [`Store`].
     ///
-    /// # Unsafety
+    /// # Correctness
     ///
-    /// This function is particularly `unsafe` because `raw` not only must be a
-    /// valid `anyref` value produced prior by [`AnyRef::to_raw`] but it must
-    /// also be correctly rooted within the store. When arguments are provided
-    /// to a callback with [`Func::new_unchecked`], for example, or returned via
-    /// [`Func::call_unchecked`], if a GC is performed within the store then
-    /// floating `anyref` values are not rooted and will be GC'd, meaning that
-    /// this function will no longer be safe to call with the values cleaned up.
-    /// This function must be invoked *before* possible GC operations can happen
-    /// (such as calling Wasm).
+    /// This function is tricky to get right because `raw` not only must be a
+    /// valid `anyref` value produced prior by [`AnyRef::to_raw`] but it
+    /// must also be correctly rooted within the store. When arguments are
+    /// provided to a callback with [`Func::new_unchecked`], for example, or
+    /// returned via [`Func::call_unchecked`], if a GC is performed within the
+    /// store then floating `anyref` values are not rooted and will be GC'd,
+    /// meaning that this function will no longer be correct to call with the
+    /// values cleaned up. This function must be invoked *before* possible GC
+    /// operations can happen (such as calling Wasm).
     ///
-    /// When in doubt try to not use this. Instead use the safe Rust APIs of
-    /// [`TypedFunc`] and friends.
+    ///
+    /// When in doubt try to not use this. Instead use the Rust APIs of
+    /// [`TypedFunc`] and friends. Note though that this function is not
+    /// `unsafe` as any value can be passed in. Incorrect values can result in
+    /// runtime panics, however, so care must still be taken with this method.
     ///
     /// [`Func::call_unchecked`]: crate::Func::call_unchecked
     /// [`Func::new_unchecked`]: crate::Func::new_unchecked
     /// [`Store`]: crate::Store
     /// [`TypedFunc`]: crate::TypedFunc
     /// [`ValRaw`]: crate::ValRaw
-    pub unsafe fn from_raw(mut store: impl AsContextMut, raw: u32) -> Option<Rooted<Self>> {
+    pub fn from_raw(mut store: impl AsContextMut, raw: u32) -> Option<Rooted<Self>> {
         let mut store = AutoAssertNoGc::new(store.as_context_mut().0);
         Self::_from_raw(&mut store, raw)
     }
@@ -205,6 +280,7 @@ impl AnyRef {
     // (Not actually memory unsafe since we have indexed GC heaps.)
     pub(crate) fn _from_raw(store: &mut AutoAssertNoGc, raw: u32) -> Option<Rooted<Self>> {
         let gc_ref = VMGcRef::from_raw_u32(raw)?;
+        let gc_ref = store.clone_gc_ref(&gc_ref);
         Some(Self::from_cloned_gc_ref(store, gc_ref))
     }
 
@@ -224,6 +300,11 @@ impl AnyRef {
                     .header(&gc_ref)
                     .kind()
                     .matches(VMGcKind::AnyRef)
+                || store
+                    .unwrap_gc_store()
+                    .header(&gc_ref)
+                    .kind()
+                    .matches(VMGcKind::ExternRef)
         );
         Rooted::new(store, gc_ref)
     }
@@ -238,19 +319,26 @@ impl AnyRef {
     ///
     /// Returns an error if this `anyref` has been unrooted.
     ///
-    /// # Unsafety
+    /// # Correctness
     ///
-    /// Produces a raw value which is only safe to pass into a store if a GC
+    /// Produces a raw value which is only valid to pass into a store if a GC
     /// doesn't happen between when the value is produce and when it's passed
     /// into the store.
     ///
     /// [`ValRaw`]: crate::ValRaw
-    pub unsafe fn to_raw(&self, mut store: impl AsContextMut) -> Result<u32> {
+    pub fn to_raw(&self, mut store: impl AsContextMut) -> Result<u32> {
         let mut store = AutoAssertNoGc::new(store.as_context_mut().0);
-        let gc_ref = self.inner.try_clone_gc_ref(&mut store)?;
-        let raw = gc_ref.as_raw_u32();
-        store.gc_store_mut()?.expose_gc_ref_to_wasm(gc_ref);
-        Ok(raw)
+        self._to_raw(&mut store)
+    }
+
+    pub(crate) fn _to_raw(&self, store: &mut AutoAssertNoGc<'_>) -> Result<u32> {
+        let gc_ref = self.inner.try_clone_gc_ref(store)?;
+        let raw = if gc_ref.is_i31() {
+            gc_ref.as_raw_non_zero_u32()
+        } else {
+            store.require_gc_store_mut()?.expose_gc_ref_to_wasm(gc_ref)
+        };
+        Ok(raw.get())
     }
 
     /// Get the type of this reference.
@@ -272,7 +360,14 @@ impl AnyRef {
             return Ok(HeapType::I31);
         }
 
-        let header = store.gc_store()?.header(gc_ref);
+        let header = store.require_gc_store()?.header(gc_ref);
+
+        if header.kind().matches(VMGcKind::ExternRef) {
+            return Ok(HeapType::Any);
+        }
+
+        debug_assert!(header.kind().matches(VMGcKind::AnyRef));
+        debug_assert!(header.kind().matches(VMGcKind::EqRef));
 
         if header.kind().matches(VMGcKind::StructRef) {
             return Ok(HeapType::ConcreteStruct(
@@ -320,6 +415,75 @@ impl AnyRef {
             let actual_ty = self._ty(store)?;
             bail!("type mismatch: expected `(ref {ty})`, found `(ref {actual_ty})`")
         }
+    }
+
+    /// Is this `anyref` an `eqref`?
+    ///
+    /// # Errors
+    ///
+    /// Return an error if this reference has been unrooted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this reference is associated with a different store.
+    pub fn is_eqref(&self, store: impl AsContext) -> Result<bool> {
+        self._is_eqref(store.as_context().0)
+    }
+
+    pub(crate) fn _is_eqref(&self, store: &StoreOpaque) -> Result<bool> {
+        assert!(self.comes_from_same_store(store));
+        let gc_ref = self.inner.try_gc_ref(store)?;
+        Ok(gc_ref.is_i31()
+            || store
+                .require_gc_store()?
+                .kind(gc_ref)
+                .matches(VMGcKind::EqRef))
+    }
+
+    /// Downcast this `anyref` to an `eqref`.
+    ///
+    /// If this `anyref` is an `eqref`, then `Some(_)` is returned.
+    ///
+    /// If this `anyref` is not an `eqref`, then `None` is returned.
+    ///
+    /// # Errors
+    ///
+    /// Return an error if this reference has been unrooted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this reference is associated with a different store.
+    pub fn as_eqref(&self, store: impl AsContext) -> Result<Option<Rooted<EqRef>>> {
+        self._as_eqref(store.as_context().0)
+    }
+
+    pub(crate) fn _as_eqref(&self, store: &StoreOpaque) -> Result<Option<Rooted<EqRef>>> {
+        if self._is_eqref(store)? {
+            Ok(Some(Rooted::from_gc_root_index(self.inner)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Downcast this `anyref` to an `eqref`, panicking if this `anyref` is not
+    /// an `eqref`.
+    ///
+    /// # Errors
+    ///
+    /// Return an error if this reference has been unrooted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this reference is associated with a different store, or if
+    /// this `anyref` is not an `eqref`.
+    pub fn unwrap_eqref(&self, store: impl AsContext) -> Result<Rooted<EqRef>> {
+        self._unwrap_eqref(store.as_context().0)
+    }
+
+    pub(crate) fn _unwrap_eqref(&self, store: &StoreOpaque) -> Result<Rooted<EqRef>> {
+        Ok(self
+            ._as_eqref(store)?
+            .expect("AnyRef::unwrap_eqref on non-eqref"))
     }
 
     /// Is this `anyref` an `i31`?
@@ -394,7 +558,11 @@ impl AnyRef {
 
     pub(crate) fn _is_struct(&self, store: &StoreOpaque) -> Result<bool> {
         let gc_ref = self.inner.try_gc_ref(store)?;
-        Ok(!gc_ref.is_i31() && store.gc_store()?.kind(gc_ref).matches(VMGcKind::StructRef))
+        Ok(!gc_ref.is_i31()
+            && store
+                .require_gc_store()?
+                .kind(gc_ref)
+                .matches(VMGcKind::StructRef))
     }
 
     /// Downcast this `anyref` to a `structref`.
@@ -458,7 +626,11 @@ impl AnyRef {
 
     pub(crate) fn _is_array(&self, store: &StoreOpaque) -> Result<bool> {
         let gc_ref = self.inner.try_gc_ref(store)?;
-        Ok(!gc_ref.is_i31() && store.gc_store()?.kind(gc_ref).matches(VMGcKind::ArrayRef))
+        Ok(!gc_ref.is_i31()
+            && store
+                .require_gc_store()?
+                .kind(gc_ref)
+                .matches(VMGcKind::ArrayRef))
     }
 
     /// Downcast this `anyref` to an `arrayref`.
@@ -582,7 +754,7 @@ unsafe impl WasmTy for Option<Rooted<AnyRef>> {
     }
 }
 
-unsafe impl WasmTy for ManuallyRooted<AnyRef> {
+unsafe impl WasmTy for OwnedRooted<AnyRef> {
     #[inline]
     fn valtype() -> ValType {
         ValType::Ref(RefType::new(false, HeapType::Any))
@@ -612,7 +784,7 @@ unsafe impl WasmTy for ManuallyRooted<AnyRef> {
     }
 }
 
-unsafe impl WasmTy for Option<ManuallyRooted<AnyRef>> {
+unsafe impl WasmTy for Option<OwnedRooted<AnyRef>> {
     #[inline]
     fn valtype() -> ValType {
         ValType::ANYREF
@@ -649,11 +821,11 @@ unsafe impl WasmTy for Option<ManuallyRooted<AnyRef>> {
     }
 
     fn store(self, store: &mut AutoAssertNoGc<'_>, ptr: &mut MaybeUninit<ValRaw>) -> Result<()> {
-        <ManuallyRooted<AnyRef>>::wasm_ty_option_store(self, store, ptr, ValRaw::anyref)
+        <OwnedRooted<AnyRef>>::wasm_ty_option_store(self, store, ptr, ValRaw::anyref)
     }
 
     unsafe fn load(store: &mut AutoAssertNoGc<'_>, ptr: &ValRaw) -> Self {
-        <ManuallyRooted<AnyRef>>::wasm_ty_option_load(
+        <OwnedRooted<AnyRef>>::wasm_ty_option_load(
             store,
             ptr.get_anyref(),
             AnyRef::from_cloned_gc_ref,

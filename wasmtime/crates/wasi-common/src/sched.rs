@@ -1,6 +1,6 @@
+use crate::Error;
 use crate::clocks::WasiMonotonicClock;
 use crate::file::WasiFile;
-use crate::Error;
 use cap_std::time::Instant;
 pub mod subscription;
 pub use cap_std::time::Duration;
@@ -9,7 +9,7 @@ pub use subscription::{
     MonotonicClockSubscription, RwEventFlags, RwSubscription, Subscription, SubscriptionResult,
 };
 
-#[wiggle::async_trait]
+#[async_trait::async_trait]
 pub trait WasiSched: Send + Sync {
     async fn poll_oneoff<'a>(&self, poll: &mut Poll<'a>) -> Result<(), Error>;
     async fn sched_yield(&self) -> Result<(), Error>;

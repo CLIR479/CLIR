@@ -34,10 +34,9 @@
 
 use crate::{SpecExport, SpecInstance, SpecValue};
 use ocaml_interop::{BoxRoot, OCamlRuntime, ToOCaml};
-use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
-static INTERPRET: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static INTERPRET: Mutex<()> = Mutex::new(());
 
 /// Instantiate the WebAssembly module in the spec interpreter.
 pub fn instantiate(module: &[u8]) -> Result<SpecInstance, String> {
@@ -108,8 +107,8 @@ pub fn export(instance: &SpecInstance, name: &str) -> Result<SpecExport, String>
 mod ocaml_bindings {
     use super::*;
     use ocaml_interop::{
-        impl_conv_ocaml_variant, ocaml, FromOCaml, OCaml, OCamlBytes, OCamlInt32, OCamlInt64,
-        OCamlList,
+        FromOCaml, OCaml, OCamlBytes, OCamlInt32, OCamlInt64, OCamlList, impl_conv_ocaml_variant,
+        ocaml,
     };
 
     // Using this macro converts the enum both ways: Rust to OCaml and OCaml to

@@ -1,25 +1,25 @@
 #![no_main]
 
+use cranelift_codegen::Context;
 use cranelift_codegen::ir::Function;
 use cranelift_codegen::ir::Signature;
 use cranelift_codegen::ir::UserExternalName;
 use cranelift_codegen::ir::UserFuncName;
-use cranelift_codegen::Context;
 use cranelift_control::ControlPlane;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use cranelift_codegen::data_value::DataValue;
 use cranelift_codegen::ir::{LibCall, TrapCode};
 use cranelift_codegen::isa;
-use cranelift_filetests::function_runner::{TestFileCompiler, Trampoline};
+use cranelift_filetests::function_runner::{CompiledTestFile, TestFileCompiler, Trampoline};
 use cranelift_fuzzgen::*;
 use cranelift_interpreter::environment::FuncIndex;
 use cranelift_interpreter::environment::FunctionStore;
@@ -107,6 +107,9 @@ impl Default for Statistics {
         // Pre-Register all trap codes since we can't modify this hashmap atomically.
         let mut run_result_trap = HashMap::new();
         run_result_trap.insert(CraneliftTrap::Debug, AtomicU64::new(0));
+        run_result_trap.insert(CraneliftTrap::BadSignature, AtomicU64::new(0));
+        run_result_trap.insert(CraneliftTrap::UnreachableCodeReached, AtomicU64::new(0));
+        run_result_trap.insert(CraneliftTrap::HeapMisaligned, AtomicU64::new(0));
         for trapcode in TrapCode::non_user_traps() {
             run_result_trap.insert(CraneliftTrap::User(*trapcode), AtomicU64::new(0));
         }
@@ -181,23 +184,25 @@ impl<'a> Arbitrary<'a> for TestCase {
 
 impl TestCase {
     pub fn generate(u: &mut Unstructured) -> anyhow::Result<Self> {
-        let mut gen = FuzzGen::new(u);
+        let mut generator = FuzzGen::new(u);
 
-        let compare_against_host = gen.u.arbitrary()?;
+        let compare_against_host = generator.u.arbitrary()?;
 
         // TestCase is meant to be consumed by a runner, so we make the assumption here that we're
         // generating a TargetIsa for the host.
         let mut builder =
             builder_with_options(true).expect("Unable to build a TargetIsa for the current host");
-        let flags = gen.generate_flags(builder.triple().architecture)?;
-        gen.set_isa_flags(&mut builder, IsaFlagGen::Host)?;
+        let flags = generator.generate_flags(builder.triple().architecture)?;
+        generator.set_isa_flags(&mut builder, IsaFlagGen::Host)?;
         let isa = builder.finish(flags)?;
 
         // When generating functions, we allow each function to call any function that has
         // already been generated. This guarantees that we never have loops in the call graph.
         // We generate these backwards, and then reverse them so that the main function is at
         // the start.
-        let func_count = gen.u.int_in_range(gen.config.testcase_funcs.clone())?;
+        let func_count = generator
+            .u
+            .int_in_range(generator.config.testcase_funcs.clone())?;
         let mut functions: Vec<Function> = Vec::with_capacity(func_count);
         let mut ctrl_planes: Vec<ControlPlane> = Vec::with_capacity(func_count);
         for i in (0..func_count).rev() {
@@ -214,17 +219,21 @@ impl TestCase {
                 })
                 .collect();
 
-            let func =
-                gen.generate_func(fname, isa.clone(), usercalls, ALLOWED_LIBCALLS.to_vec())?;
+            let func = generator.generate_func(
+                fname,
+                isa.clone(),
+                usercalls,
+                ALLOWED_LIBCALLS.to_vec(),
+            )?;
             functions.push(func);
 
-            ctrl_planes.push(ControlPlane::arbitrary(gen.u)?);
+            ctrl_planes.push(ControlPlane::arbitrary(generator.u)?);
         }
         // Now reverse the functions so that the main function is at the start.
         functions.reverse();
 
         let main = &functions[0];
-        let inputs = gen.generate_test_inputs(&main.signature)?;
+        let inputs = generator.generate_test_inputs(&main.signature)?;
 
         Ok(TestCase {
             isa,
@@ -277,8 +286,12 @@ fn run_in_interpreter(interpreter: &mut Interpreter, args: &[DataValue]) -> RunR
     }
 }
 
-fn run_in_host(trampoline: &Trampoline, args: &[DataValue]) -> RunResult {
-    let res = trampoline.call(args);
+fn run_in_host(
+    compiled: &CompiledTestFile,
+    trampoline: &Trampoline,
+    args: &[DataValue],
+) -> RunResult {
+    let res = trampoline.call(compiled, args);
     RunResult::Success(res)
 }
 
@@ -292,7 +305,7 @@ const ALLOWED_LIBCALLS: &'static [LibCall] = &[
     LibCall::TruncF64,
 ];
 
-fn build_interpreter(testcase: &TestCase) -> Interpreter {
+fn build_interpreter(testcase: &TestCase) -> Interpreter<'_> {
     let mut env = FunctionStore::default();
     for func in testcase.functions.iter() {
         env.add(func.name.to_string(), &func);
@@ -317,7 +330,7 @@ fn build_interpreter(testcase: &TestCase) -> Interpreter {
     interpreter
 }
 
-static STATISTICS: Lazy<Statistics> = Lazy::new(Statistics::default);
+static STATISTICS: LazyLock<Statistics> = LazyLock::new(Statistics::default);
 
 fn run_test_inputs(testcase: &TestCase, run: impl Fn(&[DataValue]) -> RunResult) {
     for args in &testcase.inputs {
@@ -404,6 +417,6 @@ fuzz_target!(|testcase: TestCase| {
         let compiled = compiler.compile().unwrap();
         let trampoline = compiled.get_trampoline(testcase.main()).unwrap();
 
-        run_test_inputs(&testcase, |args| run_in_host(&trampoline, args));
+        run_test_inputs(&testcase, |args| run_in_host(&compiled, &trampoline, args));
     }
 });

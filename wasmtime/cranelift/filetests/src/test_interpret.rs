@@ -14,7 +14,7 @@ use cranelift_codegen::settings::Flags;
 use cranelift_interpreter::environment::FunctionStore;
 use cranelift_interpreter::interpreter::{Interpreter, InterpreterState, LibCallValues};
 use cranelift_interpreter::step::ControlFlow;
-use cranelift_reader::{parse_run_command, Details, TestCommand, TestFile};
+use cranelift_reader::{Details, TestCommand, TestFile, parse_run_command};
 use log::{info, trace};
 use smallvec::smallvec;
 use std::borrow::Cow;
@@ -24,7 +24,7 @@ struct TestInterpret;
 pub fn subtest(parsed: &TestCommand) -> anyhow::Result<Box<dyn SubTest>> {
     assert_eq!(parsed.command, "interpret");
     if !parsed.options.is_empty() {
-        anyhow::bail!("No options allowed on {}", parsed);
+        anyhow::bail!("No options allowed on {parsed}");
     }
     Ok(Box::new(TestInterpret))
 }
@@ -79,7 +79,7 @@ impl SubTest for TestInterpret {
 fn run_test(func_store: &FunctionStore, func: &Function, details: &Details) -> anyhow::Result<()> {
     for comment in details.comments.iter() {
         if let Some(command) = parse_run_command(comment.text, &func.signature)? {
-            trace!("Parsed run command: {}", command);
+            trace!("Parsed run command: {command}");
 
             command
                 .run(|func_name, run_args| {
@@ -113,7 +113,7 @@ fn run_test(func_store: &FunctionStore, func: &Function, details: &Details) -> a
                         Err(t) => Err(format!("unexpected trap: {t:?}")),
                     }
                 })
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
     }
     Ok(())

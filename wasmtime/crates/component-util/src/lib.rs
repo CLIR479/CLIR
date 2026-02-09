@@ -1,3 +1,10 @@
+//! > **⚠️ Warning ⚠️**: this crate is an internal-only crate for the Wasmtime
+//! > project and is not intended for general use. APIs are not strictly
+//! > reviewed for safety and usage outside of Wasmtime may have bugs. If
+//! > you're interested in using this feel free to file an issue on the
+//! > Wasmtime repository to start a discussion about doing so, but otherwise
+//! > be aware that your usage of this crate is not supported.
+
 #![no_std]
 
 /// Represents the possible sizes in bytes of the discriminant of a variant type in the component model
@@ -14,11 +21,11 @@ pub enum DiscriminantSize {
 impl DiscriminantSize {
     /// Calculate the size of discriminant needed to represent a variant with the specified number of cases.
     pub const fn from_count(count: usize) -> Option<Self> {
-        if count <= 0xFF {
+        if count <= 1 << 8 {
             Some(Self::Size1)
-        } else if count <= 0xFFFF {
+        } else if count <= 1 << 16 {
             Some(Self::Size2)
-        } else if count <= 0xFFFF_FFFF {
+        } else if count as u64 <= 1 << 32 {
             Some(Self::Size4)
         } else {
             None
@@ -75,18 +82,13 @@ impl FlagsSize {
         } else if count <= 16 {
             FlagsSize::Size2
         } else {
-            let amt = ceiling_divide(count, 32);
+            let amt = count.div_ceil(32);
             if amt > (u8::MAX as usize) {
                 panic!("too many flags");
             }
             FlagsSize::Size4Plus(amt as u8)
         }
     }
-}
-
-/// Divide `n` by `d`, rounding up in the case of a non-zero remainder.
-const fn ceiling_divide(n: usize, d: usize) -> usize {
-    (n + d - 1) / d
 }
 
 /// A simple bump allocator which can be used with modules

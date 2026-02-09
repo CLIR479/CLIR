@@ -18,26 +18,24 @@
 //! ```
 //! use wasmtime::{
 //!     component::{Linker, ResourceTable},
-//!     Config, Engine, Result, Store,
+//!     Engine, Result, Store,
 //! };
-//! use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView};
+//! use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 //! use wasmtime_wasi_keyvalue::{WasiKeyValue, WasiKeyValueCtx, WasiKeyValueCtxBuilder};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<()> {
-//!     let mut config = Config::new();
-//!     config.async_support(true);
-//!     let engine = Engine::new(&config)?;
+//!     let engine = Engine::default();
 //!
 //!     let mut store = Store::new(&engine, Ctx {
 //!         table: ResourceTable::new(),
-//!         wasi_ctx: WasiCtxBuilder::new().build(),
+//!         wasi_ctx: WasiCtx::builder().build(),
 //!         wasi_keyvalue_ctx: WasiKeyValueCtxBuilder::new().build(),
 //!     });
 //!
 //!     let mut linker = Linker::<Ctx>::new(&engine);
-//!     wasmtime_wasi::add_to_linker_async(&mut linker)?;
-//!     // add `wasi-runtime-config` world's interfaces to the linker
+//!     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+//!     // add `wasi-keyvalue` world's interfaces to the linker
 //!     wasmtime_wasi_keyvalue::add_to_linker(&mut linker, |h: &mut Ctx| {
 //!         WasiKeyValue::new(&h.wasi_keyvalue_ctx, &mut h.table)
 //!     })?;
@@ -54,8 +52,9 @@
 //! }
 //!
 //! impl WasiView for Ctx {
-//!     fn table(&mut self) -> &mut ResourceTable { &mut self.table }
-//!     fn ctx(&mut self) -> &mut WasiCtx { &mut self.wasi_ctx }
+//!     fn ctx(&mut self) -> WasiCtxView<'_> {
+//!         WasiCtxView { ctx: &mut self.wasi_ctx, table: &mut self.table }
+//!     }
 //! }
 //! ```
 //!
@@ -69,20 +68,20 @@ mod generated {
     wasmtime::component::bindgen!({
         path: "wit",
         world: "wasi:keyvalue/imports",
-        trappable_imports: true,
+        imports: { default: trappable },
         with: {
-            "wasi:keyvalue/store/bucket": crate::Bucket,
+            "wasi:keyvalue/store.bucket": crate::Bucket,
         },
         trappable_error_type: {
-            "wasi:keyvalue/store/error" => crate::Error,
+            "wasi:keyvalue/store.error" => crate::Error,
         },
     });
 }
 
 use self::generated::wasi::keyvalue;
-use anyhow::Result;
 use std::collections::HashMap;
-use wasmtime::component::{Resource, ResourceTable, ResourceTableError};
+use wasmtime::Result;
+use wasmtime::component::{HasData, Resource, ResourceTable, ResourceTableError};
 
 #[doc(hidden)]
 pub enum Error {
@@ -286,12 +285,18 @@ impl keyvalue::batch::Host for WasiKeyValue<'_> {
 }
 
 /// Add all the `wasi-keyvalue` world's interfaces to a [`wasmtime::component::Linker`].
-pub fn add_to_linker<T: Send>(
+pub fn add_to_linker<T: Send + 'static>(
     l: &mut wasmtime::component::Linker<T>,
-    f: impl Fn(&mut T) -> WasiKeyValue<'_> + Send + Sync + Copy + 'static,
+    f: fn(&mut T) -> WasiKeyValue<'_>,
 ) -> Result<()> {
-    keyvalue::store::add_to_linker_get_host(l, f)?;
-    keyvalue::atomics::add_to_linker_get_host(l, f)?;
-    keyvalue::batch::add_to_linker_get_host(l, f)?;
+    keyvalue::store::add_to_linker::<_, HasWasiKeyValue>(l, f)?;
+    keyvalue::atomics::add_to_linker::<_, HasWasiKeyValue>(l, f)?;
+    keyvalue::batch::add_to_linker::<_, HasWasiKeyValue>(l, f)?;
     Ok(())
+}
+
+struct HasWasiKeyValue;
+
+impl HasData for HasWasiKeyValue {
+    type Data<'a> = WasiKeyValue<'a>;
 }

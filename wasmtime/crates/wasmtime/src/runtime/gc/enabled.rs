@@ -3,6 +3,8 @@
 
 mod anyref;
 mod arrayref;
+mod eqref;
+mod exnref;
 mod externref;
 mod i31;
 mod rooting;
@@ -10,6 +12,8 @@ mod structref;
 
 pub use anyref::*;
 pub use arrayref::*;
+pub use eqref::*;
+pub use exnref::*;
 pub use externref::*;
 pub use i31::*;
 pub use rooting::*;

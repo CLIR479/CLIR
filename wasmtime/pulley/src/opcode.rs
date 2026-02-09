@@ -26,12 +26,9 @@ macro_rules! define_opcode {
 
         impl Opcode {
             /// The value of the maximum defined opcode.
-            pub const MAX: u8 = define_opcode!( @max $( $name )* ) + 1;
+            pub const MAX: u8 = Opcode::ExtendedOp as u8;
         }
-    };
-
-    ( @max $x:ident ) => { 0 };
-    ( @max $x:ident $( $xs:ident )* ) => { 1 + define_opcode!(@max $( $xs )* ) };
+    }
 }
 for_each_op!(define_opcode);
 
@@ -54,7 +51,7 @@ impl Opcode {
     /// It is unsafe to pass a `byte` that is not a valid opcode.
     pub unsafe fn unchecked_new(byte: u8) -> Self {
         debug_assert!(byte <= Self::MAX);
-        core::mem::transmute(byte)
+        unsafe { core::mem::transmute(byte) }
     }
 }
 
@@ -77,19 +74,15 @@ macro_rules! define_extended_opcode {
 
         impl ExtendedOpcode {
             /// The value of the maximum defined extended opcode.
-            pub const MAX: u16 = define_opcode!( @max $( $name )* );
+            pub const MAX: u16 = $(
+                if true { 1 } else { ExtendedOpcode::$name as u16 } +
+            )* 0;
         }
     };
-
-    ( @max $x:ident ) => { 0 };
-    ( @max $x:ident $( $xs:ident )* ) => { 1 + define_opcode!(@max $( $xs )* ) };
 }
 for_each_extended_op!(define_extended_opcode);
 
 impl ExtendedOpcode {
-    #[cfg_attr(not(feature = "interp"), allow(unused))]
-    pub(crate) const ENCODED_SIZE_OF_TRAP: usize = 3;
-
     /// Create a new `ExtendedOpcode` from the given bytes.
     ///
     /// Returns `None` if `bytes` is not a valid extended opcode.
@@ -108,19 +101,6 @@ impl ExtendedOpcode {
     /// It is unsafe to pass `bytes` that is not a valid opcode.
     pub unsafe fn unchecked_new(byte: u16) -> Self {
         debug_assert!(byte <= Self::MAX);
-        core::mem::transmute(byte)
-    }
-}
-
-#[cfg(all(test, feature = "encode"))]
-mod tests {
-    use super::*;
-    use alloc::vec::Vec;
-
-    #[test]
-    fn encoded_size_of_trap() {
-        let mut buf = Vec::new();
-        crate::encode::trap(&mut buf);
-        assert_eq!(ExtendedOpcode::ENCODED_SIZE_OF_TRAP, buf.len());
+        unsafe { core::mem::transmute(byte) }
     }
 }

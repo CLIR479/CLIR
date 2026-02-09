@@ -21,11 +21,11 @@
 ;;       pushq   %rbp
 ;;       movq    %rsp, %rbp
 ;;       movq    8(%rdi), %r11
-;;       movq    (%r11), %r11
+;;       movq    0x10(%r11), %r11
 ;;       addq    $0x20, %r11
 ;;       cmpq    %rsp, %r11
-;;       ja      0x36
-;;   1b: movq    %rdi, %r14
+;;       ja      0x3d
+;;   1c: movq    %rdi, %r14
 ;;       subq    $0x20, %rsp
 ;;       movq    %rdi, 0x18(%rsp)
 ;;       movq    %rsi, 0x10(%rsp)
@@ -33,17 +33,17 @@
 ;;       addq    $0x20, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;   36: ud2
+;;   3d: ud2
 ;;
 ;; wasm[0]::function[1]:
 ;;       pushq   %rbp
 ;;       movq    %rsp, %rbp
 ;;       movq    8(%rdi), %r11
-;;       movq    (%r11), %r11
+;;       movq    0x10(%r11), %r11
 ;;       addq    $0x30, %r11
 ;;       cmpq    %rsp, %r11
-;;       ja      0x130
-;;   5b: movq    %rdi, %r14
+;;       ja      0x156
+;;   5c: movq    %rdi, %r14
 ;;       subq    $0x20, %rsp
 ;;       movq    %rdi, 0x18(%rsp)
 ;;       movq    %rsi, 0x10(%rsp)
@@ -53,39 +53,39 @@
 ;;       movl    %r11d, (%rsp)
 ;;       movl    $0, %ecx
 ;;       movq    %r14, %rdx
-;;       movl    0x60(%rdx), %ebx
-;;       cmpl    %ebx, %ecx
-;;       jae     0x132
-;;   95: movl    %ecx, %r11d
+;;       movq    0x38(%rdx), %rbx
+;;       cmpq    %rbx, %rcx
+;;       jae     0x158
+;;   9e: movq    %rcx, %r11
 ;;       imulq   $8, %r11, %r11
-;;       movq    0x58(%rdx), %rdx
+;;       movq    0x30(%rdx), %rdx
 ;;       movq    %rdx, %rsi
 ;;       addq    %r11, %rdx
 ;;       cmpl    %ebx, %ecx
 ;;       cmovaeq %rsi, %rdx
 ;;       movq    (%rdx), %rax
 ;;       testq   %rax, %rax
-;;       jne     0xe6
-;;   b8: subq    $4, %rsp
+;;       jne     0xfe
+;;   c4: subq    $4, %rsp
 ;;       movl    %ecx, (%rsp)
 ;;       subq    $8, %rsp
 ;;       movq    %r14, %rdi
 ;;       movl    $0, %esi
 ;;       movl    8(%rsp), %edx
-;;       callq   0x30d
+;;       callq   0x32b
 ;;       addq    $8, %rsp
 ;;       addq    $4, %rsp
 ;;       movq    0x1c(%rsp), %r14
-;;       jmp     0xea
-;;   e6: andq    $0xfffffffffffffffe, %rax
+;;       jmp     0x104
+;;   fe: andq    $0xfffffffffffffffe, %rax
 ;;       testq   %rax, %rax
-;;       je      0x134
-;;   f3: movq    0x50(%r14), %r11
+;;       je      0x15a
+;;  10d: movq    0x28(%r14), %r11
 ;;       movl    (%r11), %ecx
 ;;       movl    0x10(%rax), %edx
 ;;       cmpl    %edx, %ecx
-;;       jne     0x136
-;;  105: movq    0x18(%rax), %rbx
+;;       jne     0x15c
+;;  11f: movq    0x18(%rax), %rbx
 ;;       movq    8(%rax), %rcx
 ;;       subq    $0xc, %rsp
 ;;       movq    %rbx, %rdi
@@ -98,7 +98,7 @@
 ;;       addq    $0x20, %rsp
 ;;       popq    %rbp
 ;;       retq
-;;  130: ud2
-;;  132: ud2
-;;  134: ud2
-;;  136: ud2
+;;  156: ud2
+;;  158: ud2
+;;  15a: ud2
+;;  15c: ud2

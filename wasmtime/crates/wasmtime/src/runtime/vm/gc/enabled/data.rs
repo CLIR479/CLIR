@@ -4,13 +4,11 @@ use crate::V128;
 use core::mem;
 
 /// A plain-old-data type that can be stored in a `ValType` or a `StorageType`.
-///
-/// Safety: implementations must be POD and all bit patterns must be valid.
 pub trait PodValType<const SIZE: usize>: Copy {
-    /// Read an instance of `Self` from the given little-endian bytes.
+    /// Read an instance of `Self` from the given native-endian bytes.
     fn read_le(le_bytes: &[u8; SIZE]) -> Self;
 
-    /// Write `self` into the given memory location, as little-endian bytes.
+    /// Write `self` into the given memory location, as native-endian bytes.
     fn write_le(&self, into: &mut [u8; SIZE]);
 }
 
@@ -62,41 +60,64 @@ impl PodValType<{ mem::size_of::<V128>() }> for V128 {
 /// for preserving the memory safety of indexed GC heaps in the face of (for
 /// example) collector bugs, but the latter is just a defensive technique to
 /// catch bugs early and prevent action at a distance as much as possible.
-pub struct VMGcObjectDataMut<'a> {
-    data: &'a mut [u8],
+#[repr(transparent)]
+pub struct VMGcObjectData {
+    data: [u8],
 }
 
 macro_rules! impl_pod_methods {
-    ( $( $t:ty, $read:ident, $write:ident; )* ) => {
+    ( $( $T:ty, $read:ident, $write:ident; )* ) => {
         $(
             /// Read a `
-            #[doc = stringify!($t)]
+            #[doc = stringify!($T)]
             /// ` field this object.
             ///
             /// Panics on out-of-bounds accesses.
             #[inline]
-            pub fn $read(&self, offset: u32) -> $t {
-                self.read_pod::<{ mem::size_of::<$t>() }, $t>(offset)
+            pub fn $read(&self, offset: u32) -> $T
+            {
+                self.read_pod::<{ mem::size_of::<$T>() }, $T>(offset)
             }
 
             /// Write a `
-            #[doc = stringify!($t)]
+            #[doc = stringify!($T)]
             /// ` into this object.
             ///
             /// Panics on out-of-bounds accesses.
             #[inline]
-            pub fn $write(&mut self, offset: u32, val: $t) {
-                self.write_pod::<{ mem::size_of::<$t>() }, $t>(offset, val);
+            pub fn $write(&mut self, offset: u32, val: $T)
+            {
+                self.write_pod::<{ mem::size_of::<$T>() }, $T>(offset, val);
             }
         )*
     };
 }
 
-impl<'a> VMGcObjectDataMut<'a> {
-    /// Construct a `VMStructDataMut` from the given slice of bytes.
+impl<'a> From<&'a [u8]> for &'a VMGcObjectData {
     #[inline]
-    pub fn new(data: &'a mut [u8]) -> Self {
-        Self { data }
+    fn from(data: &'a [u8]) -> Self {
+        &VMGcObjectData::from_slice(data)
+    }
+}
+
+impl<'a> From<&'a mut [u8]> for &'a mut VMGcObjectData {
+    #[inline]
+    fn from(data: &'a mut [u8]) -> Self {
+        VMGcObjectData::from_slice_mut(data)
+    }
+}
+
+impl VMGcObjectData {
+    /// Construct a `VMGcObjectData` from the given slice of bytes.
+    #[inline]
+    pub fn from_slice(data: &[u8]) -> &Self {
+        unsafe { mem::transmute(data) }
+    }
+
+    /// Construct a `VMGcObjectData` from the given slice of bytes.
+    #[inline]
+    pub fn from_slice_mut(data: &mut [u8]) -> &mut Self {
+        unsafe { mem::transmute(data) }
     }
 
     /// Read a POD field out of this object.
@@ -131,8 +152,56 @@ impl<'a> VMGcObjectDataMut<'a> {
         assert_eq!(N, mem::size_of::<T>());
         let offset = usize::try_from(offset).unwrap();
         let end = offset.checked_add(N).unwrap();
-        let into = self.data.get_mut(offset..end).expect("out of bounds field");
+        let into = match self.data.get_mut(offset..end) {
+            Some(into) => into,
+            None => panic!(
+                "out of bounds field! field range = {offset:#x}..{end:#x}; object len = {:#x}",
+                self.data.as_mut().len(),
+            ),
+        };
         val.write_le(into.try_into().unwrap());
+    }
+
+    /// Get a slice of this object's data.
+    ///
+    /// Note that GC data is always stored in little-endian order, and this
+    /// method does not do any conversions to/from host endianness for you.
+    ///
+    /// Panics on out-of-bounds accesses.
+    #[inline]
+    pub fn slice(&self, offset: u32, len: u32) -> &[u8] {
+        let start = usize::try_from(offset).unwrap();
+        let len = usize::try_from(len).unwrap();
+        let end = start.checked_add(len).unwrap();
+        self.data.get(start..end).expect("out of bounds slice")
+    }
+
+    /// Get a mutable slice of this object's data.
+    ///
+    /// Note that GC data is always stored in little-endian order, and this
+    /// method does not do any conversions to/from host endianness for you.
+    ///
+    /// Panics on out-of-bounds accesses.
+    #[inline]
+    pub fn slice_mut(&mut self, offset: u32, len: u32) -> &mut [u8] {
+        let start = usize::try_from(offset).unwrap();
+        let len = usize::try_from(len).unwrap();
+        let end = start.checked_add(len).unwrap();
+        self.data.get_mut(start..end).expect("out of bounds slice")
+    }
+
+    /// Copy the given slice into this object's data at the given offset.
+    ///
+    /// Note that GC data is always stored in little-endian order, and this
+    /// method does not do any conversions to/from host endianness for you.
+    ///
+    /// Panics on out-of-bounds accesses.
+    #[inline]
+    pub fn copy_from_slice(&mut self, offset: u32, src: &[u8]) {
+        let offset = usize::try_from(offset).unwrap();
+        let end = offset.checked_add(src.len()).unwrap();
+        let into = self.data.get_mut(offset..end).expect("out of bounds copy");
+        into.copy_from_slice(src);
     }
 
     impl_pod_methods! {

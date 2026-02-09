@@ -51,8 +51,10 @@ fn test_tail_call_default() -> Result<()> {
                 .target("x86_64")?,
         ),
     ] {
+        cfg.signals_based_traps(true);
         let engine = Engine::new(cfg)?;
 
+        eprintln!("running config on line {line}");
         let wat = r#"
             (module $from_name_section
                 (func (export "run") (return_call 0))
@@ -61,7 +63,7 @@ fn test_tail_call_default() -> Result<()> {
 
         let result = engine.precompile_module(wat.as_bytes()).map(|_| ());
 
-        eprintln!("for config on line {line}, got: {result:?}");
+        eprintln!("got: {result:?}");
 
         assert_eq!(expected, result.is_ok());
     }

@@ -9,20 +9,6 @@ use std::marker;
 #[derive(Debug)]
 pub struct I32Exit(pub i32);
 
-impl I32Exit {
-    /// Accessor for an exit code appropriate for calling `std::process::exit` with,
-    /// when interpreting this `I32Exit` as an exit for the parent process.
-    ///
-    /// This method masks off exit codes which are illegal on Windows.
-    pub fn process_exit_code(&self) -> i32 {
-        if cfg!(windows) && self.0 >= 3 {
-            1
-        } else {
-            self.0
-        }
-    }
-}
-
 impl fmt::Display for I32Exit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Exited with i32 exit status {}", self.0)
@@ -37,7 +23,7 @@ impl std::error::Error for I32Exit {}
 /// either:
 ///
 /// * A custom error type `T`
-/// * A trap, represented as `anyhow::Error`
+/// * A trap, represented as `wasmtime::Error`
 ///
 /// This error is created through either the `::trap` constructor representing a
 /// full-fledged trap or the `From<T>` constructor which is intended to be used
@@ -57,19 +43,19 @@ impl std::error::Error for I32Exit {}
 /// `bindgen!` macro.
 #[repr(transparent)]
 pub struct TrappableError<T> {
-    err: anyhow::Error,
+    err: wasmtime::Error,
     _marker: marker::PhantomData<T>,
 }
 
 impl<T> TrappableError<T> {
-    pub fn trap(err: impl Into<anyhow::Error>) -> TrappableError<T> {
+    pub fn trap(err: impl Into<wasmtime::Error>) -> TrappableError<T> {
         TrappableError {
             err: err.into(),
             _marker: marker::PhantomData,
         }
     }
 
-    pub fn downcast(self) -> anyhow::Result<T>
+    pub fn downcast(self) -> wasmtime::Result<T>
     where
         T: Error + Send + Sync + 'static,
     {

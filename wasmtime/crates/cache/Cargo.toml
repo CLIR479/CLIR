@@ -1,8 +1,8 @@
 [package]
-name = "wasmtime-cache"
+name = "wasmtime-internal-cache"
 version.workspace = true
 authors.workspace = true
-description = "Support for automatic module caching with Wasmtime"
+description = "INTERNAL: Support for automatic module caching with Wasmtime"
 license = "Apache-2.0 WITH LLVM-exception"
 repository = "https://github.com/bytecodealliance/wasmtime"
 documentation = "https://docs.rs/wasmtime-cache/"
@@ -13,8 +13,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-anyhow = { workspace = true, features = ['std'] }
-base64 = "0.21.0"
+base64 = { workspace = true }
 postcard = { workspace = true }
 directories-next = "2.0"
 log = { workspace = true }
@@ -23,6 +22,7 @@ serde_derive = { workspace = true }
 sha2 = "0.10.2"
 toml = { workspace = true }
 zstd = { version = "0.13.0", default-features = false }
+wasmtime-environ = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
 workspace = true
@@ -35,6 +35,5 @@ rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
 filetime = "0.2.7"
-once_cell = { workspace = true }
-pretty_env_logger = { workspace = true }
+env_logger = { workspace = true }
 tempfile = "3"

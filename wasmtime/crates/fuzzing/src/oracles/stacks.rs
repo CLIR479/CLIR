@@ -1,5 +1,5 @@
 use crate::generators::Stacks;
-use anyhow::bail;
+use wasmtime::bail;
 use wasmtime::*;
 
 /// Run the given `Stacks` test case and assert that the host's view of the Wasm
@@ -40,7 +40,10 @@ pub fn check_stacks(stacks: Stacks) -> usize {
             "call_func",
             |mut caller: Caller<'_, ()>, f: Option<Func>| {
                 let f = f.unwrap();
-                f.call(&mut caller, &[], &mut [])?;
+                let ty = f.ty(&caller);
+                let params = vec![Val::I32(0); ty.params().len()];
+                let mut results = vec![Val::I32(0); ty.results().len()];
+                f.call(&mut caller, &params, &mut results)?;
                 Ok(())
             },
         )
@@ -58,9 +61,9 @@ pub fn check_stacks(stacks: Stacks) -> usize {
 
     let mut max_stack_depth = 0;
     for input in stacks.inputs().iter().copied() {
-        log::debug!("input: {}", input);
+        log::debug!("input: {input}");
         if let Err(trap) = run.call(&mut store, (input.into(),)) {
-            log::debug!("trap: {:?}", trap);
+            log::debug!("trap: {trap:?}");
             let get_stack = instance
                 .get_typed_func::<(), (u32, u32)>(&mut store, "get_stack")
                 .expect("should export `get_stack` function as expected");
@@ -117,7 +120,7 @@ fn assert_stack_matches(
         host_trace
     };
 
-    log::debug!("Wasm thinks its stack is: {:?}", wasm_trace);
+    log::debug!("Wasm thinks its stack is: {wasm_trace:?}");
     log::debug!(
         "Host thinks the stack is: {:?}",
         host_trace
@@ -135,30 +138,15 @@ fn assert_stack_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbitrary::{Arbitrary, Unstructured};
-    use rand::prelude::*;
+    use crate::test::gen_until_pass;
 
     const TARGET_STACK_DEPTH: usize = 10;
 
     #[test]
     fn smoke_test() {
-        let mut rng = SmallRng::seed_from_u64(0);
-        let mut buf = vec![0; 2048];
-
-        for _ in 0..1024 {
-            rng.fill_bytes(&mut buf);
-            let u = Unstructured::new(&buf);
-            if let Ok(stacks) = Stacks::arbitrary_take_rest(u) {
-                let max_stack_depth = check_stacks(stacks);
-                if max_stack_depth >= TARGET_STACK_DEPTH {
-                    return;
-                }
-            }
-        }
-
-        panic!(
-            "never generated a `Stacks` test case that reached {TARGET_STACK_DEPTH} \
-             deep stack frames",
-        );
+        gen_until_pass(|stacks: Stacks, _u| {
+            let max_stack_depth = check_stacks(stacks);
+            Ok(max_stack_depth >= TARGET_STACK_DEPTH)
+        });
     }
 }

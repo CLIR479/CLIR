@@ -16,13 +16,13 @@ pub struct TrapInformation {
 // The code can be accessed from the c-api, where the possible values are
 // translated into enum values defined there:
 //
-// * `wasm_trap_code` in c-api/src/trap.rs, and
+// *  the const assertions in c-api/src/trap.rs, and
 // * `wasmtime_trap_code_enum` in c-api/include/wasmtime/trap.h.
 //
 // These need to be kept in sync.
 #[non_exhaustive]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "self-describing variants")]
 pub enum Trap {
     /// The current stack space was exhausted.
     StackOverflow,
@@ -57,13 +57,6 @@ pub enum Trap {
     /// Execution has potentially run too long and may be interrupted.
     Interrupt,
 
-    /// When the `component-model` feature is enabled this trap represents a
-    /// function that was `canon lift`'d, then `canon lower`'d, then called.
-    /// This combination of creation of a function in the component model
-    /// generates a function that always traps and, when called, produces this
-    /// flavor of trap.
-    AlwaysTrapAdapter,
-
     /// When wasm code is configured to consume fuel and it runs out of fuel
     /// then this trap will be raised.
     OutOfFuel,
@@ -74,15 +67,82 @@ pub enum Trap {
     /// Call to a null reference.
     NullReference,
 
-    /// Attempt to get the bits of a null `i31ref`.
-    NullI31Ref,
+    /// Attempt to access beyond the bounds of an array.
+    ArrayOutOfBounds,
+
+    /// Attempted an allocation that was too large to succeed.
+    AllocationTooLarge,
+
+    /// Attempted to cast a reference to a type that it is not an instance of.
+    CastFailure,
 
     /// When the `component-model` feature is enabled this trap represents a
     /// scenario where one component tried to call another component but it
     /// would have violated the reentrance rules of the component model,
     /// triggering a trap instead.
     CannotEnterComponent,
-    // if adding a variant here be sure to update the `check!` macro below
+
+    /// Async-lifted export failed to produce a result by calling `task.return`
+    /// before returning `STATUS_DONE` and/or after all host tasks completed.
+    NoAsyncResult,
+
+    /// We are suspending to a tag for which there is no active handler.
+    UnhandledTag,
+
+    /// Attempt to resume a continuation twice.
+    ContinuationAlreadyConsumed,
+
+    /// A Pulley opcode was executed at runtime when the opcode was disabled at
+    /// compile time.
+    DisabledOpcode,
+
+    /// Async event loop deadlocked; i.e. it cannot make further progress given
+    /// that all host tasks have completed and any/all host-owned stream/future
+    /// handles have been dropped.
+    AsyncDeadlock,
+
+    /// When the `component-model` feature is enabled this trap represents a
+    /// scenario where a component instance tried to call an import or intrinsic
+    /// when it wasn't allowed to, e.g. from a post-return function.
+    CannotLeaveComponent,
+
+    /// A synchronous task attempted to make a potentially blocking call prior
+    /// to returning.
+    CannotBlockSyncTask,
+
+    /// A component tried to lift a `char` with an invalid bit pattern.
+    InvalidChar,
+
+    /// Debug assertion generated for a fused adapter regarding the expected
+    /// completion of a string encoding operation.
+    DebugAssertStringEncodingFinished,
+
+    /// Debug assertion generated for a fused adapter regarding a string
+    /// encoding operation.
+    DebugAssertEqualCodeUnits,
+
+    /// Debug assertion generated for a fused adapter regarding the alignment of
+    /// a pointer.
+    DebugAssertPointerAligned,
+
+    /// Debug assertion generated for a fused adapter regarding the upper bits
+    /// of a 64-bit value.
+    DebugAssertUpperBitsUnset,
+
+    /// A component tried to lift or lower a string past the end of its memory.
+    StringOutOfBounds,
+
+    /// A component tried to lift or lower a list past the end of its memory.
+    ListOutOfBounds,
+
+    /// A component used an invalid discriminant when lowering a variant value.
+    InvalidDiscriminant,
+
+    /// A component passed an unaligned pointer when lifting or lowering a
+    /// value.
+    UnalignedPointer,
+    // if adding a variant here be sure to update the `check!` macro below, and
+    // remember to update `trap.rs` and `trap.h` as mentioned above
 }
 
 impl Trap {
@@ -110,12 +170,29 @@ impl Trap {
             BadConversionToInteger
             UnreachableCodeReached
             Interrupt
-            AlwaysTrapAdapter
             OutOfFuel
             AtomicWaitNonSharedMemory
             NullReference
-            NullI31Ref
+            ArrayOutOfBounds
+            AllocationTooLarge
+            CastFailure
             CannotEnterComponent
+            NoAsyncResult
+            UnhandledTag
+            ContinuationAlreadyConsumed
+            DisabledOpcode
+            AsyncDeadlock
+            CannotLeaveComponent
+            CannotBlockSyncTask
+            InvalidChar
+            DebugAssertStringEncodingFinished
+            DebugAssertEqualCodeUnits
+            DebugAssertPointerAligned
+            DebugAssertUpperBitsUnset
+            StringOutOfBounds
+            ListOutOfBounds
+            InvalidDiscriminant
+            UnalignedPointer
         }
 
         None
@@ -138,19 +215,35 @@ impl fmt::Display for Trap {
             BadConversionToInteger => "invalid conversion to integer",
             UnreachableCodeReached => "wasm `unreachable` instruction executed",
             Interrupt => "interrupt",
-            AlwaysTrapAdapter => "degenerate component adapter called",
             OutOfFuel => "all fuel consumed by WebAssembly",
             AtomicWaitNonSharedMemory => "atomic wait on non-shared memory",
             NullReference => "null reference",
-            NullI31Ref => "null i31 reference",
+            ArrayOutOfBounds => "out of bounds array access",
+            AllocationTooLarge => "allocation size too large",
+            CastFailure => "cast failure",
             CannotEnterComponent => "cannot enter component instance",
+            NoAsyncResult => "async-lifted export failed to produce a result",
+            UnhandledTag => "unhandled tag",
+            ContinuationAlreadyConsumed => "continuation already consumed",
+            DisabledOpcode => "pulley opcode disabled at compile time was executed",
+            AsyncDeadlock => "deadlock detected: event loop cannot make further progress",
+            CannotLeaveComponent => "cannot leave component instance",
+            CannotBlockSyncTask => "cannot block a synchronous task before returning",
+            InvalidChar => "invalid `char` bit pattern",
+            DebugAssertStringEncodingFinished => "should have finished string encoding",
+            DebugAssertEqualCodeUnits => "code units should be equal",
+            DebugAssertPointerAligned => "pointer should be aligned",
+            DebugAssertUpperBitsUnset => "upper bits should be unset",
+            StringOutOfBounds => "string content out-of-bounds",
+            ListOutOfBounds => "list content out-of-bounds",
+            InvalidDiscriminant => "invalid variant discriminant",
+            UnalignedPointer => "unaligned pointer",
         };
         write!(f, "wasm trap: {desc}")
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for Trap {}
+impl core::error::Error for Trap {}
 
 /// Decodes the provided trap information section and attempts to find the trap
 /// code corresponding to the `offset` specified.
@@ -159,13 +252,7 @@ impl std::error::Error for Trap {}
 /// `TrapEncodingBuilder` above. Additionally the `offset` should be a relative
 /// offset within the text section of the compilation image.
 pub fn lookup_trap_code(section: &[u8], offset: usize) -> Option<Trap> {
-    let mut section = Bytes(section);
-    // NB: this matches the encoding written by `append_to` above.
-    let count = section.read::<U32Bytes<LittleEndian>>().ok()?;
-    let count = usize::try_from(count.get(LittleEndian)).ok()?;
-    let (offsets, traps) =
-        object::slice_from_bytes::<U32Bytes<LittleEndian>>(section.0, count).ok()?;
-    debug_assert_eq!(traps.len(), count);
+    let (offsets, traps) = parse(section)?;
 
     // The `offsets` table is sorted in the trap section so perform a binary
     // search of the contents of this section to find whether `offset` is an
@@ -186,4 +273,27 @@ pub fn lookup_trap_code(section: &[u8], offset: usize) -> Option<Trap> {
     let trap = Trap::from_u8(byte);
     debug_assert!(trap.is_some(), "missing mapping for {byte}");
     trap
+}
+
+fn parse(section: &[u8]) -> Option<(&[U32Bytes<LittleEndian>], &[u8])> {
+    let mut section = Bytes(section);
+    // NB: this matches the encoding written by `append_to` above.
+    let count = section.read::<U32Bytes<LittleEndian>>().ok()?;
+    let count = usize::try_from(count.get(LittleEndian)).ok()?;
+    let (offsets, traps) =
+        object::slice_from_bytes::<U32Bytes<LittleEndian>>(section.0, count).ok()?;
+    debug_assert_eq!(traps.len(), count);
+    Some((offsets, traps))
+}
+
+/// Returns an iterator over all of the traps encoded in `section`, which should
+/// have been produced by `TrapEncodingBuilder`.
+pub fn iterate_traps(section: &[u8]) -> Option<impl Iterator<Item = (u32, Trap)> + '_> {
+    let (offsets, traps) = parse(section)?;
+    Some(
+        offsets
+            .iter()
+            .zip(traps)
+            .map(|(offset, trap)| (offset.get(LittleEndian), Trap::from_u8(*trap).unwrap())),
+    )
 }

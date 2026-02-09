@@ -31,6 +31,20 @@ pub(crate) fn define() -> SettingGroup {
     );
 
     settings.add_enum(
+        "regalloc_algorithm",
+        "Algorithm to use in register allocator.",
+        r#"
+            Supported options:
+
+            - `backtracking`: A backtracking allocator with range splitting; more expensive
+                              but generates better code.
+            - `single_pass`: A single-pass algorithm that yields quick compilation but
+                             results in code with more register spills and moves.
+        "#,
+        vec!["backtracking", "single_pass"],
+    );
+
+    settings.add_enum(
         "opt_level",
         "Optimization level for generated code.",
         r#"
@@ -99,15 +113,6 @@ pub(crate) fn define() -> SettingGroup {
     );
 
     settings.add_bool(
-        "enable_float",
-        "Enable the use of floating-point instructions.",
-        r#"
-            Disabling use of floating-point instructions is not yet implemented.
-        "#,
-        true,
-    );
-
-    settings.add_bool(
         "enable_nan_canonicalization",
         "Enable NaN canonicalization.",
         r#"
@@ -125,24 +130,6 @@ pub(crate) fn define() -> SettingGroup {
             This register is excluded from register allocation, and is completely under the control of
             the end-user. It is possible to read it via the get_pinned_reg instruction, and to set it
             with the set_pinned_reg instruction.
-        "#,
-        false,
-    );
-
-    settings.add_bool(
-        "enable_atomics",
-        "Enable the use of atomic instructions",
-        "",
-        true,
-    );
-
-    settings.add_bool(
-        "enable_safepoints",
-        "Enable safepoint instruction insertions.",
-        r#"
-            This will allow the emit_stack_maps() function to insert the safepoint
-            instruction on top of calls and interrupt traps in order to display the
-            live reference values at that point in the program.
         "#,
         false,
     );
@@ -182,11 +169,11 @@ pub(crate) fn define() -> SettingGroup {
         vec![
             "isa_default",
             "fast",
-            "cold",
             "system_v",
             "windows_fastcall",
             "apple_aarch64",
             "probestack",
+            "preserve_all",
         ],
     );
 
@@ -204,6 +191,35 @@ pub(crate) fn define() -> SettingGroup {
             registers. The Fastcall implementation otherwise does not support
             `i128` arguments, and will panic if they are present and this
             option is not set.
+        "#,
+        false,
+    );
+
+    settings.add_bool(
+        "enable_multi_ret_implicit_sret",
+        "Enable support for sret arg introduction when there are too many ret vals.",
+        r#"
+            When there are more returns than available return registers, the
+            return value has to be returned through the introduction of a
+            return area pointer. Normally this return area pointer has to be
+            introduced as `ArgumentPurpose::StructReturn` parameter, but for
+            backward compatibility reasons Cranelift also supports implicitly
+            introducing this parameter and writing the return values through it.
+
+            **This option currently does not conform to platform ABIs and the
+            used ABI should not be assumed to remain the same between Cranelift
+            versions.**
+
+            This option is **deprecated** and will be removed in the future.
+
+            Because of the above issues, and complexities of native ABI support
+            for the concept in general, Cranelift's support for multiple return
+            values may also be removed in the future (#9510). For the most
+            robust solution, it is recommended to build a convention on top of
+            Cranelift's primitives for passing multiple return values, for
+            example by allocating a stackslot in the caller, passing it as an
+            explicit StructReturn argument, storing return values in the callee,
+            and loading results in the caller.
         "#,
         false,
     );
@@ -281,16 +297,8 @@ pub(crate) fn define() -> SettingGroup {
         vec!["outline", "inline"],
     );
 
-    // Jump table options.
-
-    settings.add_bool(
-        "enable_jump_tables",
-        "Enable the use of jump tables in generated machine code.",
-        "",
-        true,
-    );
-
-    // Spectre options.
+    // Spectre options. (Only read by wasmtime-cranelift)
+    // FIXME move configuration out of Cranelift into Wasmtime
 
     settings.add_bool(
         "enable_heap_access_spectre_mitigation",
@@ -352,6 +360,13 @@ pub(crate) fn define() -> SettingGroup {
             The default for this option is 0 to insert no padding as it's only
             intended for testing and development.
         "#,
+        0,
+    );
+
+    settings.add_num(
+        "log2_min_function_alignment",
+        "The log2 of the minimum alignment of functions",
+        "The bigger of this value and the default alignment will be used as actual alignment.",
         0,
     );
 

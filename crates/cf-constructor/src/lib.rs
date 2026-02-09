@@ -3,7 +3,7 @@ use cranelift_codegen::cfg_printer::CFGPrinter;
 use cranelift_codegen::cursor::{Cursor, CursorPosition, FuncCursor};
 use cranelift_codegen::flowgraph::{BlockPredecessor, ControlFlowGraph};
 use cranelift_codegen::ir::entities::Block;
-use cranelift_codegen::ir::layout::{BlockNode, Blocks};
+use cranelift_codegen::ir::layout::Blocks;
 use cranelift_codegen::ir::{
     types, BlockCall, Function, Inst, InstBuilder, InstructionData, JumpTableData, Layout, Value,
 };
@@ -17,10 +17,6 @@ use std::io::Write;
 
 const MAX_DEPTH: usize = 2;
 
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
 #[cfg(test)]
 mod tests {
     use cranelift_codegen::cfg_printer::CFGPrinter;
@@ -31,12 +27,6 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
 
     #[test]
     fn sequential_test() {
@@ -524,7 +514,7 @@ fn switch_blocks(func: &mut Function, case_num: usize) -> Switch {
                     }
                     _ => panic!("block is not a BlockType::Block"),
                 },
-                None => panic!("插入case_block失败"),
+                None => panic!("Failed to insert case_block"),
             }
         }
         cur.insert_block(default_block);
@@ -567,7 +557,11 @@ pub fn cf_construct(func: &mut Function, parent_block: Option<BlockType>, depth:
             let block_num = sequential_blocks.blocks.len();
 
             if true {
-                let choice = gen_and_print_range(0, 4, false);
+                let choice = if gen_and_print_range(0, 5, false) < 3 {
+                    gen_and_print_range(0, 3, false)
+                } else {
+                    3
+                };
 
                 let replaced_block = sequential_blocks.get_random_block();
 
@@ -603,7 +597,7 @@ pub fn cf_construct(func: &mut Function, parent_block: Option<BlockType>, depth:
                     }
                     3 => {
                         let child_switch =
-                            switch_blocks(func, gen_and_print_range(2, 5, false) as usize);
+                            switch_blocks(func, gen_and_print_range(6, 9, false) as usize);
 
                         let child_first_block = child_switch.get_first_block();
                         update_predecessor(func, child_first_block, replaced_block);
@@ -620,7 +614,11 @@ pub fn cf_construct(func: &mut Function, parent_block: Option<BlockType>, depth:
         }
         Some(BlockType::IfElse(if_else_blocks)) => {
             if true {
-                let choice = gen_and_print_range(0, 4, false);
+                let choice = if gen_and_print_range(0, 5, false) < 2 {
+                    gen_and_print_range(0, 3, false)
+                } else {
+                    3
+                };
 
                 let replaced_block = if_else_blocks.get_random_block();
 
@@ -654,7 +652,7 @@ pub fn cf_construct(func: &mut Function, parent_block: Option<BlockType>, depth:
                     }
                     3 => {
                         let child_switch =
-                            switch_blocks(func, gen_and_print_range(2, 5, false) as usize);
+                            switch_blocks(func, gen_and_print_range(6, 9, false) as usize);
                         let child_first_block = child_switch.get_first_block();
                         update_predecessor(func, child_first_block, replaced_block);
                         let child_last_block = child_switch.get_last_block();
@@ -668,7 +666,11 @@ pub fn cf_construct(func: &mut Function, parent_block: Option<BlockType>, depth:
         }
         Some(BlockType::While(while_block)) => {
             if true {
-                let choice = gen_and_print_range(0, 4, false);
+                let choice = if gen_and_print_range(0, 5, false) < 2 {
+                    gen_and_print_range(0, 3, false)
+                } else {
+                    3
+                };
 
                 let replaced_block = while_block.get_random_block();
 
@@ -702,7 +704,7 @@ pub fn cf_construct(func: &mut Function, parent_block: Option<BlockType>, depth:
                     }
                     3 => {
                         let child_switch =
-                            switch_blocks(func, gen_and_print_range(2, 5, false) as usize);
+                            switch_blocks(func, gen_and_print_range(6, 9, false) as usize);
                         let child_first_block = child_switch.get_first_block();
                         update_predecessor(func, child_first_block, replaced_block);
                         let child_last_block = child_switch.get_last_block();
@@ -716,7 +718,11 @@ pub fn cf_construct(func: &mut Function, parent_block: Option<BlockType>, depth:
         }
         Some(BlockType::Switch(switch_block)) => {
             if true {
-                let choice = gen_and_print_range(0, 4, false);
+                let choice = if gen_and_print_range(0, 5, false) < 2 {
+                    gen_and_print_range(0, 3, false)
+                } else {
+                    3
+                };
 
                 let replaced_block = switch_block.get_random_block();
 
@@ -750,7 +756,7 @@ pub fn cf_construct(func: &mut Function, parent_block: Option<BlockType>, depth:
                     }
                     3 => {
                         let child_switch =
-                            switch_blocks(func, gen_and_print_range(2, 5, false) as usize);
+                            switch_blocks(func, gen_and_print_range(6, 9, false) as usize);
                         let child_first_block = child_switch.get_first_block();
                         update_predecessor(func, child_first_block, replaced_block);
                         let child_last_block = child_switch.get_last_block();
@@ -772,7 +778,11 @@ pub fn cf_construct(func: &mut Function, parent_block: Option<BlockType>, depth:
                 cur.insert_block(end_block);
             }
 
-            let choice = gen_and_print_range(0, 4, false);
+            let choice = if gen_and_print_range(0, 5, false) < 2 {
+                gen_and_print_range(0, 3, false)
+            } else {
+                3
+            };
 
             match choice {
                 0 => {
@@ -808,7 +818,7 @@ pub fn cf_construct(func: &mut Function, parent_block: Option<BlockType>, depth:
                 }
                 3 => {
                     let child_switch =
-                        switch_blocks(func, gen_and_print_range(2, 5, false) as usize);
+                        switch_blocks(func, gen_and_print_range(6, 9, false) as usize);
                     let mut cur = FuncCursor::new(func);
                     cur.goto_bottom(entry_block);
                     cur.ins().jump(child_switch.get_first_block(), &[]);
@@ -863,7 +873,7 @@ fn update_predecessor(func: &mut Function, block: Block, replaced_block: Block) 
                 } else if false_block == replaced_block {
                     cur.ins().brif(arg, true_block, &[], block, &[]);
                 } else {
-                    panic!("被替换块不存在于前块的br_if的跳转目标中")
+                    panic!("The replaced block does not exist in the jump target of the previous block's br_if.")
                 }
             }
             InstructionData::BranchTable { opcode, arg, table } => {
@@ -887,7 +897,7 @@ fn update_predecessor(func: &mut Function, block: Block, replaced_block: Block) 
                 cur.ins().jump(block, &[]);
             }
             _ => {
-                panic!("前一个块的控制指令识别有错误")
+                panic!("The control instruction recognition in the previous block is incorrect.")
             }
         }
     }
@@ -944,11 +954,11 @@ fn update_successor(func: &mut Function, block: Block, replaced_block: Block) {
                     );
                 }
                 _ => {
-                    panic!("something error")
+                    panic!("Something went wrong")
                 }
             }
         } else {
-            panic!("被替换的块没有跳转指令")
+            panic!("The replaced block has no jump instruction")
         }
     } else if post_blocks.len() >= 3 {
         let mut block_call_list: Vec<BlockCall> = vec![];
@@ -973,11 +983,11 @@ fn update_successor(func: &mut Function, block: Block, replaced_block: Block) {
                     cur.ins().br_table(arg, jump_table);
                 }
                 _ => {
-                    panic!("something error")
+                    panic!("Something went wrong")
                 }
             }
         } else {
-            panic!("被替换的块没有跳转指令")
+            panic!("The replaced block has no jump instruction")
         }
     }
 

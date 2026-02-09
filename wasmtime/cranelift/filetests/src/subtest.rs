@@ -2,7 +2,7 @@
 
 use crate::runone::FileUpdate;
 use anyhow::Context as _;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use cranelift_codegen::ir::Function;
 use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::settings::{Flags, FlagsOrIsa};
@@ -29,7 +29,7 @@ pub struct Context<'a> {
     pub isa: Option<&'a dyn TargetIsa>,
 
     /// Full path to the file containing the test.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "may get used later")]
     pub file_path: &'a str,
 
     /// Context used to update the original `file_path` in-place with its test

@@ -1,11 +1,11 @@
 #![cfg(all(not(target_os = "windows"), not(miri)))]
-use anyhow::{bail, Context};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     ops::Range,
     ptr::NonNull,
     sync::Arc,
 };
+use wasmtime::error::Context as _;
 use wasmtime::*;
 
 fn align_up(v: usize, align: usize) -> usize {
@@ -30,6 +30,9 @@ unsafe impl StackMemory for CustomStack {
     fn range(&self) -> Range<usize> {
         let base = self.base.as_ptr() as usize;
         base..base + self.len
+    }
+    fn guard_range(&self) -> Range<*mut u8> {
+        std::ptr::null_mut()..std::ptr::null_mut()
     }
 }
 
@@ -95,7 +98,10 @@ impl Drop for CustomStackCreator {
     }
 }
 unsafe impl StackCreator for CustomStackCreator {
-    fn new_stack(&self, size: usize) -> Result<Box<dyn StackMemory>> {
+    fn new_stack(&self, size: usize, zeroed: bool) -> Result<Box<dyn StackMemory>> {
+        if zeroed {
+            bail!("CustomStackCreator does not support stack zeroing");
+        }
         if size != self.size {
             bail!("must use the size we allocated for this stack memory creator");
         }
@@ -111,7 +117,6 @@ fn config() -> (Store<()>, Arc<CustomStackCreator>) {
     let stack_creator = Arc::new(CustomStackCreator::new().unwrap());
     let mut config = Config::new();
     config
-        .async_support(true)
         .max_wasm_stack(stack_creator.size / 2)
         .async_stack_size(stack_creator.size)
         .with_host_stack(stack_creator.clone());
@@ -122,6 +127,7 @@ fn config() -> (Store<()>, Arc<CustomStackCreator>) {
 }
 
 #[tokio::test]
+#[cfg_attr(asan, ignore)]
 async fn called_on_custom_heap_stack() -> Result<()> {
     let (mut store, stack_creator) = config();
     let module = Module::new(

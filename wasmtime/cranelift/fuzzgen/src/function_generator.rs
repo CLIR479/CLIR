@@ -9,20 +9,20 @@ use cranelift::codegen::ir::instructions::{InstructionFormat, ResolvedConstraint
 use cranelift::codegen::ir::stackslot::StackSize;
 
 use cranelift::codegen::ir::{
-    types::*, AliasRegion, AtomicRmwOp, Block, ConstantData, Endianness, ExternalName, FuncRef,
+    AliasRegion, AtomicRmwOp, Block, BlockArg, ConstantData, Endianness, ExternalName, FuncRef,
     Function, LibCall, Opcode, SigRef, Signature, StackSlot, UserExternalName, UserFuncName, Value,
+    types::*,
 };
 use cranelift::codegen::isa::CallConv;
 use cranelift::frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 use cranelift::prelude::isa::OwnedTargetIsa;
 use cranelift::prelude::{
-    EntityRef, ExtFuncData, FloatCC, InstBuilder, IntCC, JumpTableData, MemFlags, StackSlotData,
-    StackSlotKind,
+    ExtFuncData, FloatCC, InstBuilder, IntCC, JumpTableData, MemFlags, StackSlotData, StackSlotKind,
 };
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::str::FromStr;
+use std::sync::LazyLock;
 use target_lexicon::{Architecture, Triple};
 
 type BlockSignature = Vec<Type>;
@@ -119,7 +119,6 @@ fn insert_call(
 ) -> Result<()> {
     assert!(matches!(opcode, Opcode::Call | Opcode::CallIndirect));
     let (sig, sig_ref, func_ref) = fgen.u.choose(&fgen.resources.func_refs)?.clone();
-
     insert_call_to_function(fgen, builder, opcode, &sig, sig_ref, func_ref)
 }
 
@@ -200,10 +199,14 @@ fn insert_cmp(
             // https://github.com/bytecodealliance/wasmtime/issues/4850
             (Architecture::Aarch64(_), FloatCC::OrderedNotEqual) => true,
             (Architecture::Aarch64(_), FloatCC::UnorderedOrEqual) => true,
-            (Architecture::Aarch64(_), FloatCC::UnorderedOrLessThan) => true,
-            (Architecture::Aarch64(_), FloatCC::UnorderedOrLessThanOrEqual) => true,
-            (Architecture::Aarch64(_), FloatCC::UnorderedOrGreaterThan) => true,
-            (Architecture::Aarch64(_), FloatCC::UnorderedOrGreaterThanOrEqual) => true,
+
+            // Not implemented on aarch64 for vectors
+            (Architecture::Aarch64(_), FloatCC::UnorderedOrLessThan)
+            | (Architecture::Aarch64(_), FloatCC::UnorderedOrLessThanOrEqual)
+            | (Architecture::Aarch64(_), FloatCC::UnorderedOrGreaterThan)
+            | (Architecture::Aarch64(_), FloatCC::UnorderedOrGreaterThanOrEqual) => {
+                args[0].is_vector()
+            }
 
             // These are not implemented on x86_64, for vectors.
             (Architecture::X86_64, FloatCC::UnorderedOrEqual | FloatCC::OrderedNotEqual) => {
@@ -512,6 +515,10 @@ fn valid_for_target(triple: &Triple, op: Opcode, args: &[Type], rets: &[Type]) -
             }
         }
 
+        // This requires precise runtime integration so it's not supported at
+        // all in fuzzgen just yet.
+        Opcode::StackSwitch => return false,
+
         _ => {}
     }
 
@@ -785,7 +792,7 @@ fn valid_for_target(triple: &Triple, op: Opcode, args: &[Type], rets: &[Type]) -
 
 type OpcodeSignature = (Opcode, Vec<Type>, Vec<Type>);
 
-static OPCODE_SIGNATURES: Lazy<Vec<OpcodeSignature>> = Lazy::new(|| {
+static OPCODE_SIGNATURES: LazyLock<Vec<OpcodeSignature>> = LazyLock::new(|| {
     let types = &[
         I8, I16, I32, I64, I128, // Scalar Integers
         F32, F64, // Scalar Floats
@@ -814,7 +821,9 @@ static OPCODE_SIGNATURES: Lazy<Vec<OpcodeSignature>> = Lazy::new(|| {
                 | Opcode::Jump
                 | Opcode::Return
                 | Opcode::ReturnCall
-                | Opcode::ReturnCallIndirect => false,
+                | Opcode::ReturnCallIndirect
+                | Opcode::TryCall
+                | Opcode::TryCallIndirect => false,
 
                 // Constants are generated outside of `generate_instructions`
                 Opcode::Iconst => false,
@@ -911,7 +920,7 @@ static OPCODE_SIGNATURES: Lazy<Vec<OpcodeSignature>> = Lazy::new(|| {
                 (Opcode::GetFramePointer),
                 (Opcode::GetStackPointer),
                 (Opcode::GetReturnAddress),
-                (Opcode::X86Blendv),
+                (Opcode::Blendv),
                 (Opcode::IcmpImm),
                 (Opcode::X86Pmulhrsw),
                 (Opcode::IaddImm),
@@ -921,11 +930,11 @@ static OPCODE_SIGNATURES: Lazy<Vec<OpcodeSignature>> = Lazy::new(|| {
                 (Opcode::UremImm),
                 (Opcode::SremImm),
                 (Opcode::IrsubImm),
-                (Opcode::IaddCin),
-                (Opcode::IaddCarry),
+                (Opcode::UaddOverflowCin),
+                (Opcode::SaddOverflowCin),
                 (Opcode::UaddOverflowTrap),
-                (Opcode::IsubBin),
-                (Opcode::IsubBorrow),
+                (Opcode::UsubOverflowBin),
+                (Opcode::SsubOverflowBin),
                 (Opcode::BandImm),
                 (Opcode::BorImm),
                 (Opcode::BxorImm),
@@ -1047,6 +1056,13 @@ static OPCODE_SIGNATURES: Lazy<Vec<OpcodeSignature>> = Lazy::new(|| {
                 (Opcode::FcvtFromSint, &[I8X16], &[F64X2]),
                 (Opcode::FcvtFromSint, &[I16X8], &[F64X2]),
                 (Opcode::FcvtFromSint, &[I32X4], &[F64X2]),
+                // Only supported on x64 with a feature at this time, so 128-bit
+                // atomics are not suitable to fuzz yet.
+                (Opcode::AtomicRmw, _, &[I128]),
+                (Opcode::AtomicCas, _, &[I128]),
+                (Opcode::AtomicLoad, _, &[I128]),
+                (Opcode::AtomicStore, &[I128, _], _),
+                (Opcode::SequencePoint),
             )
         })
         .filter(|(op, ..)| {
@@ -1092,11 +1108,14 @@ fn inserter_for_format(fmt: InstructionFormat) -> OpcodeInserter {
         InstructionFormat::UnaryIeee32 => insert_const,
         InstructionFormat::UnaryIeee64 => insert_const,
         InstructionFormat::UnaryImm => insert_const,
+        InstructionFormat::ExceptionHandlerAddress => insert_const,
 
         InstructionFormat::BranchTable
         | InstructionFormat::Brif
         | InstructionFormat::Jump
-        | InstructionFormat::MultiAry => {
+        | InstructionFormat::MultiAry
+        | InstructionFormat::TryCall
+        | InstructionFormat::TryCallIndirect => {
             panic!("Control-flow instructions should be handled by 'insert_terminator': {fmt:?}")
         }
     }
@@ -1437,9 +1456,13 @@ where
         &mut self,
         builder: &mut FunctionBuilder,
         block: Block,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<Vec<BlockArg>> {
         let (_, sig) = self.resources.blocks[block.as_u32() as usize].clone();
-        self.generate_values_for_signature(builder, sig.iter().copied())
+        Ok(self
+            .generate_values_for_signature(builder, sig.iter().copied())?
+            .into_iter()
+            .map(|val| BlockArg::Value(val))
+            .collect::<Vec<_>>())
     }
 
     fn generate_values_for_signature<I: Iterator<Item = Type>>(
@@ -1559,7 +1582,7 @@ where
     }
 
     fn generate_funcrefs(&mut self, builder: &mut FunctionBuilder) -> Result<()> {
-        let usercalls: Vec<(ExternalName, Signature)> = self
+        let usercalls: Vec<_> = self
             .resources
             .usercalls
             .iter()
@@ -1571,7 +1594,7 @@ where
             .collect();
 
         let lib_callconv = self.system_callconv();
-        let libcalls: Vec<(ExternalName, Signature)> = self
+        let libcalls: Vec<_> = self
             .resources
             .libcalls
             .iter()
@@ -1591,7 +1614,13 @@ where
             let func_ref = builder.import_function(ExtFuncData {
                 name,
                 signature: sig_ref,
-                colocated: self.u.arbitrary()?,
+
+                // Libcalls can't be colocated because they can be very far away
+                // from allocated memory at runtime, and additionally at this
+                // time cranelift-jit puts all functions in their own mmap so
+                // they also cannot be colocated.
+                colocated: false,
+                patchable: false,
             });
 
             self.resources
@@ -1888,9 +1917,8 @@ where
             vars.push((ty, value));
         }
 
-        for (id, (ty, value)) in vars.into_iter().enumerate() {
-            let var = Variable::new(id);
-            builder.declare_var(var, ty);
+        for (ty, value) in vars.into_iter() {
+            let var = builder.declare_var(ty);
             builder.def_var(var, value);
 
             // Randomly declare variables as needing a stack map.

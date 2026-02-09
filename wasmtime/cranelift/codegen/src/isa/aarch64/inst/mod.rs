@@ -1,19 +1,19 @@
 //! This module defines aarch64-specific machine instruction types.
 
 use crate::binemit::{Addend, CodeOffset, Reloc};
-use crate::ir::types::{F128, F16, F32, F64, I128, I16, I32, I64, I8, I8X16};
-use crate::ir::{types, ExternalName, MemFlags, Type};
+use crate::ir::types::{F16, F32, F64, F128, I8, I8X16, I16, I32, I64, I128};
+use crate::ir::{MemFlags, Type, types};
 use crate::isa::{CallConv, FunctionAlignment};
 use crate::machinst::*;
-use crate::{settings, CodegenError, CodegenResult};
+use crate::{CodegenError, CodegenResult, settings};
 
 use crate::machinst::{PrettyPrint, Reg, RegClass, Writable};
 
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use regalloc2::PRegSet;
-use smallvec::{smallvec, SmallVec};
-use std::fmt::Write;
-use std::string::{String, ToString};
+use core::fmt::Write;
+use core::slice;
+use smallvec::{SmallVec, smallvec};
 
 pub(crate) mod regs;
 pub(crate) use self::regs::*;
@@ -74,54 +74,12 @@ impl BitOp {
     }
 }
 
-/// Additional information for (direct) Call instructions, left out of line to lower the size of
-/// the Inst enum.
-#[derive(Clone, Debug)]
-pub struct CallInfo {
-    /// Call destination.
-    pub dest: ExternalName,
-    /// Arguments to the call instruction.
-    pub uses: CallArgList,
-    /// Return values from the call instruction.
-    pub defs: CallRetList,
-    /// Clobbers register set.
-    pub clobbers: PRegSet,
-    /// Caller calling convention.
-    pub caller_callconv: CallConv,
-    /// Callee calling convention.
-    pub callee_callconv: CallConv,
-    /// The number of bytes that the callee will pop from the stack for the
-    /// caller, if any. (Used for popping stack arguments with the `tail`
-    /// calling convention.)
-    pub callee_pop_size: u32,
-}
-
-/// Additional information for CallInd instructions, left out of line to lower the size of the Inst
-/// enum.
-#[derive(Clone, Debug)]
-pub struct CallIndInfo {
-    /// Function pointer for indirect call.
-    pub rn: Reg,
-    /// Arguments to the call instruction.
-    pub uses: SmallVec<[CallArgPair; 8]>,
-    /// Return values from the call instruction.
-    pub defs: SmallVec<[CallRetPair; 8]>,
-    /// Clobbers register set.
-    pub clobbers: PRegSet,
-    /// Caller calling convention.
-    pub caller_callconv: CallConv,
-    /// Callee calling convention.
-    pub callee_callconv: CallConv,
-    /// The number of bytes that the callee will pop from the stack for the
-    /// caller, if any. (Used for popping stack arguments with the `tail`
-    /// calling convention.)
-    pub callee_pop_size: u32,
-}
-
 /// Additional information for `return_call[_ind]` instructions, left out of
 /// line to lower the size of the `Inst` enum.
 #[derive(Clone, Debug)]
-pub struct ReturnCallInfo {
+pub struct ReturnCallInfo<T> {
+    /// Where this call is going to
+    pub dest: T,
     /// Arguments to the call instruction.
     pub uses: CallArgList,
     /// The size of the new stack frame's stack arguments. This is necessary
@@ -144,21 +102,10 @@ fn count_zero_half_words(mut value: u64, num_half_words: u8) -> usize {
     count
 }
 
-#[test]
-fn inst_size_test() {
-    // This test will help with unintentionally growing the size
-    // of the Inst enum.
-    assert_eq!(32, std::mem::size_of::<Inst>());
-}
-
 impl Inst {
     /// Create an instruction that loads a constant, using one of several options (MOVZ, MOVN,
     /// logical immediate, or constant pool).
-    pub fn load_constant<F: FnMut(Type) -> Writable<Reg>>(
-        rd: Writable<Reg>,
-        value: u64,
-        alloc_tmp: &mut F,
-    ) -> SmallVec<[Inst; 4]> {
+    pub fn load_constant(rd: Writable<Reg>, value: u64) -> SmallVec<[Inst; 4]> {
         // NB: this is duplicated in `lower/isle.rs` and `inst.isle` right now,
         // if modifications are made here before this is deleted after moving to
         // ISLE then those locations should be updated as well.
@@ -219,10 +166,8 @@ impl Inst {
                 .collect();
 
             let mut prev_result = None;
-            let last_index = halfwords.last().unwrap().0;
             for (i, imm16) in halfwords {
                 let shift = i * 16;
-                let rd = if i == last_index { rd } else { alloc_tmp(I16) };
 
                 if let Some(rn) = prev_result {
                     let imm = MoveWideConst::maybe_with_shift(imm16 as u16, shift).unwrap();
@@ -281,31 +226,17 @@ impl Inst {
                 mem,
                 flags,
             },
-            F16 => Inst::FpuLoad16 {
-                rd: into_reg,
-                mem,
-                flags,
-            },
-            F32 => Inst::FpuLoad32 {
-                rd: into_reg,
-                mem,
-                flags,
-            },
-            F64 => Inst::FpuLoad64 {
-                rd: into_reg,
-                mem,
-                flags,
-            },
             _ => {
                 if ty.is_vector() || ty.is_float() {
                     let bits = ty_bits(ty);
                     let rd = into_reg;
 
-                    if bits == 128 {
-                        Inst::FpuLoad128 { rd, mem, flags }
-                    } else {
-                        assert_eq!(bits, 64);
-                        Inst::FpuLoad64 { rd, mem, flags }
+                    match bits {
+                        128 => Inst::FpuLoad128 { rd, mem, flags },
+                        64 => Inst::FpuLoad64 { rd, mem, flags },
+                        32 => Inst::FpuLoad32 { rd, mem, flags },
+                        16 => Inst::FpuLoad16 { rd, mem, flags },
+                        _ => unimplemented!("gen_load({})", ty),
                     }
                 } else {
                     unimplemented!("gen_load({})", ty);
@@ -337,31 +268,17 @@ impl Inst {
                 mem,
                 flags,
             },
-            F16 => Inst::FpuStore16 {
-                rd: from_reg,
-                mem,
-                flags,
-            },
-            F32 => Inst::FpuStore32 {
-                rd: from_reg,
-                mem,
-                flags,
-            },
-            F64 => Inst::FpuStore64 {
-                rd: from_reg,
-                mem,
-                flags,
-            },
             _ => {
                 if ty.is_vector() || ty.is_float() {
                     let bits = ty_bits(ty);
                     let rd = from_reg;
 
-                    if bits == 128 {
-                        Inst::FpuStore128 { rd, mem, flags }
-                    } else {
-                        assert_eq!(bits, 64);
-                        Inst::FpuStore64 { rd, mem, flags }
+                    match bits {
+                        128 => Inst::FpuStore128 { rd, mem, flags },
+                        64 => Inst::FpuStore64 { rd, mem, flags },
+                        32 => Inst::FpuStore32 { rd, mem, flags },
+                        16 => Inst::FpuStore16 { rd, mem, flags },
+                        _ => unimplemented!("gen_store({})", ty),
                     }
                 } else {
                     unimplemented!("gen_store({})", ty);
@@ -889,39 +806,53 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
-            for CallRetPair { vreg, preg } in defs {
-                collector.reg_fixed_def(vreg, *preg);
+            for CallRetPair { vreg, location } in defs {
+                match location {
+                    RetLocation::Reg(preg, ..) => collector.reg_fixed_def(vreg, *preg),
+                    RetLocation::Stack(..) => collector.any_def(vreg),
+                }
             }
             collector.reg_clobbers(info.clobbers);
+            if let Some(try_call_info) = &mut info.try_call_info {
+                try_call_info.collect_operands(collector);
+            }
         }
         Inst::CallInd { info, .. } => {
-            let CallIndInfo { rn, uses, defs, .. } = &mut **info;
-            collector.reg_use(rn);
+            let CallInfo {
+                dest, uses, defs, ..
+            } = &mut **info;
+            collector.reg_use(dest);
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
-            for CallRetPair { vreg, preg } in defs {
-                collector.reg_fixed_def(vreg, *preg);
+            for CallRetPair { vreg, location } in defs {
+                match location {
+                    RetLocation::Reg(preg, ..) => collector.reg_fixed_def(vreg, *preg),
+                    RetLocation::Stack(..) => collector.any_def(vreg),
+                }
             }
             collector.reg_clobbers(info.clobbers);
+            if let Some(try_call_info) = &mut info.try_call_info {
+                try_call_info.collect_operands(collector);
+            }
         }
-        Inst::ReturnCall { info, callee: _ } => {
+        Inst::ReturnCall { info } => {
             for CallArgPair { vreg, preg } in &mut info.uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
         }
-        Inst::ReturnCallInd { info, callee } => {
+        Inst::ReturnCallInd { info } => {
             // TODO(https://github.com/bytecodealliance/regalloc2/issues/145):
             // This shouldn't be a fixed register constraint, but it's not clear how to pick a
             // register that won't be clobbered by the callee-save restore code emitted with a
             // return_call_indirect.
-            collector.reg_fixed_use(callee, xreg(1));
+            collector.reg_fixed_use(&mut info.dest, xreg(1));
             for CallArgPair { vreg, preg } in &mut info.uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
         }
         Inst::CondBr { kind, .. } => match kind {
-            CondBrKind::Zero(rt) | CondBrKind::NotZero(rt) => collector.reg_use(rt),
+            CondBrKind::Zero(rt, _) | CondBrKind::NotZero(rt, _) => collector.reg_use(rt),
             CondBrKind::Cond(_) => {}
         },
         Inst::TestBitAndBranch { rn, .. } => {
@@ -934,7 +865,7 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
         Inst::Brk => {}
         Inst::Udf { .. } => {}
         Inst::TrapIf { kind, .. } => match kind {
-            CondBrKind::Zero(rt) | CondBrKind::NotZero(rt) => collector.reg_use(rt),
+            CondBrKind::Zero(rt, _) | CondBrKind::NotZero(rt, _) => collector.reg_use(rt),
             CondBrKind::Cond(_) => {}
         },
         Inst::Adr { rd, .. } | Inst::Adrp { rd, .. } => {
@@ -948,7 +879,9 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_early_def(rtmp1);
             collector.reg_early_def(rtmp2);
         }
-        Inst::LoadExtName { rd, .. } => {
+        Inst::LoadExtNameGot { rd, .. }
+        | Inst::LoadExtNameNear { rd, .. }
+        | Inst::LoadExtNameFar { rd, .. } => {
             collector.reg_def(rd);
         }
         Inst::LoadAddr { rd, mem } => {
@@ -974,7 +907,7 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
         Inst::MachOTlsGetAddr { rd, .. } => {
             collector.reg_fixed_def(rd, regs::xreg(0));
             let mut clobbers =
-                AArch64MachineDeps::get_regs_clobbered_by_call(CallConv::AppleAarch64);
+                AArch64MachineDeps::get_regs_clobbered_by_call(CallConv::AppleAarch64, false);
             clobbers.remove(regs::xreg_preg(0));
             collector.reg_clobbers(clobbers);
         }
@@ -983,6 +916,10 @@ fn aarch64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
         Inst::DummyUse { reg } => {
             collector.reg_use(reg);
         }
+        Inst::LabelAddress { dst, .. } => {
+            collector.reg_def(dst);
+        }
+        Inst::SequencePoint { .. } => {}
         Inst::StackProbeLoop { start, end, .. } => {
             collector.reg_early_def(start);
             collector.reg_use(end);
@@ -1019,10 +956,18 @@ impl MachInst for Inst {
     }
 
     fn is_included_in_clobbers(&self) -> bool {
-        let (caller_callconv, callee_callconv) = match self {
+        let (caller, callee, is_exception) = match self {
             Inst::Args { .. } => return false,
-            Inst::Call { info } => (info.caller_callconv, info.callee_callconv),
-            Inst::CallInd { info } => (info.caller_callconv, info.callee_callconv),
+            Inst::Call { info } => (
+                info.caller_conv,
+                info.callee_conv,
+                info.try_call_info.is_some(),
+            ),
+            Inst::CallInd { info } => (
+                info.caller_conv,
+                info.callee_conv,
+                info.try_call_info.is_some(),
+            ),
             _ => return true,
         };
 
@@ -1037,8 +982,8 @@ impl MachInst for Inst {
         //
         // See the note in [crate::isa::aarch64::abi::is_caller_save_reg] for
         // more information on this ABI-implementation hack.
-        let caller_clobbers = AArch64MachineDeps::get_regs_clobbered_by_call(caller_callconv);
-        let callee_clobbers = AArch64MachineDeps::get_regs_clobbered_by_call(callee_callconv);
+        let caller_clobbers = AArch64MachineDeps::get_regs_clobbered_by_call(caller, false);
+        let callee_clobbers = AArch64MachineDeps::get_regs_clobbered_by_call(callee, is_exception);
 
         let mut all_clobbers = caller_clobbers;
         all_clobbers.union_from(callee_clobbers);
@@ -1059,15 +1004,30 @@ impl MachInst for Inst {
         }
     }
 
+    fn call_type(&self) -> CallType {
+        match self {
+            Inst::Call { .. }
+            | Inst::CallInd { .. }
+            | Inst::ElfTlsGetAddr { .. }
+            | Inst::MachOTlsGetAddr { .. } => CallType::Regular,
+
+            Inst::ReturnCall { .. } | Inst::ReturnCallInd { .. } => CallType::TailCall,
+
+            _ => CallType::None,
+        }
+    }
+
     fn is_term(&self) -> MachTerminator {
         match self {
             &Inst::Rets { .. } => MachTerminator::Ret,
             &Inst::ReturnCall { .. } | &Inst::ReturnCallInd { .. } => MachTerminator::RetCall,
-            &Inst::Jump { .. } => MachTerminator::Uncond,
-            &Inst::CondBr { .. } => MachTerminator::Cond,
-            &Inst::TestBitAndBranch { .. } => MachTerminator::Cond,
-            &Inst::IndirectBr { .. } => MachTerminator::Indirect,
-            &Inst::JTSequence { .. } => MachTerminator::Indirect,
+            &Inst::Jump { .. } => MachTerminator::Branch,
+            &Inst::CondBr { .. } => MachTerminator::Branch,
+            &Inst::TestBitAndBranch { .. } => MachTerminator::Branch,
+            &Inst::IndirectBr { .. } => MachTerminator::Branch,
+            &Inst::JTSequence { .. } => MachTerminator::Branch,
+            &Inst::Call { ref info } if info.try_call_info.is_some() => MachTerminator::Branch,
+            &Inst::CallInd { ref info } if info.try_call_info.is_some() => MachTerminator::Branch,
             _ => MachTerminator::None,
         }
     }
@@ -1150,6 +1110,10 @@ impl MachInst for Inst {
         Inst::Nop4
     }
 
+    fn gen_nop_units() -> Vec<Vec<u8>> {
+        vec![vec![0x1f, 0x20, 0x03, 0xd5]]
+    }
+
     fn rc_for_type(ty: Type) -> CodegenResult<(&'static [RegClass], &'static [Type])> {
         match ty {
             I8 => Ok((&[RegClass::Int], &[I8])),
@@ -1161,9 +1125,12 @@ impl MachInst for Inst {
             F64 => Ok((&[RegClass::Float], &[F64])),
             F128 => Ok((&[RegClass::Float], &[F128])),
             I128 => Ok((&[RegClass::Int, RegClass::Int], &[I64, I64])),
-            _ if ty.is_vector() => {
-                assert!(ty.bits() <= 128);
-                Ok((&[RegClass::Float], &[I8X16]))
+            _ if ty.is_vector() && ty.bits() <= 128 => {
+                let types = &[types::I8X2, types::I8X4, types::I8X8, types::I8X16];
+                Ok((
+                    &[RegClass::Float],
+                    slice::from_ref(&types[ty.bytes().ilog2() as usize - 1]),
+                ))
             }
             _ if ty.is_dynamic_vector() => Ok((&[RegClass::Float], &[I8X16])),
             _ => Err(CodegenError::Unsupported(format!(
@@ -1242,6 +1209,14 @@ fn mem_finalize_for_show(mem: &AMode, access_ty: Type, state: &EmitState) -> (St
     (mem_str, mem)
 }
 
+fn pretty_print_try_call(info: &TryCallInfo) -> String {
+    format!(
+        "; b {:?}; catch [{}]",
+        info.continuation,
+        info.pretty_print_dests()
+    )
+}
+
 impl Inst {
     fn print_with_state(&self, state: &mut EmitState) -> String {
         fn op_name(alu_op: ALUOp) -> &'static str {
@@ -1261,7 +1236,7 @@ impl Inst {
                 ALUOp::AndNot => "bic",
                 ALUOp::OrrNot => "orn",
                 ALUOp::EorNot => "eon",
-                ALUOp::RotR => "ror",
+                ALUOp::Extr => "extr",
                 ALUOp::Lsr => "lsr",
                 ALUOp::Asr => "asr",
                 ALUOp::Lsl => "lsl",
@@ -2246,10 +2221,6 @@ impl Inst {
                     VecALUOp::Fcmeq => ("fcmeq", size),
                     VecALUOp::Fcmgt => ("fcmgt", size),
                     VecALUOp::Fcmge => ("fcmge", size),
-                    VecALUOp::And => ("and", VectorSize::Size8x16),
-                    VecALUOp::Bic => ("bic", VectorSize::Size8x16),
-                    VecALUOp::Orr => ("orr", VectorSize::Size8x16),
-                    VecALUOp::Eor => ("eor", VectorSize::Size8x16),
                     VecALUOp::Umaxp => ("umaxp", size),
                     VecALUOp::Add => ("add", size),
                     VecALUOp::Sub => ("sub", size),
@@ -2275,6 +2246,14 @@ impl Inst {
                     VecALUOp::Uzp2 => ("uzp2", size),
                     VecALUOp::Trn1 => ("trn1", size),
                     VecALUOp::Trn2 => ("trn2", size),
+
+                    // Lane division does not affect bitwise operations.
+                    // However, when printing, use 8-bit lane division to conform to ARM formatting.
+                    VecALUOp::And => ("and", size.as_scalar8_vector()),
+                    VecALUOp::Bic => ("bic", size.as_scalar8_vector()),
+                    VecALUOp::Orr => ("orr", size.as_scalar8_vector()),
+                    VecALUOp::Orn => ("orn", size.as_scalar8_vector()),
+                    VecALUOp::Eor => ("eor", size.as_scalar8_vector()),
                 };
                 let rd = pretty_print_vreg_vector(rd.to_reg(), size);
                 let rn = pretty_print_vreg_vector(rn, size);
@@ -2406,15 +2385,6 @@ impl Inst {
             }
             &Inst::VecMisc { op, rd, rn, size } => {
                 let (op, size, suffix) = match op {
-                    VecMisc2::Not => (
-                        "mvn",
-                        if size.is_128bits() {
-                            VectorSize::Size8x16
-                        } else {
-                            VectorSize::Size8x8
-                        },
-                        "",
-                    ),
                     VecMisc2::Neg => ("neg", size, ""),
                     VecMisc2::Abs => ("abs", size, ""),
                     VecMisc2::Fabs => ("fabs", size, ""),
@@ -2442,6 +2412,10 @@ impl Inst {
                     VecMisc2::Fcmgt0 => ("fcmgt", size, ", #0.0"),
                     VecMisc2::Fcmle0 => ("fcmle", size, ", #0.0"),
                     VecMisc2::Fcmlt0 => ("fcmlt", size, ", #0.0"),
+
+                    // Lane division does not affect bitwise operations.
+                    // However, when printing, use 8-bit lane division to conform to ARM formatting.
+                    VecMisc2::Not => ("mvn", size.as_scalar8_vector(), ""),
                 };
                 let rd = pretty_print_vreg_vector(rd.to_reg(), size);
                 let rn = pretty_print_vreg_vector(rn, size);
@@ -2607,18 +2581,27 @@ impl Inst {
                     format!("{op} {rd}, {rn}")
                 }
             }
-            &Inst::Call { .. } => format!("bl 0"),
-            &Inst::CallInd { ref info, .. } => {
-                let rn = pretty_print_reg(info.rn);
-                format!("blr {rn}")
+            &Inst::Call { ref info } => {
+                let try_call = info
+                    .try_call_info
+                    .as_ref()
+                    .map(|tci| pretty_print_try_call(tci))
+                    .unwrap_or_default();
+                format!("bl 0{try_call}")
             }
-            &Inst::ReturnCall {
-                ref callee,
-                ref info,
-            } => {
+            &Inst::CallInd { ref info } => {
+                let rn = pretty_print_reg(info.dest);
+                let try_call = info
+                    .try_call_info
+                    .as_ref()
+                    .map(|tci| pretty_print_try_call(tci))
+                    .unwrap_or_default();
+                format!("blr {rn}{try_call}")
+            }
+            &Inst::ReturnCall { ref info } => {
                 let mut s = format!(
-                    "return_call {callee:?} new_stack_arg_size:{}",
-                    info.new_stack_arg_size
+                    "return_call {:?} new_stack_arg_size:{}",
+                    info.dest, info.new_stack_arg_size
                 );
                 for ret in &info.uses {
                     let preg = pretty_print_reg(ret.preg);
@@ -2627,8 +2610,8 @@ impl Inst {
                 }
                 s
             }
-            &Inst::ReturnCallInd { callee, ref info } => {
-                let callee = pretty_print_reg(callee);
+            &Inst::ReturnCallInd { ref info } => {
+                let callee = pretty_print_reg(info.dest);
                 let mut s = format!(
                     "return_call_ind {callee} new_stack_arg_size:{}",
                     info.new_stack_arg_size
@@ -2683,12 +2666,12 @@ impl Inst {
                 let taken = taken.pretty_print(0);
                 let not_taken = not_taken.pretty_print(0);
                 match kind {
-                    &CondBrKind::Zero(reg) => {
-                        let reg = pretty_print_reg(reg);
+                    &CondBrKind::Zero(reg, size) => {
+                        let reg = pretty_print_reg_sized(reg, size);
                         format!("cbz {reg}, {taken} ; b {not_taken}")
                     }
-                    &CondBrKind::NotZero(reg) => {
-                        let reg = pretty_print_reg(reg);
+                    &CondBrKind::NotZero(reg, size) => {
+                        let reg = pretty_print_reg_sized(reg, size);
                         format!("cbnz {reg}, {taken} ; b {not_taken}")
                     }
                     &CondBrKind::Cond(c) => {
@@ -2717,18 +2700,18 @@ impl Inst {
                 let rn = pretty_print_reg(rn);
                 format!("br {rn}")
             }
-            &Inst::Brk => "brk #0".to_string(),
+            &Inst::Brk => "brk #0xf000".to_string(),
             &Inst::Udf { .. } => "udf #0xc11f".to_string(),
             &Inst::TrapIf {
                 ref kind,
                 trap_code,
             } => match kind {
-                &CondBrKind::Zero(reg) => {
-                    let reg = pretty_print_reg(reg);
+                &CondBrKind::Zero(reg, size) => {
+                    let reg = pretty_print_reg_sized(reg, size);
                     format!("cbz {reg}, #trap={trap_code}")
                 }
-                &CondBrKind::NotZero(reg) => {
-                    let reg = pretty_print_reg(reg);
+                &CondBrKind::NotZero(reg, size) => {
+                    let reg = pretty_print_reg_sized(reg, size);
                     format!("cbnz {reg}, #trap={trap_code}")
                 }
                 &CondBrKind::Cond(c) => {
@@ -2785,13 +2768,25 @@ impl Inst {
                     targets
                 )
             }
-            &Inst::LoadExtName {
+            &Inst::LoadExtNameGot { rd, ref name } => {
+                let rd = pretty_print_reg(rd.to_reg());
+                format!("load_ext_name_got {rd}, {name:?}")
+            }
+            &Inst::LoadExtNameNear {
                 rd,
                 ref name,
                 offset,
             } => {
                 let rd = pretty_print_reg(rd.to_reg());
-                format!("load_ext_name {rd}, {name:?}+{offset}")
+                format!("load_ext_name_near {rd}, {name:?}+{offset}")
+            }
+            &Inst::LoadExtNameFar {
+                rd,
+                ref name,
+                offset,
+            } => {
+                let rd = pretty_print_reg(rd.to_reg());
+                format!("load_ext_name_far {rd}, {name:?}+{offset}")
             }
             &Inst::LoadAddr { rd, ref mem } => {
                 // TODO: we really should find a better way to avoid duplication of
@@ -2842,7 +2837,7 @@ impl Inst {
                     ret.push_str(&add.print_with_state(&mut EmitState::default()));
                 } else {
                     let tmp = writable_spilltmp_reg();
-                    for inst in Inst::load_constant(tmp, abs_offset, &mut |_| tmp).into_iter() {
+                    for inst in Inst::load_constant(tmp, abs_offset).into_iter() {
                         ret.push_str(&inst.print_with_state(&mut EmitState::default()));
                     }
                     let add = Inst::AluRRR {
@@ -2899,6 +2894,13 @@ impl Inst {
                 let reg = pretty_print_reg(reg);
                 format!("dummy_use {reg}")
             }
+            &Inst::LabelAddress { dst, label } => {
+                let dst = pretty_print_reg(dst.to_reg());
+                format!("label_address {dst}, {label:?}")
+            }
+            &Inst::SequencePoint {} => {
+                format!("sequence_point")
+            }
             &Inst::StackProbeLoop { start, end, step } => {
                 let start = pretty_print_reg(start.to_reg());
                 let end = pretty_print_reg(end);
@@ -2924,11 +2926,9 @@ pub enum LabelUse {
     /// 26-bit branch offset (unconditional branches). PC-rel, offset is imm << 2. Immediate is 26
     /// signed bits, in bits 25:0. Used by b, bl.
     Branch26,
-    #[allow(dead_code)]
     /// 19-bit offset for LDR (load literal). PC-rel, offset is imm << 2. Immediate is 19 signed bits,
     /// in bits 23:5.
     Ldr19,
-    #[allow(dead_code)]
     /// 21-bit offset for ADR (get address of label). PC-rel, offset is not shifted. Immediate is
     /// 21 signed bits, with high 19 bits in bits 23:5 and low 2 bits in bits 30:29.
     Adr21,
@@ -2997,7 +2997,9 @@ impl MachInstLabelUse for LabelUse {
             LabelUse::Branch14 => (pc_rel_shifted & 0x3fff) << 5,
             LabelUse::Branch19 | LabelUse::Ldr19 => (pc_rel_shifted & 0x7ffff) << 5,
             LabelUse::Branch26 => pc_rel_shifted & 0x3ffffff,
-            LabelUse::Adr21 => (pc_rel_shifted & 0x7ffff) << 5 | (pc_rel_shifted & 0x180000) << 10,
+            // Note: the *low* two bits of offset are put in the
+            // *high* bits (30, 29).
+            LabelUse::Adr21 => (pc_rel_shifted & 0x1ffffc) << 3 | (pc_rel_shifted & 3) << 29,
             LabelUse::PCRel32 => pc_rel_shifted,
         };
         let is_add = match self {
@@ -3091,5 +3093,22 @@ impl MachInstLabelUse for LabelUse {
             (Reloc::Arm64Call, 0) => Some(LabelUse::Branch26),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inst_size_test() {
+        // This test will help with unintentionally growing the size
+        // of the Inst enum.
+        let expected = if cfg!(target_pointer_width = "32") && !cfg!(target_arch = "arm") {
+            28
+        } else {
+            32
+        };
+        assert_eq!(expected, core::mem::size_of::<Inst>());
     }
 }

@@ -4,15 +4,19 @@
 
 #[cfg(feature = "onnx")]
 pub mod onnx;
-#[cfg(feature = "openvino")]
+#[cfg(all(feature = "openvino", target_pointer_width = "64"))]
 pub mod openvino;
+#[cfg(feature = "pytorch")]
+pub mod pytorch;
 #[cfg(all(feature = "winml", target_os = "windows"))]
 pub mod winml;
 
 #[cfg(feature = "onnx")]
 use self::onnx::OnnxBackend;
-#[cfg(feature = "openvino")]
+#[cfg(all(feature = "openvino", target_pointer_width = "64"))]
 use self::openvino::OpenvinoBackend;
+#[cfg(feature = "pytorch")]
+use self::pytorch::PytorchBackend;
 #[cfg(all(feature = "winml", target_os = "windows"))]
 use self::winml::WinMLBackend;
 
@@ -27,7 +31,8 @@ use wiggle::GuestError;
 /// Return a list of all available backend frameworks.
 pub fn list() -> Vec<Backend> {
     let mut backends = vec![];
-    #[cfg(feature = "openvino")]
+    let _ = &mut backends; // silence warnings if none are enabled
+    #[cfg(all(feature = "openvino", target_pointer_width = "64"))]
     {
         backends.push(Backend::from(OpenvinoBackend::default()));
     }
@@ -38,6 +43,10 @@ pub fn list() -> Vec<Backend> {
     #[cfg(feature = "onnx")]
     {
         backends.push(Backend::from(OnnxBackend::default()));
+    }
+    #[cfg(feature = "pytorch")]
+    {
+        backends.push(Backend::from(PytorchBackend::default()));
     }
     backends
 }
@@ -69,9 +78,15 @@ pub trait BackendGraph: Send + Sync {
 /// A [BackendExecutionContext] performs the actual inference; this is the
 /// backing implementation for a user-facing execution context.
 pub trait BackendExecutionContext: Send + Sync {
+    // WITX functions
     fn set_input(&mut self, id: Id, tensor: &Tensor) -> Result<(), BackendError>;
-    fn compute(&mut self) -> Result<(), BackendError>;
     fn get_output(&mut self, id: Id) -> Result<Tensor, BackendError>;
+
+    // Functions which work for both WIT and WITX
+    fn compute(
+        &mut self,
+        inputs: Option<Vec<NamedTensor>>,
+    ) -> Result<Option<Vec<NamedTensor>>, BackendError>;
 }
 
 /// An identifier for a tensor in a [Graph].
@@ -100,7 +115,7 @@ impl Id {
 #[derive(Debug, Error)]
 pub enum BackendError {
     #[error("Failed while accessing backend")]
-    BackendAccess(#[from] anyhow::Error),
+    BackendAccess(#[from] wasmtime::Error),
     #[error("Failed while accessing guest module")]
     GuestAccess(#[from] GuestError),
     #[error("The backend expects {0} buffers, passed {1}")]
@@ -112,9 +127,15 @@ pub enum BackendError {
 }
 
 /// Read a file into a byte vector.
-fn read(path: &Path) -> anyhow::Result<Vec<u8>> {
+#[allow(dead_code, reason = "not used on all platforms")]
+fn read(path: &Path) -> wasmtime::Result<Vec<u8>> {
     let mut file = File::open(path)?;
     let mut buffer = vec![];
     file.read_to_end(&mut buffer)?;
     Ok(buffer)
+}
+
+pub struct NamedTensor {
+    pub name: String,
+    pub tensor: Tensor,
 }

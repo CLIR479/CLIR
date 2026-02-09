@@ -13,6 +13,29 @@ set -ex
 
 build=$1
 target=$2
+wrapper=""
+
+# If `$DOCKER_IMAGE` is set then run the build inside of that docker container
+# instead of on the host machine. In CI this uses `./ci/docker/*/Dockerfile` to
+# have precise glibc requirements for Linux platforms for example.
+if [ "$DOCKER_IMAGE" != "" ]; then
+  if [ -f "$DOCKER_IMAGE" ]; then
+    docker build --tag build-image --file $DOCKER_IMAGE ci/docker
+    DOCKER_IMAGE=build-image
+  fi
+
+  # Inherit the environment's rustc and env vars related to cargo/rust, and then
+  # otherwise re-execute ourselves and we'll be missing `$DOCKER_IMAGE` in the
+  # container so we'll continue below.
+  exec docker run --interactive \
+    --volume `pwd`:`pwd` \
+    --volume `rustc --print sysroot`:/rust:ro \
+    --workdir `pwd` \
+    --interactive \
+    --env-file <(env | grep 'CARGO\|RUST') \
+    $DOCKER_IMAGE \
+    bash -c "PATH=\$PATH:/rust/bin RUSTFLAGS=\"\$RUSTFLAGS \$EXTRA_RUSTFLAGS\" `pwd`/$0 $*"
+fi
 
 # Default build flags for release artifacts. Leave debugging for
 # builds-from-source which have richer information anyway, and additionally the
@@ -29,22 +52,49 @@ if [[ "$build" = *-min ]]; then
   export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
   export CARGO_PROFILE_RELEASE_LTO=true
   build_std=-Zbuild-std=std,panic_abort
-  build_std_features=-Zbuild-std-features=std_detect_dlsym_getauxval
-  flags="$build_std $build_std_features --no-default-features --features disable-logging"
+  flags="$build_std --no-default-features --features disable-logging"
   cmake_flags="-DWASMTIME_DISABLE_ALL_FEATURES=ON"
   cmake_flags="$cmake_flags -DWASMTIME_FEATURE_DISABLE_LOGGING=ON"
-  cmake_flags="$cmake_flags -DWASMTIME_USER_CARGO_BUILD_OPTIONS:LIST=$build_std;$build_std_features"
+  cmake_flags="$cmake_flags -DWASMTIME_USER_CARGO_BUILD_OPTIONS:LIST=$build_std"
 else
   # For release builds the CLI is built a bit more feature-ful than the Cargo
   # defaults to provide artifacts that can do as much as possible.
   bin_flags="--features all-arch,component-model"
 fi
 
+if [[ "$target" = "x86_64-pc-windows-msvc" ]]; then
+  # Avoid emitting `/DEFAULTLIB:MSVCRT` into the static library by using clang.
+  export CC=clang
+  export CXX=clang++
+fi
+
 cargo build --release $flags --target $target -p wasmtime-cli $bin_flags --features run
+
+# For the C API force unwind tables to be emitted to make the generated objects
+# more flexible. Embedders can always build without this but this enables
+# libunwind to produce better backtraces by default when Wasmtime is linked into
+# a different project that wants to unwind.
+export RUSTFLAGS="$RUSTFLAGS -C force-unwind-tables"
+
+# Shrink the size of `*.a` artifacts without spending too much extra time in CI.
+# See #11476 for some more context. Here Windows builds achieve this with 1 CGU
+# which results in modest size gains, and other platforms use LTO to achieve
+# much more significant size gains. The reason the platforms are different is
+# that CI is extremely slow on Windows, almost 2x slower, so this is an attempt
+# to keep CI cycle time under control.
+case $build in
+  *-mingw* | *-windows*)
+    export CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+    ;;
+  *)
+    export CARGO_PROFILE_RELEASE_LTO=true
+    ;;
+esac
 
 mkdir -p target/c-api-build
 cd target/c-api-build
 cmake \
+  -G Ninja \
   ../../crates/c-api \
   $cmake_flags \
   -DCMAKE_BUILD_TYPE=Release \

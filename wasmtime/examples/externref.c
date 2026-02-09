@@ -1,22 +1,7 @@
 /*
 Example of using `externref` values.
 
-You can compile and run this example on Linux with:
-
-   cargo build --release -p wasmtime-c-api
-   cc examples/externref.c \
-       -I crates/c-api/include \
-       -I crates/c-api/wasm-c-api/include \
-       target/release/libwasmtime.a \
-       -lpthread -ldl -lm \
-       -o externref
-   ./externref
-
-Note that on Windows and macOS the command will be similar, but you'll need
-to tweak the `-lpthread` and such annotations as well as the name of the
-`libwasmtime.a` file on Windows.
-
-You can also build using cmake:
+You can build using cmake:
 
 mkdir build && cd build && cmake .. && \
   cmake --build . --target wasmtime-externref
@@ -127,7 +112,7 @@ int main() {
     assert(elem.kind == WASMTIME_EXTERNREF);
     assert(strcmp((char *)wasmtime_externref_data(context, &elem.of.externref),
                   "Hello, World!") == 0);
-    wasmtime_val_unroot(context, &elem);
+    wasmtime_val_unroot(&elem);
   }
 
   printf("Touching `externref` global...\n");
@@ -151,7 +136,7 @@ int main() {
     assert(strcmp((char *)wasmtime_externref_data(context,
                                                   &global_val.of.externref),
                   "Hello, World!") == 0);
-    wasmtime_val_unroot(context, &global_val);
+    wasmtime_val_unroot(&global_val);
   }
 
   printf("Calling `externref` func...\n");
@@ -176,9 +161,9 @@ int main() {
     assert(strcmp((char *)wasmtime_externref_data(context,
                                                   &results[0].of.externref),
                   "Hello, World!") == 0);
-    wasmtime_val_unroot(context, &results[0]);
+    wasmtime_val_unroot(&results[0]);
   }
-  wasmtime_val_unroot(context, &externref_val);
+  wasmtime_val_unroot(&externref_val);
 
   // We can GC any now-unused references to our externref that the store is
   // holding.

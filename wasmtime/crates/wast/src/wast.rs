@@ -2,26 +2,39 @@
 use crate::component;
 use crate::core;
 use crate::spectest::*;
-use anyhow::{anyhow, bail, Context as _};
+use json_from_wast::{Action, Command, Const, WasmFile, WasmFileType};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str;
+use std::sync::Arc;
 use std::thread;
-use wasmtime::*;
+use wasmtime::{error::Context as _, *};
 use wast::lexer::Lexer;
 use wast::parser::{self, ParseBuffer};
-use wast::{QuoteWat, Wast, WastArg, WastDirective, WastExecute, WastInvoke, WastRet, Wat};
 
 /// The wast test script language allows modules to be defined and actions
 /// to be performed on them.
-pub struct WastContext<T> {
+pub struct WastContext {
     /// Wast files have a concept of a "current" module, which is the most
     /// recently defined.
     current: Option<InstanceKind>,
-    core_linker: Linker<T>,
+    core_linker: Linker<()>,
+    modules: HashMap<String, ModuleKind>,
     #[cfg(feature = "component-model")]
-    component_linker: component::Linker<T>,
-    store: Store<T>,
+    component_linker: component::Linker<()>,
+
+    /// The store used for core wasm tests/primitives.
+    ///
+    /// Note that components each get their own store so this is not used for
+    /// component-model testing.
+    pub(crate) core_store: Store<()>,
+    pub(crate) async_runtime: Option<tokio::runtime::Runtime>,
+    generate_dwarf: bool,
+    precompile_save: Option<PathBuf>,
+    precompile_load: Option<PathBuf>,
+
+    modules_by_filename: Arc<HashMap<String, Vec<u8>>>,
+    configure_store: Arc<dyn Fn(&mut Store<()>) + Send + Sync>,
 }
 
 enum Outcome<T = Results> {
@@ -52,220 +65,365 @@ enum Results {
     Component(Vec<component::Val>),
 }
 
+#[derive(Clone)]
+enum ModuleKind {
+    Core(Module),
+    #[cfg(feature = "component-model")]
+    Component(component::Component),
+}
+
 enum InstanceKind {
     Core(Instance),
     #[cfg(feature = "component-model")]
-    Component(component::Instance),
+    Component(Store<()>, component::Instance),
 }
 
-enum Export {
+enum Export<'a> {
     Core(Extern),
     #[cfg(feature = "component-model")]
-    Component(component::Func),
+    Component(&'a mut Store<()>, component::Func),
+
+    /// Impossible-to-construct variant to consider `'a` used when the
+    /// `component-model` feature is disabled.
+    _Unused(std::convert::Infallible, &'a ()),
 }
 
-impl<T> WastContext<T>
-where
-    T: Clone + Send + 'static,
-{
+/// Whether or not to use async APIs when calling wasm during wast testing.
+///
+/// Passed to [`WastContext::new`].
+#[derive(Debug, Copy, Clone, PartialEq)]
+#[expect(missing_docs, reason = "self-describing variants")]
+pub enum Async {
+    Yes,
+    No,
+}
+
+impl WastContext {
     /// Construct a new instance of `WastContext`.
-    pub fn new(store: Store<T>) -> Self {
+    ///
+    /// The `engine` provided is used for all store/module/component creation
+    /// and should be appropriately configured by the caller. The `async_`
+    /// configuration indicates whether functions are invoked either async or
+    /// sync, and then the `configure` callback is used whenever a store is
+    /// created to further configure its settings.
+    pub fn new(
+        engine: &Engine,
+        async_: Async,
+        configure: impl Fn(&mut Store<()>) + Send + Sync + 'static,
+    ) -> Self {
         // Spec tests will redefine the same module/name sometimes, so we need
         // to allow shadowing in the linker which picks the most recent
         // definition as what to link when linking.
-        let mut core_linker = Linker::new(store.engine());
+        let mut core_linker = Linker::new(engine);
         core_linker.allow_shadowing(true);
         Self {
             current: None,
             core_linker,
             #[cfg(feature = "component-model")]
             component_linker: {
-                let mut linker = component::Linker::new(store.engine());
+                let mut linker = component::Linker::new(engine);
                 linker.allow_shadowing(true);
                 linker
             },
-            store,
+            core_store: {
+                let mut store = Store::new(engine, ());
+                configure(&mut store);
+                store
+            },
+            modules: Default::default(),
+            async_runtime: if async_ == Async::Yes {
+                Some(
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap(),
+                )
+            } else {
+                None
+            },
+            generate_dwarf: true,
+            precompile_save: None,
+            precompile_load: None,
+            modules_by_filename: Arc::default(),
+            configure_store: Arc::new(configure),
         }
     }
 
-    fn get_export(&mut self, module: Option<&str>, name: &str) -> Result<Export> {
+    fn engine(&self) -> &Engine {
+        self.core_linker.engine()
+    }
+
+    /// Saves precompiled modules/components into `path` instead of executing
+    /// test directives.
+    pub fn precompile_save(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        self.precompile_save = Some(path.as_ref().into());
+        self
+    }
+
+    /// Loads precompiled modules/components from `path` instead of compiling
+    /// natively.
+    pub fn precompile_load(&mut self, path: impl AsRef<Path>) -> &mut Self {
+        self.precompile_load = Some(path.as_ref().into());
+        self
+    }
+
+    fn get_export(&mut self, module: Option<&str>, name: &str) -> Result<Export<'_>> {
         if let Some(module) = module {
             return Ok(Export::Core(
                 self.core_linker
-                    .get(&mut self.store, module, name)
-                    .ok_or_else(|| anyhow!("no item named `{}::{}` found", module, name))?,
+                    .get(&mut self.core_store, module, name)
+                    .ok_or_else(|| format_err!("no item named `{module}::{name}` found"))?,
             ));
         }
 
         let cur = self
             .current
-            .as_ref()
-            .ok_or_else(|| anyhow!("no previous instance found"))?;
+            .as_mut()
+            .ok_or_else(|| format_err!("no previous instance found"))?;
         Ok(match cur {
             InstanceKind::Core(i) => Export::Core(
-                i.get_export(&mut self.store, name)
-                    .ok_or_else(|| anyhow!("no item named `{}` found", name))?,
+                i.get_export(&mut self.core_store, name)
+                    .ok_or_else(|| format_err!("no item named `{name}` found"))?,
             ),
             #[cfg(feature = "component-model")]
-            InstanceKind::Component(i) => Export::Component(
-                i.get_func(&mut self.store, name)
-                    .ok_or_else(|| anyhow!("no func named `{}` found", name))?,
-            ),
+            InstanceKind::Component(store, i) => {
+                let export = i
+                    .get_func(&mut *store, name)
+                    .ok_or_else(|| format_err!("no func named `{name}` found"))?;
+                Export::Component(store, export)
+            }
         })
     }
 
-    fn instantiate_module(&mut self, module: &[u8]) -> Result<Outcome<Instance>> {
-        let module = Module::new(self.store.engine(), module)?;
-        Ok(
-            match self.core_linker.instantiate(&mut self.store, &module) {
-                Ok(i) => Outcome::Ok(i),
-                Err(e) => Outcome::Trap(e),
-            },
-        )
+    fn instantiate_module(&mut self, module: &Module) -> Result<Outcome<Instance>> {
+        let instance = match &self.async_runtime {
+            Some(rt) => rt.block_on(
+                self.core_linker
+                    .instantiate_async(&mut self.core_store, &module),
+            ),
+            None => self.core_linker.instantiate(&mut self.core_store, &module),
+        };
+        Ok(match instance {
+            Ok(i) => Outcome::Ok(i),
+            Err(e) => Outcome::Trap(e),
+        })
     }
 
     #[cfg(feature = "component-model")]
     fn instantiate_component(
         &mut self,
-        component: &[u8],
-    ) -> Result<Outcome<(component::Component, component::Instance)>> {
-        let engine = self.store.engine();
-        let component = component::Component::new(engine, component)?;
-        Ok(
-            match self
-                .component_linker
-                .instantiate(&mut self.store, &component)
-            {
-                Ok(i) => Outcome::Ok((component, i)),
-                Err(e) => Outcome::Trap(e),
-            },
-        )
+        component: &component::Component,
+    ) -> Result<Outcome<(component::Component, Store<()>, component::Instance)>> {
+        let mut store = Store::new(self.engine(), ());
+        (self.configure_store)(&mut store);
+        let instance = match &self.async_runtime {
+            Some(rt) => rt.block_on(
+                self.component_linker
+                    .instantiate_async(&mut store, &component),
+            ),
+            None => self.component_linker.instantiate(&mut store, &component),
+        };
+        Ok(match instance {
+            Ok(i) => Outcome::Ok((component.clone(), store, i)),
+            Err(e) => Outcome::Trap(e),
+        })
     }
 
     /// Register "spectest" which is used by the spec testsuite.
     pub fn register_spectest(&mut self, config: &SpectestConfig) -> Result<()> {
-        link_spectest(&mut self.core_linker, &mut self.store, config)?;
+        link_spectest(&mut self.core_linker, &mut self.core_store, config)?;
         #[cfg(feature = "component-model")]
         link_component_spectest(&mut self.component_linker)?;
         Ok(())
     }
 
     /// Perform the action portion of a command.
-    fn perform_execute(&mut self, exec: WastExecute<'_>) -> Result<Outcome> {
-        match exec {
-            WastExecute::Invoke(invoke) => self.perform_invoke(invoke),
-            WastExecute::Wat(mut module) => Ok(match &mut module {
-                Wat::Module(m) => self
-                    .instantiate_module(&m.encode()?)?
-                    .map(|_| Results::Core(Vec::new())),
-                #[cfg(feature = "component-model")]
-                Wat::Component(m) => self
-                    .instantiate_component(&m.encode()?)?
-                    .map(|_| Results::Component(Vec::new())),
-                #[cfg(not(feature = "component-model"))]
-                Wat::Component(_) => bail!("component-model support not enabled"),
-            }),
-            WastExecute::Get { module, global, .. } => self.get(module.map(|s| s.name()), global),
+    fn perform_action(&mut self, action: &Action<'_>) -> Result<Outcome> {
+        // Need to simultaneously borrow `self.async_runtime` and a `&mut
+        // Store` from components so work around the borrow checker issues by
+        // taking out the async runtime here and putting it back through a
+        // destructor.
+        struct ReplaceRuntime<'a> {
+            ctx: &'a mut WastContext,
+            rt: Option<tokio::runtime::Runtime>,
         }
-    }
-
-    fn perform_invoke(&mut self, exec: WastInvoke<'_>) -> Result<Outcome> {
-        match self.get_export(exec.module.map(|i| i.name()), exec.name)? {
-            Export::Core(export) => {
-                let func = export
-                    .into_func()
-                    .ok_or_else(|| anyhow!("no function named `{}`", exec.name))?;
-                let values = exec
-                    .args
-                    .iter()
-                    .map(|v| match v {
-                        WastArg::Core(v) => core::val(&mut self.store, v),
-                        WastArg::Component(_) => bail!("expected component function, found core"),
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                let mut results = vec![Val::null_func_ref(); func.ty(&self.store).results().len()];
-                Ok(match func.call(&mut self.store, &values, &mut results) {
-                    Ok(()) => Outcome::Ok(Results::Core(results.into())),
-                    Err(e) => Outcome::Trap(e),
-                })
-            }
-            #[cfg(feature = "component-model")]
-            Export::Component(func) => {
-                let values = exec
-                    .args
-                    .iter()
-                    .map(|v| match v {
-                        WastArg::Component(v) => component::val(v),
-                        WastArg::Core(_) => bail!("expected core function, found component"),
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                let mut results =
-                    vec![component::Val::Bool(false); func.results(&self.store).len()];
-                Ok(match func.call(&mut self.store, &values, &mut results) {
-                    Ok(()) => {
-                        func.post_return(&mut self.store)?;
-                        Outcome::Ok(Results::Component(results.into()))
-                    }
-                    Err(e) => Outcome::Trap(e),
-                })
+        impl Drop for ReplaceRuntime<'_> {
+            fn drop(&mut self) {
+                self.ctx.async_runtime = self.rt.take();
             }
         }
-    }
-
-    /// Define a module and register it.
-    fn wat(&mut self, mut wat: QuoteWat<'_>) -> Result<()> {
-        let (is_module, name) = match &wat {
-            QuoteWat::Wat(Wat::Module(m)) => (true, m.id),
-            QuoteWat::QuoteModule(..) => (true, None),
-            QuoteWat::Wat(Wat::Component(m)) => (false, m.id),
-            QuoteWat::QuoteComponent(..) => (false, None),
+        let replace = ReplaceRuntime {
+            rt: self.async_runtime.take(),
+            ctx: self,
         };
-        let bytes = wat.encode()?;
-        if is_module {
-            let instance = match self.instantiate_module(&bytes)? {
-                Outcome::Ok(i) => i,
-                Outcome::Trap(e) => return Err(e).context("instantiation failed"),
-            };
-            if let Some(name) = name {
-                self.core_linker
-                    .instance(&mut self.store, name.name(), instance)?;
+        let me = &mut *replace.ctx;
+        match action {
+            Action::Invoke {
+                module,
+                field,
+                args,
+            } => match me.get_export(module.as_deref(), field)? {
+                Export::Core(export) => {
+                    drop(replace);
+                    let func = export
+                        .into_func()
+                        .ok_or_else(|| format_err!("no function named `{field}`"))?;
+                    let values = args
+                        .iter()
+                        .map(|v| match v {
+                            Const::Core(v) => core::val(self, v),
+                            _ => bail!("expected core function, found other other argument {v:?}"),
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    let mut results =
+                        vec![Val::null_func_ref(); func.ty(&self.core_store).results().len()];
+                    let result = match &self.async_runtime {
+                        Some(rt) => rt.block_on(func.call_async(
+                            &mut self.core_store,
+                            &values,
+                            &mut results,
+                        )),
+                        None => func.call(&mut self.core_store, &values, &mut results),
+                    };
+
+                    Ok(match result {
+                        Ok(()) => Outcome::Ok(Results::Core(results)),
+                        Err(e) => Outcome::Trap(e),
+                    })
+                }
+                #[cfg(feature = "component-model")]
+                Export::Component(store, func) => {
+                    let values = args
+                        .iter()
+                        .map(|v| match v {
+                            Const::Component(v) => component::val(v),
+                            _ => bail!("expected component function, found other argument {v:?}"),
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    let mut results =
+                        vec![component::Val::Bool(false); func.ty(&store).results().len()];
+                    let result = match &replace.rt {
+                        Some(rt) => {
+                            rt.block_on(func.call_async(&mut *store, &values, &mut results))
+                        }
+                        None => func.call(&mut *store, &values, &mut results),
+                    };
+                    Ok(match result {
+                        Ok(()) => Outcome::Ok(Results::Component(results)),
+                        Err(e) => Outcome::Trap(e),
+                    })
+                }
+            },
+            Action::Get { module, field, .. } => me.get(module.as_deref(), field),
+        }
+    }
+
+    /// Instantiates the `module` provided and registers the instance under the
+    /// `name` provided if successful.
+    fn module(&mut self, name: Option<&str>, module: &ModuleKind) -> Result<()> {
+        match module {
+            ModuleKind::Core(module) => {
+                let instance = match self.instantiate_module(&module)? {
+                    Outcome::Ok(i) => i,
+                    Outcome::Trap(e) => return Err(e).context("instantiation failed"),
+                };
+                if let Some(name) = name {
+                    self.core_linker
+                        .instance(&mut self.core_store, name, instance)?;
+                }
+                self.current = Some(InstanceKind::Core(instance));
             }
-            self.current = Some(InstanceKind::Core(instance));
-        } else {
             #[cfg(feature = "component-model")]
-            {
-                let (component, instance) = match self.instantiate_component(&bytes)? {
+            ModuleKind::Component(module) => {
+                let (component, mut store, instance) = match self.instantiate_component(&module)? {
                     Outcome::Ok(i) => i,
                     Outcome::Trap(e) => return Err(e).context("instantiation failed"),
                 };
                 if let Some(name) = name {
                     let ty = component.component_type();
-                    let mut linker = self.component_linker.instance(name.name())?;
-                    let engine = self.store.engine().clone();
+                    let engine = self.engine().clone();
+                    let mut linker = self.component_linker.instance(name)?;
                     for (name, item) in ty.exports(&engine) {
                         match item {
                             component::types::ComponentItem::Module(_) => {
-                                let module = instance.get_module(&mut self.store, name).unwrap();
+                                let module = instance.get_module(&mut store, name).unwrap();
                                 linker.module(name, &module)?;
                             }
+                            component::types::ComponentItem::Resource(_) => {
+                                let resource = instance.get_resource(&mut store, name).unwrap();
+                                linker.resource(name, resource, |_, _| Ok(()))?;
+                            }
                             // TODO: should ideally reflect more than just
-                            // modules into the linker's namespace but that's
-                            // not easily supported today for host functions due
-                            // to the inability to take a function from one
-                            // instance and put it into the linker (must go
-                            // through the host right now).
+                            // modules/resources into the linker's namespace
+                            // but that's not easily supported today for host
+                            // functions due to the inability to take a
+                            // function from one instance and put it into the
+                            // linker (must go through the host right now).
                             _ => {}
                         }
                     }
                 }
-                self.current = Some(InstanceKind::Component(instance));
+                self.current = Some(InstanceKind::Component(store, instance));
             }
-            #[cfg(not(feature = "component-model"))]
-            bail!("component-model support not enabled");
         }
         Ok(())
+    }
+
+    /// Compiles the module `wat` into binary and returns the name found within
+    /// it, if any.
+    ///
+    /// This will not register the name within `self.modules`.
+    fn module_definition(&mut self, file: &WasmFile) -> Result<ModuleKind> {
+        let name = match file.module_type {
+            WasmFileType::Text => file
+                .binary_filename
+                .as_ref()
+                .ok_or_else(|| format_err!("cannot compile module that isn't a valid binary"))?,
+            WasmFileType::Binary => &file.filename,
+        };
+
+        match &self.precompile_load {
+            Some(path) => {
+                let cwasm = path.join(&name[..]).with_extension("cwasm");
+                match Engine::detect_precompiled_file(&cwasm)
+                    .with_context(|| format!("failed to read {cwasm:?}"))?
+                {
+                    Some(Precompiled::Module) => {
+                        let module = unsafe { Module::deserialize_file(self.engine(), &cwasm)? };
+                        Ok(ModuleKind::Core(module))
+                    }
+                    #[cfg(feature = "component-model")]
+                    Some(Precompiled::Component) => {
+                        let component = unsafe {
+                            component::Component::deserialize_file(self.engine(), &cwasm)?
+                        };
+                        Ok(ModuleKind::Component(component))
+                    }
+                    #[cfg(not(feature = "component-model"))]
+                    Some(Precompiled::Component) => {
+                        bail!("support for components disabled at compile time")
+                    }
+                    None => bail!("expected a cwasm file"),
+                }
+            }
+            None => {
+                let bytes = &self.modules_by_filename[&name[..]];
+
+                if wasmparser::Parser::is_core_wasm(&bytes) {
+                    let module = Module::new(self.engine(), &bytes)?;
+                    Ok(ModuleKind::Core(module))
+                } else {
+                    #[cfg(feature = "component-model")]
+                    {
+                        let component = component::Component::new(self.engine(), &bytes)?;
+                        Ok(ModuleKind::Component(component))
+                    }
+                    #[cfg(not(feature = "component-model"))]
+                    bail!("component-model support not enabled");
+                }
+            }
+        }
     }
 
     /// Register an instance to make it available for performing actions.
@@ -276,14 +434,14 @@ where
                 let current = self
                     .current
                     .as_ref()
-                    .ok_or(anyhow!("no previous instance"))?;
+                    .ok_or(format_err!("no previous instance"))?;
                 match current {
                     InstanceKind::Core(current) => {
                         self.core_linker
-                            .instance(&mut self.store, as_name, *current)?;
+                            .instance(&mut self.core_store, as_name, *current)?;
                     }
                     #[cfg(feature = "component-model")]
-                    InstanceKind::Component(_) => {
+                    InstanceKind::Component(..) => {
                         bail!("register not implemented for components");
                     }
                 }
@@ -297,16 +455,16 @@ where
         let global = match self.get_export(instance_name, field)? {
             Export::Core(e) => e
                 .into_global()
-                .ok_or_else(|| anyhow!("no global named `{field}`"))?,
+                .ok_or_else(|| format_err!("no global named `{field}`"))?,
             #[cfg(feature = "component-model")]
-            Export::Component(_) => bail!("no global named `{field}`"),
+            Export::Component(..) => bail!("no global named `{field}`"),
         };
-        Ok(Outcome::Ok(Results::Core(
-            vec![global.get(&mut self.store)],
-        )))
+        Ok(Outcome::Ok(Results::Core(vec![
+            global.get(&mut self.core_store),
+        ])))
     }
 
-    fn assert_return(&self, result: Outcome, results: &[WastRet<'_>]) -> Result<()> {
+    fn assert_return(&mut self, result: Outcome, results: &[Const]) -> Result<()> {
         match result.into_result()? {
             Results::Core(values) => {
                 if values.len() != results.len() {
@@ -314,12 +472,10 @@ where
                 }
                 for (i, (v, e)) in values.iter().zip(results).enumerate() {
                     let e = match e {
-                        WastRet::Core(core) => core,
-                        WastRet::Component(_) => {
-                            bail!("expected component value found core value")
-                        }
+                        Const::Core(core) => core,
+                        _ => bail!("expected core value found other value {e:?}"),
                     };
-                    core::match_val(&self.store, v, e)
+                    core::match_val(&mut self.core_store, v, e)
                         .with_context(|| format!("result {i} didn't match"))?;
                 }
             }
@@ -330,10 +486,8 @@ where
                 }
                 for (i, (v, e)) in values.iter().zip(results).enumerate() {
                     let e = match e {
-                        WastRet::Core(_) => {
-                            bail!("expected component value found core value")
-                        }
-                        WastRet::Component(val) => val,
+                        Const::Component(val) => val,
+                        _ => bail!("expected component value found other value {e:?}"),
                     };
                     component::match_val(e, v)
                         .with_context(|| format!("result {i} didn't match"))?;
@@ -345,7 +499,7 @@ where
 
     fn assert_trap(&self, result: Outcome, expected: &str) -> Result<()> {
         let trap = match result {
-            Outcome::Ok(values) => bail!("expected trap, got {:?}", values),
+            Outcome::Ok(values) => bail!("expected trap, got {values:?}"),
             Outcome::Trap(t) => t,
         };
         let actual = format!("{trap:?}");
@@ -356,14 +510,31 @@ where
             || (expected.contains("uninitialized element 2") && actual.contains("uninitialized element"))
             // function references call_ref
             || (expected.contains("null function") && (actual.contains("uninitialized element") || actual.contains("null reference")))
+            // GC tests say "null $kind reference" but we just say "null reference".
+            || (expected.contains("null") && expected.contains("reference") && actual.contains("null reference"))
         {
             return Ok(());
         }
-        bail!("expected '{}', got '{}'", expected, actual)
+        bail!("expected '{expected}', got '{actual}'")
+    }
+
+    fn assert_exception(&mut self, result: Outcome) -> Result<()> {
+        match result {
+            Outcome::Ok(values) => bail!("expected exception, got {values:?}"),
+            Outcome::Trap(err) if err.is::<ThrownException>() => {
+                // Discard the thrown exception.
+                let _ = self
+                    .core_store
+                    .take_pending_exception()
+                    .expect("there should be a pending exception on the store");
+                Ok(())
+            }
+            Outcome::Trap(err) => bail!("expected exception, got {err:?}"),
+        }
     }
 
     /// Run a wast script from a byte buffer.
-    pub fn run_buffer(&mut self, filename: &str, wast: &[u8]) -> Result<()> {
+    pub fn run_wast(&mut self, filename: &str, wast: &[u8]) -> Result<()> {
         let wast = str::from_utf8(wast)?;
 
         let adjust_wast = |mut err: wast::Error| {
@@ -374,41 +545,65 @@ where
 
         let mut lexer = Lexer::new(wast);
         lexer.allow_confusing_unicode(filename.ends_with("names.wast"));
-        let buf = ParseBuffer::new_with_lexer(lexer).map_err(adjust_wast)?;
-        let ast = parser::parse::<Wast>(&buf).map_err(adjust_wast)?;
+        let mut buf = ParseBuffer::new_with_lexer(lexer).map_err(adjust_wast)?;
+        buf.track_instr_spans(self.generate_dwarf);
+        let ast = parser::parse::<wast::Wast>(&buf).map_err(adjust_wast)?;
 
-        self.run_directives(ast.directives, filename, wast)
+        let mut ast = json_from_wast::Opts::default()
+            .dwarf(self.generate_dwarf)
+            .convert(filename, wast, ast)
+            .to_wasmtime_result()?;
+
+        // Clear out any modules, if any, from a previous `*.wast` file being
+        // run, if any.
+        if !self.modules_by_filename.is_empty() {
+            self.modules_by_filename = Arc::default();
+        }
+        let modules_by_filename = Arc::get_mut(&mut self.modules_by_filename).unwrap();
+        for (name, bytes) in ast.wasms.drain(..) {
+            let prev = modules_by_filename.insert(name, bytes);
+            assert!(prev.is_none());
+        }
+
+        match &self.precompile_save {
+            Some(path) => {
+                let json_path = path
+                    .join(Path::new(filename).file_name().unwrap())
+                    .with_extension("json");
+                let json = serde_json::to_string(&ast)?;
+                std::fs::write(&json_path, json)
+                    .with_context(|| format!("failed to write {json_path:?}"))?;
+                for (name, bytes) in self.modules_by_filename.iter() {
+                    let cwasm_path = path.join(name).with_extension("cwasm");
+                    let cwasm = if wasmparser::Parser::is_core_wasm(&bytes) {
+                        self.engine().precompile_module(bytes)
+                    } else {
+                        #[cfg(feature = "component-model")]
+                        {
+                            self.engine().precompile_component(bytes)
+                        }
+                        #[cfg(not(feature = "component-model"))]
+                        bail!("component-model support not enabled");
+                    };
+                    if let Ok(cwasm) = cwasm {
+                        std::fs::write(&cwasm_path, cwasm)
+                            .with_context(|| format!("failed to write {cwasm_path:?}"))?;
+                    }
+                }
+                Ok(())
+            }
+            None => self.run_directives(ast.commands, filename),
+        }
     }
 
-    fn run_directives(
-        &mut self,
-        directives: Vec<WastDirective<'_>>,
-        filename: &str,
-        wast: &str,
-    ) -> Result<()> {
-        let adjust_wast = |mut err: wast::Error| {
-            err.set_path(filename.as_ref());
-            err.set_text(wast);
-            err
-        };
-
+    fn run_directives(&mut self, directives: Vec<Command<'_>>, filename: &str) -> Result<()> {
         thread::scope(|scope| {
             let mut threads = HashMap::new();
             for directive in directives {
-                let sp = directive.span();
-                if log::log_enabled!(log::Level::Debug) {
-                    let (line, col) = sp.linecol_in(wast);
-                    log::debug!("running directive on {}:{}:{}", filename, line + 1, col);
-                }
-                self.run_directive(directive, filename, wast, &scope, &mut threads)
-                    .map_err(|e| match e.downcast() {
-                        Ok(err) => adjust_wast(err).into(),
-                        Err(e) => e,
-                    })
-                    .with_context(|| {
-                        let (line, col) = sp.linecol_in(wast);
-                        format!("failed directive on {}:{}:{}", filename, line + 1, col)
-                    })?;
+                let line = directive.line();
+                log::debug!("running directive on {filename}:{line}");
+                self.run_directive(directive, filename, &scope, &mut threads)
+                    .with_context(|| format!("failed directive on {filename}:{line}"))?;
             }
             Ok(())
         })
@@ -416,132 +611,186 @@ where
 
     fn run_directive<'a>(
         &mut self,
-        directive: WastDirective<'a>,
+        directive: Command<'a>,
         filename: &'a str,
-        wast: &'a str,
+        // wast: &'a str,
         scope: &'a thread::Scope<'a, '_>,
-        threads: &mut HashMap<&'a str, thread::ScopedJoinHandle<'a, Result<()>>>,
-    ) -> Result<()>
-    where
-        T: 'a,
-    {
-        use wast::WastDirective::*;
+        threads: &mut HashMap<String, thread::ScopedJoinHandle<'a, Result<()>>>,
+    ) -> Result<()> {
+        use Command::*;
 
         match directive {
-            Wat(module) => self.wat(module)?,
-            Register {
-                span: _,
+            Module {
                 name,
-                module,
+                file,
+                line: _,
             } => {
-                self.register(module.map(|s| s.name()), name)?;
+                let module = self.module_definition(&file)?;
+                self.module(name.as_deref(), &module)?;
             }
-            Invoke(i) => {
-                self.perform_invoke(i)?;
+            ModuleDefinition {
+                name,
+                file,
+                line: _,
+            } => {
+                let module = self.module_definition(&file)?;
+                if let Some(name) = name {
+                    self.modules.insert(name.to_string(), module);
+                }
+            }
+            ModuleInstance {
+                instance,
+                module,
+                line: _,
+            } => {
+                let module = module
+                    .as_deref()
+                    .and_then(|n| self.modules.get(n))
+                    .cloned()
+                    .ok_or_else(|| format_err!("no module named {module:?}"))?;
+                self.module(instance.as_deref(), &module)?;
+            }
+            Register { line: _, name, as_ } => {
+                self.register(name.as_deref(), &as_)?;
+            }
+            Action { action, line: _ } => {
+                self.perform_action(&action)?;
             }
             AssertReturn {
-                span: _,
-                exec,
-                results,
+                action,
+                expected,
+                line: _,
             } => {
-                let result = self.perform_execute(exec)?;
-                self.assert_return(result, &results)?;
+                let result = self.perform_action(&action)?;
+                self.assert_return(result, &expected)?;
             }
             AssertTrap {
-                span: _,
-                exec,
-                message,
+                action,
+                text,
+                line: _,
             } => {
-                let result = self.perform_execute(exec)?;
-                self.assert_trap(result, message)?;
+                let result = self.perform_action(&action)?;
+                self.assert_trap(result, &text)?;
+            }
+            AssertUninstantiable {
+                file,
+                text,
+                line: _,
+            } => {
+                let result = match self.module_definition(&file)? {
+                    ModuleKind::Core(module) => self
+                        .instantiate_module(&module)?
+                        .map(|_| Results::Core(Vec::new())),
+                    #[cfg(feature = "component-model")]
+                    ModuleKind::Component(component) => self
+                        .instantiate_component(&component)?
+                        .map(|_| Results::Component(Vec::new())),
+                };
+                self.assert_trap(result, &text)?;
             }
             AssertExhaustion {
-                span: _,
-                call,
-                message,
+                action,
+                text,
+                line: _,
             } => {
-                let result = self.perform_invoke(call)?;
-                self.assert_trap(result, message)?;
+                let result = self.perform_action(&action)?;
+                self.assert_trap(result, &text)?;
             }
             AssertInvalid {
-                span: _,
-                module,
-                message,
+                file,
+                text,
+                line: _,
             } => {
-                let err = match self.wat(module) {
-                    Ok(()) => bail!("expected module to fail to build"),
+                let err = match self.module_definition(&file) {
+                    Ok(_) => bail!("expected module to fail to build"),
                     Err(e) => e,
                 };
                 let error_message = format!("{err:?}");
-                if !is_matching_assert_invalid_error_message(&message, &error_message) {
-                    bail!(
-                        "assert_invalid: expected \"{}\", got \"{}\"",
-                        message,
-                        error_message
-                    )
+                if !is_matching_assert_invalid_error_message(filename, &text, &error_message) {
+                    bail!("assert_invalid: expected \"{text}\", got \"{error_message}\"",)
                 }
             }
             AssertMalformed {
-                module,
-                span: _,
-                message: _,
+                file,
+                text: _,
+                line: _,
             } => {
-                if let Ok(_) = self.wat(module) {
+                if let Ok(_) = self.module_definition(&file) {
                     bail!("expected malformed module to fail to instantiate");
                 }
             }
             AssertUnlinkable {
-                span: _,
-                module,
-                message,
+                file,
+                text,
+                line: _,
             } => {
-                let err = match self.wat(QuoteWat::Wat(module)) {
-                    Ok(()) => bail!("expected module to fail to link"),
+                let module = self.module_definition(&file)?;
+                let err = match self.module(None, &module) {
+                    Ok(_) => bail!("expected module to fail to link"),
                     Err(e) => e,
                 };
                 let error_message = format!("{err:?}");
-                if !error_message.contains(&message) {
-                    bail!(
-                        "assert_unlinkable: expected {}, got {}",
-                        message,
-                        error_message
-                    )
+                if !is_matching_assert_invalid_error_message(filename, &text, &error_message) {
+                    bail!("assert_unlinkable: expected {text}, got {error_message}",)
                 }
             }
-            AssertException { .. } => bail!("unimplemented assert_exception"),
+            AssertException { line: _, action } => {
+                let result = self.perform_action(&action)?;
+                self.assert_exception(result)?;
+            }
 
-            Thread(thread) => {
-                let mut core_linker = Linker::new(self.store.engine());
-                if let Some(id) = thread.shared_module {
+            Thread {
+                name,
+                shared_module,
+                commands,
+                line: _,
+            } => {
+                let mut core_linker = Linker::new(self.engine());
+                if let Some(id) = shared_module {
                     let items = self
                         .core_linker
-                        .iter(&mut self.store)
-                        .filter(|(module, _, _)| *module == id.name())
+                        .iter(&mut self.core_store)
+                        .filter(|(module, _, _)| *module == &id[..])
                         .collect::<Vec<_>>();
                     for (module, name, item) in items {
-                        core_linker.define(&mut self.store, module, name, item)?;
+                        core_linker.define(&mut self.core_store, module, name, item)?;
                     }
                 }
                 let mut child_cx = WastContext {
                     current: None,
                     core_linker,
                     #[cfg(feature = "component-model")]
-                    component_linker: component::Linker::new(self.store.engine()),
-                    store: Store::new(self.store.engine(), self.store.data().clone()),
+                    component_linker: component::Linker::new(self.engine()),
+                    core_store: {
+                        let mut store = Store::new(self.engine(), ());
+                        (self.configure_store)(&mut store);
+                        store
+                    },
+                    modules: self.modules.clone(),
+                    async_runtime: self.async_runtime.as_ref().map(|_| {
+                        tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .unwrap()
+                    }),
+                    generate_dwarf: self.generate_dwarf,
+                    modules_by_filename: self.modules_by_filename.clone(),
+                    precompile_load: self.precompile_load.clone(),
+                    precompile_save: self.precompile_save.clone(),
+                    configure_store: self.configure_store.clone(),
                 };
-                let name = thread.name.name();
-                let child =
-                    scope.spawn(move || child_cx.run_directives(thread.directives, filename, wast));
-                threads.insert(name, child);
+                let child = scope.spawn(move || child_cx.run_directives(commands, filename));
+                threads.insert(name.to_string(), child);
             }
-
             Wait { thread, .. } => {
-                let name = thread.name();
                 threads
-                    .remove(name)
-                    .ok_or_else(|| anyhow!("no thread named `{name}`"))?
+                    .remove(&thread[..])
+                    .ok_or_else(|| format_err!("no thread named `{thread}`"))?
                     .join()
                     .unwrap()?;
+            }
+
+            AssertSuspension { .. } => {
+                bail!("unimplemented wast directive");
             }
         }
 
@@ -550,23 +799,49 @@ where
 
     /// Run a wast script from a file.
     pub fn run_file(&mut self, path: &Path) -> Result<()> {
-        let bytes =
-            std::fs::read(path).with_context(|| format!("failed to read `{}`", path.display()))?;
-        self.run_buffer(path.to_str().unwrap(), &bytes)
+        match &self.precompile_load {
+            Some(precompile) => {
+                let file = precompile
+                    .join(path.file_name().unwrap())
+                    .with_extension("json");
+                let json = std::fs::read_to_string(&file)
+                    .with_context(|| format!("failed to read {file:?}"))?;
+                let wast = serde_json::from_str::<json_from_wast::Wast<'_>>(&json)?;
+                self.run_directives(wast.commands, &wast.source_filename)
+            }
+            None => {
+                let bytes = std::fs::read(path)
+                    .with_context(|| format!("failed to read `{}`", path.display()))?;
+                self.run_wast(path.to_str().unwrap(), &bytes)
+            }
+        }
+    }
+
+    /// Whether or not to generate DWARF debugging information in custom
+    /// sections in modules being tested.
+    pub fn generate_dwarf(&mut self, enable: bool) -> &mut Self {
+        self.generate_dwarf = enable;
+        self
     }
 }
 
-fn is_matching_assert_invalid_error_message(expected: &str, actual: &str) -> bool {
-    actual.contains(expected)
-        // slight difference in error messages
-        || (expected.contains("unknown elem segment") && actual.contains("unknown element segment"))
-        // The same test here is asserted to have one error message in
-        // `memory.wast` and a different error message in
-        // `memory64/memory.wast`, so we equate these two error messages to get
-        // the memory64 tests to pass.
-        || (expected.contains("memory size must be at most 65536 pages") && actual.contains("invalid u32 number"))
-        // the spec test suite asserts a different error message than we print
-        // for this scenario
-        || (expected == "unknown global" && actual.contains("global.get of locally defined global"))
-        || (expected == "immutable global" && actual.contains("global is immutable: cannot modify it with `global.set`"))
+fn is_matching_assert_invalid_error_message(test: &str, expected: &str, actual: &str) -> bool {
+    if actual.contains(expected) {
+        return true;
+    }
+
+    // Historically wasmtime/wasm-tools tried to match the upstream error
+    // message. This generally led to a large sequence of matches here which is
+    // not easy to maintain and is particularly difficult when test suites and
+    // proposals conflict with each other (e.g. one asserts one error message
+    // and another asserts a different error message). Overall we didn't benefit
+    // a whole lot from trying to match errors so just assume the error is
+    // roughly the same and otherwise don't try to match it.
+    if test.contains("spec_testsuite") {
+        return true;
+    }
+
+    // we are in control over all non-spec tests so all the error messages
+    // there should exactly match the `assert_invalid` or such
+    false
 }

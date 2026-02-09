@@ -1,11 +1,11 @@
-# Wasmtime's C API
+# Wasmtime's C/C++ API
 
 ## API Documentation
 
 [The API documentation for the Wasmtime C library is hosted
 here.](https://bytecodealliance.github.io/wasmtime/c-api/).
 
-## Using in a C Project
+## Using in a C/C++ Project
 
 ### Using a Pre-Built Static or Dynamic Library
 
@@ -14,7 +14,7 @@ page](https://github.com/bytecodealliance/wasmtime/releases) has pre-built
 binaries for both static and dynamic libraries for a variety of architectures
 and operating systems attached, as well as header files you can include.
 
-### Building Wasmtime's C API from Source
+### Building Wasmtime's C/C++ API from Source
 
 To use Wasmtime from a C or C++ project, you must have
 [CMake](https://cmake.org/) and [a Rust
@@ -22,7 +22,7 @@ toolchain](https://www.rust-lang.org/tools/install) installed.
 
 From the root of the Wasmtime repository, run the following commands:
 
-```
+```shell-session
 $ cmake -S crates/c-api -B target/c-api --install-prefix "$(pwd)/artifacts"
 $ cmake --build target/c-api
 $ cmake --install target/c-api
@@ -36,7 +36,13 @@ These commands will produce the following files:
 * `artifacts/lib/libwasmtime.{so,dylib,dll}`: Dynamic Wasmtime library. Exact
   extension depends on your operating system.
 
-* `artifacts/include/**.h`: Header files for working with Wasmtime.
+* `artifacts/include/**.{h,hh}`: Header files for working with Wasmtime.
+
+## Using in a C++ Project
+
+A header only C++ API is also offered as `wasmtime.hh`, which is built on top
+of the C API. Its located next to the C headers when you download a pre-built
+library, or when building from source. C++17 is required.
 
 ## Using in a Rust Project
 
@@ -65,4 +71,40 @@ fn main() {
         .file("src/your_c_code.c")
         .compile("your_library");
 }
+```
+
+## Testing
+
+Running tests for the C API can be done using cmake from the root of the repo:
+
+```shell-session
+$ cmake -S examples -B examples/build -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
+$ cmake --build examples/build --config Debug
+$ CTEST_OUTPUT_ON_FAILURE=1 cmake --build examples/build --config Debug --target test
+```
+
+To build and run a subset of tests by name:
+
+```shell-session
+$ cmake --build examples/build --config Debug
+$ ctest --test-dir examples/build --output-on-failure -R $MY_TEST
+```
+
+where `$MY_TEST` is the test name or glob pattern; for example,
+`MemoryType.Simple` to run that one particular test or `TypedFunc.*` to run all
+typed function tests.
+
+To run under `gdb`:
+
+```shell-session
+$ gdb --args ctest --test-dir examples/build/ --output-on-failure -R $MY_TEST
+(gdb) set follow-fork-mode child
+(gdb) run
+```
+
+To run under `rr`:
+
+```
+$ rr record ctest --test-dir examples/build/ --output-on-failure -R $MY_TEST
+$ rr replay
 ```

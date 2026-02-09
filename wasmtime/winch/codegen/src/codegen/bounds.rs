@@ -1,12 +1,13 @@
 //! Exposes heap bounds checks functionality for WebAssembly.
 //! Bounds checks in WebAssembly are critical for safety, so extreme caution is
 //! recommended when working on this area of Winch.
-use super::env::{HeapData, HeapStyle};
+use super::env::HeapData;
 use crate::{
-    abi::{scratch, vmctx},
-    codegen::CodeGenContext,
-    isa::reg::Reg,
-    masm::{IntCmpKind, MacroAssembler, OperandSize, RegImm, TrapCode},
+    Result,
+    abi::vmctx,
+    codegen::{CodeGenContext, Emission},
+    isa::reg::{Reg, writable},
+    masm::{IntCmpKind, IntScratch, MacroAssembler, OperandSize, RegImm, TrapCode},
     stack::TypedReg,
 };
 
@@ -81,36 +82,38 @@ impl Index {
 
 /// Loads the bounds of the dynamic heap.
 pub(crate) fn load_dynamic_heap_bounds<M>(
-    context: &mut CodeGenContext,
+    context: &mut CodeGenContext<Emission>,
     masm: &mut M,
     heap: &HeapData,
     ptr_size: OperandSize,
-) -> Bounds
+) -> Result<Bounds>
 where
     M: MacroAssembler,
 {
-    let dst = context.any_gpr(masm);
-    match (heap.max_size, &heap.style) {
+    let dst = context.any_gpr(masm)?;
+    match heap.memory.static_heap_size() {
         // Constant size, no need to perform a load.
-        (Some(max_size), HeapStyle::Dynamic) if heap.min_size == max_size => {
-            masm.mov(RegImm::i64(max_size as i64), dst, ptr_size)
+        Some(size) => masm.mov(writable!(dst), RegImm::i64(size.cast_signed()), ptr_size)?,
+
+        None => {
+            masm.with_scratch::<IntScratch, _>(|masm, scratch| {
+                let base = if let Some(offset) = heap.import_from {
+                    let addr = masm.address_at_vmctx(offset)?;
+                    masm.load_ptr(addr, scratch.writable())?;
+                    scratch.inner()
+                } else {
+                    vmctx!(M)
+                };
+                let addr = masm.address_at_reg(base, heap.current_length_offset)?;
+                masm.load_ptr(addr, writable!(dst))
+            })?;
         }
-        (_, HeapStyle::Dynamic) => {
-            let scratch = scratch!(M);
-            let base = if let Some(offset) = heap.import_from {
-                let addr = masm.address_at_vmctx(offset);
-                masm.load_ptr(addr, scratch);
-                scratch
-            } else {
-                vmctx!(M)
-            };
-            let addr = masm.address_at_reg(base, heap.current_length_offset);
-            masm.load_ptr(addr, dst);
-        }
-        (_, HeapStyle::Static { .. }) => unreachable!("Loading dynamic bounds of a static heap"),
     }
 
-    Bounds::from_typed_reg(TypedReg::new(heap.ty, dst))
+    Ok(Bounds::from_typed_reg(TypedReg::new(
+        heap.index_type(),
+        dst,
+    )))
 }
 
 /// This function ensures the following:
@@ -126,22 +129,22 @@ pub(crate) fn ensure_index_and_offset<M: MacroAssembler>(
     index: Index,
     offset: u64,
     heap_ty_size: OperandSize,
-) -> ImmOffset {
+) -> Result<ImmOffset> {
     match u32::try_from(offset) {
         // If the immediate offset fits in a u32, then we simply return.
-        Ok(offs) => ImmOffset::from_u32(offs),
+        Ok(offs) => Ok(ImmOffset::from_u32(offs)),
         // Else we adjust the index to be index = index + offset, including an
         // overflow check, and return 0 as the offset.
         Err(_) => {
             masm.checked_uadd(
-                index.as_typed_reg().into(),
+                writable!(index.as_typed_reg().into()),
                 index.as_typed_reg().into(),
                 RegImm::i64(offset as i64),
                 heap_ty_size,
-                TrapCode::HeapOutOfBounds,
-            );
+                TrapCode::HEAP_OUT_OF_BOUNDS,
+            )?;
 
-            ImmOffset::from_u32(0)
+            Ok(ImmOffset::from_u32(0))
         }
     }
 }
@@ -150,7 +153,7 @@ pub(crate) fn ensure_index_and_offset<M: MacroAssembler>(
 /// criteria is in bounds.
 pub(crate) fn load_heap_addr_checked<M, F>(
     masm: &mut M,
-    context: &mut CodeGenContext,
+    context: &mut CodeGenContext<Emission>,
     ptr_size: OperandSize,
     heap: &HeapData,
     enable_spectre_mitigation: bool,
@@ -158,28 +161,28 @@ pub(crate) fn load_heap_addr_checked<M, F>(
     index: Index,
     offset: ImmOffset,
     mut emit_check_condition: F,
-) -> Reg
+) -> Result<Reg>
 where
     M: MacroAssembler,
-    F: FnMut(&mut M, Bounds, Index) -> IntCmpKind,
+    F: FnMut(&mut M, Bounds, Index) -> Result<IntCmpKind>,
 {
-    let cmp_kind = emit_check_condition(masm, bounds, index);
+    let cmp_kind = emit_check_condition(masm, bounds, index)?;
 
-    masm.trapif(cmp_kind, TrapCode::HeapOutOfBounds);
-    let addr = context.any_gpr(masm);
+    masm.trapif(cmp_kind, TrapCode::HEAP_OUT_OF_BOUNDS)?;
+    let addr = context.any_gpr(masm)?;
 
-    load_heap_addr_unchecked(masm, heap, index, offset, addr, ptr_size);
+    load_heap_addr_unchecked(masm, heap, index, offset, addr, ptr_size)?;
     if !enable_spectre_mitigation {
-        addr
+        Ok(addr)
     } else {
         // Conditionally assign 0 to the register holding the base address if
         // the comparison kind is met.
-        let tmp = context.any_gpr(masm);
-        masm.mov(RegImm::i64(0), tmp, ptr_size);
-        let cmp_kind = emit_check_condition(masm, bounds, index);
-        masm.cmov(tmp, addr, cmp_kind, ptr_size);
+        let tmp = context.any_gpr(masm)?;
+        masm.mov(writable!(tmp), RegImm::i64(0), ptr_size)?;
+        let cmp_kind = emit_check_condition(masm, bounds, index)?;
+        masm.cmov(writable!(addr), tmp, cmp_kind, ptr_size)?;
         context.free_reg(tmp);
-        addr
+        Ok(addr)
     }
 }
 
@@ -193,28 +196,37 @@ pub(crate) fn load_heap_addr_unchecked<M>(
     offset: ImmOffset,
     dst: Reg,
     ptr_size: OperandSize,
-) where
+) -> Result<()>
+where
     M: MacroAssembler,
 {
-    let base = if let Some(offset) = heap.import_from {
-        // If the WebAssembly memory is imported, load the address into
-        // the scratch register.
-        let scratch = scratch!(M);
-        masm.load_ptr(masm.address_at_vmctx(offset), scratch);
-        scratch
-    } else {
-        // Else if the WebAssembly memory is defined in the current module,
-        // simply use the `VMContext` as the base for subsequent operations.
-        vmctx!(M)
-    };
+    masm.with_scratch::<IntScratch, _>(|masm, scratch| {
+        let base = if let Some(offset) = heap.import_from {
+            // If the WebAssembly memory is imported, load the address into
+            // the scratch register.
+            masm.load_ptr(masm.address_at_vmctx(offset)?, scratch.writable())?;
+            scratch.inner()
+        } else {
+            // Else if the WebAssembly memory is defined in the current module,
+            // simply use the `VMContext` as the base for subsequent operations.
+            vmctx!(M)
+        };
 
-    // Load the base of the memory into the `addr` register.
-    masm.load_ptr(masm.address_at_reg(base, heap.offset), dst);
+        // Load the base of the memory into the `addr` register.
+        masm.load_ptr(masm.address_at_reg(base, heap.offset)?, writable!(dst))
+    })?;
+
     // Start by adding the index to the heap base addr.
     let index_reg = index.as_typed_reg().reg;
-    masm.add(dst, dst, index_reg.into(), ptr_size);
+    masm.add(writable!(dst), dst, index_reg.into(), ptr_size)?;
 
     if offset.as_u32() > 0 {
-        masm.add(dst, dst, RegImm::i64(offset.as_u32() as i64), ptr_size);
+        masm.add(
+            writable!(dst),
+            dst,
+            RegImm::i64(offset.as_u32() as i64),
+            ptr_size,
+        )?;
     }
+    Ok(())
 }

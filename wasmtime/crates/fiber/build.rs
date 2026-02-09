@@ -6,14 +6,14 @@ fn main() {
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
 
-    // NB: Technically `cf-constructor(sanitize = "address")` is not stable and requires a
+    // NB: Technically `cfg(sanitize = "address")` is not stable and requires a
     // `#![feature]` but sort of abuse the fact that cfgs are "leaked" through
-    // into Cargo ungated via `--print cf-constructor`. Translate that to `cf-constructor(asan)` for
+    // into Cargo ungated via `--print cfg`. Translate that to `cfg(asan)` for
     // us to write down in the code.
-    println!("cargo:rustc-check-cf-constructor=cf-constructor(asan)");
+    println!("cargo:rustc-check-cfg=cfg(asan)");
     match env::var("CARGO_CFG_SANITIZE") {
         Ok(s) if s == "address" => {
-            println!("cargo:rustc-cf-constructor=asan");
+            println!("cargo:rustc-cfg=asan");
         }
         _ => {}
     }
@@ -21,10 +21,6 @@ fn main() {
     if os == "windows" {
         println!("cargo:rerun-if-changed=src/windows.c");
         build.file("src/windows.c");
-        build.define("VERSIONED_SUFFIX", Some(versioned_suffix!()));
-    } else if arch == "s390x" {
-        println!("cargo:rerun-if-changed=src/unix/s390x.S");
-        build.file("src/unix/s390x.S");
         build.define("VERSIONED_SUFFIX", Some(versioned_suffix!()));
     } else {
         // assume that this is included via inline assembly in the crate itself,

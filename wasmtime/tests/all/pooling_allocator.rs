@@ -1,14 +1,13 @@
-use super::skip_pooling_allocator_tests;
+use super::{ErrorExt, skip_pooling_allocator_tests};
 use wasmtime::*;
 
 #[test]
 fn successful_instantiation() -> Result<()> {
     let pool = crate::small_pool_config();
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-    config.dynamic_memory_guard_size(0);
-    config.static_memory_guard_size(0);
-    config.static_memory_maximum_size(1 << 16);
+    config.allocation_strategy(pool);
+    config.memory_guard_size(0);
+    config.memory_reservation(1 << 16);
 
     let engine = Engine::new(&config)?;
     let module = Module::new(&engine, r#"(module (memory 1) (table 10 funcref))"#)?;
@@ -26,10 +25,9 @@ fn memory_limit() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.max_memory_size(3 << 16);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-    config.dynamic_memory_guard_size(0);
-    config.static_memory_guard_size(1 << 16);
-    config.static_memory_maximum_size(3 << 16);
+    config.allocation_strategy(pool);
+    config.memory_guard_size(1 << 16);
+    config.memory_reservation(3 << 16);
     config.wasm_multi_memory(true);
 
     let engine = Engine::new(&config)?;
@@ -37,20 +35,25 @@ fn memory_limit() -> Result<()> {
     // Module should fail to instantiate because it has too many memories
     match Module::new(&engine, r#"(module (memory 1) (memory 1))"#) {
         Ok(_) => panic!("module instantiation should fail"),
-        Err(e) => assert_eq!(
-            e.to_string(),
-            "defined memories count of 2 exceeds the per-instance limit of 1",
-        ),
+        Err(e) => {
+            e.assert_contains("defined memories count of 2 exceeds the per-instance limit of 1")
+        }
     }
 
     // Module should fail to instantiate because the minimum is greater than
     // the configured limit
     match Module::new(&engine, r#"(module (memory 4))"#) {
         Ok(_) => panic!("module instantiation should fail"),
-        Err(e) => assert_eq!(
-            e.to_string(),
-            "memory index 0 has a minimum byte size of 262144 which exceeds the limit of 196608 bytes",
-        ),
+        Err(e) => {
+            e.assert_contains(
+                "memory index 0 is unsupported in this pooling allocator \
+                 configuration",
+            );
+            e.assert_contains(
+                "memory has a minimum byte size of 262144 which exceeds \
+                 the limit of 0x30000 bytes",
+            );
+        }
     }
 
     let module = Module::new(
@@ -99,7 +102,7 @@ fn memory_init() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.max_memory_size(2 << 16).table_elements(0);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
 
     let engine = Engine::new(&config)?;
 
@@ -133,7 +136,7 @@ fn memory_guard_page_trap() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.max_memory_size(2 << 16).table_elements(0);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
 
     let engine = Engine::new(&config)?;
 
@@ -200,10 +203,9 @@ fn memory_zeroed() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.max_memory_size(1 << 16).table_elements(0);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-    config.dynamic_memory_guard_size(0);
-    config.static_memory_guard_size(0);
-    config.static_memory_maximum_size(1 << 16);
+    config.allocation_strategy(pool);
+    config.memory_guard_size(0);
+    config.memory_reservation(1 << 16);
 
     let engine = Engine::new(&config)?;
 
@@ -234,32 +236,29 @@ fn memory_zeroed() -> Result<()> {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn table_limit() -> Result<()> {
-    const TABLE_ELEMENTS: u32 = 10;
+    const TABLE_ELEMENTS: usize = 10;
     let mut pool = crate::small_pool_config();
     pool.table_elements(TABLE_ELEMENTS);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-    config.dynamic_memory_guard_size(0);
-    config.static_memory_guard_size(0);
-    config.static_memory_maximum_size(1 << 16);
+    config.allocation_strategy(pool);
+    config.memory_guard_size(0);
+    config.memory_reservation(1 << 16);
 
     let engine = Engine::new(&config)?;
 
     // Module should fail to instantiate because it has too many tables
     match Module::new(&engine, r#"(module (table 1 funcref) (table 1 funcref))"#) {
         Ok(_) => panic!("module compilation should fail"),
-        Err(e) => assert_eq!(
-            e.to_string(),
-            "defined tables count of 2 exceeds the per-instance limit of 1",
-        ),
+        Err(e) => {
+            e.assert_contains("defined tables count of 2 exceeds the per-instance limit of 1")
+        }
     }
 
     // Module should fail to instantiate because the minimum is greater than
     // the configured limit
     match Module::new(&engine, r#"(module (table 31 funcref))"#) {
         Ok(_) => panic!("module compilation should fail"),
-        Err(e) => assert_eq!(
-            e.to_string(),
+        Err(e) => e.assert_contains(
             "table index 0 has a minimum element size of 31 which exceeds the limit of 10",
         ),
     }
@@ -299,16 +298,16 @@ fn table_limit() -> Result<()> {
     let table = instance.get_table(&mut store, "t").unwrap();
 
     for i in 0..TABLE_ELEMENTS {
-        assert_eq!(table.size(&store), i);
+        assert_eq!(table.size(&store), i as u64);
         assert_eq!(
             table
                 .grow(&mut store, 1, Ref::Func(None))
                 .expect("table should grow"),
-            i
+            i as u64
         );
     }
 
-    assert_eq!(table.size(&store), TABLE_ELEMENTS);
+    assert_eq!(table.size(&store), TABLE_ELEMENTS as u64);
     assert!(table.grow(&mut store, 1, Ref::Func(None)).is_err());
 
     Ok(())
@@ -320,7 +319,7 @@ fn table_init() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.max_memory_size(0).table_elements(6);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
 
     let engine = Engine::new(&config)?;
 
@@ -374,10 +373,9 @@ fn table_zeroed() -> Result<()> {
 
     let pool = crate::small_pool_config();
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-    config.dynamic_memory_guard_size(0);
-    config.static_memory_guard_size(0);
-    config.static_memory_maximum_size(1 << 16);
+    config.allocation_strategy(pool);
+    config.memory_guard_size(0);
+    config.memory_reservation(1 << 16);
 
     let engine = Engine::new(&config)?;
 
@@ -410,10 +408,9 @@ fn total_core_instances_limit() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.total_core_instances(INSTANCE_LIMIT);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-    config.dynamic_memory_guard_size(0);
-    config.static_memory_guard_size(0);
-    config.static_memory_maximum_size(1 << 16);
+    config.allocation_strategy(pool);
+    config.memory_guard_size(0);
+    config.memory_reservation(1 << 16);
 
     let engine = Engine::new(&config)?;
     let module = Module::new(&engine, r#"(module)"#)?;
@@ -448,7 +445,7 @@ fn preserve_data_segments() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.total_memories(2);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
     let engine = Engine::new(&config)?;
     let m = Module::new(
         &engine,
@@ -496,7 +493,7 @@ fn multi_memory_with_imported_memories() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.total_memories(2).max_memories_per_module(2);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
     config.wasm_multi_memory(true);
 
     let engine = Engine::new(&config)?;
@@ -527,7 +524,7 @@ fn drop_externref_global_during_module_init() -> Result<()> {
             Ok(false)
         }
 
-        fn table_growing(&mut self, _: u32, _: u32, _: Option<u32>) -> Result<bool> {
+        fn table_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> Result<bool> {
             Ok(false)
         }
     }
@@ -535,7 +532,7 @@ fn drop_externref_global_during_module_init() -> Result<()> {
     let pool = crate::small_pool_config();
     let mut config = Config::new();
     config.wasm_reference_types(true);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
 
     let engine = Engine::new(&config)?;
 
@@ -578,7 +575,7 @@ fn drop_externref_global_during_module_init() -> Result<()> {
 fn switch_image_and_non_image() -> Result<()> {
     let pool = crate::small_pool_config();
     let mut c = Config::new();
-    c.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    c.allocation_strategy(pool);
     let engine = Engine::new(&c)?;
     let module1 = Module::new(
         &engine,
@@ -637,29 +634,17 @@ fn instance_too_large() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.max_core_instance_size(16);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
 
     let engine = Engine::new(&config)?;
-    let expected = if cfg!(feature = "wmemcheck") {
-        "\
-        instance allocation for this module requires 336 bytes which exceeds the \
-configured maximum of 16 bytes; breakdown of allocation requirement:
-
- * 71.43% - 240 bytes - instance state management
- * 26.19% - 88 bytes - static vmctx data
-"
-    } else {
-        "\
-        instance allocation for this module requires 240 bytes which exceeds the \
-configured maximum of 16 bytes; breakdown of allocation requirement:
-
- * 60.00% - 144 bytes - instance state management
- * 36.67% - 88 bytes - static vmctx data
-"
-    };
     match Module::new(&engine, "(module)") {
         Ok(_) => panic!("should have failed to compile"),
-        Err(e) => assert_eq!(e.to_string(), expected),
+        Err(e) => {
+            e.assert_contains("exceeds the configured maximum of 16 bytes");
+            e.assert_contains("breakdown of allocation requirement");
+            e.assert_contains("instance state management");
+            e.assert_contains("static vmctx data");
+        }
     }
 
     let mut lots_of_globals = format!("(module");
@@ -668,26 +653,14 @@ configured maximum of 16 bytes; breakdown of allocation requirement:
     }
     lots_of_globals.push_str(")");
 
-    let expected = if cfg!(feature = "wmemcheck") {
-        "\
-instance allocation for this module requires 1936 bytes which exceeds the \
-configured maximum of 16 bytes; breakdown of allocation requirement:
-
- * 12.40% - 240 bytes - instance state management
- * 82.64% - 1600 bytes - defined globals
-"
-    } else {
-        "\
-instance allocation for this module requires 1840 bytes which exceeds the \
-configured maximum of 16 bytes; breakdown of allocation requirement:
-
- * 7.83% - 144 bytes - instance state management
- * 86.96% - 1600 bytes - defined globals
-"
-    };
     match Module::new(&engine, &lots_of_globals) {
         Ok(_) => panic!("should have failed to compile"),
-        Err(e) => assert_eq!(e.to_string(), expected),
+        Err(e) => {
+            e.assert_contains("exceeds the configured maximum of 16 bytes");
+            e.assert_contains("breakdown of allocation requirement");
+            e.assert_contains("defined globals");
+            e.assert_contains("instance state management");
+        }
     }
 
     Ok(())
@@ -701,9 +674,9 @@ fn dynamic_memory_pooling_allocator() -> Result<()> {
         let mut pool = crate::small_pool_config();
         pool.max_memory_size(max_size as usize);
         let mut config = Config::new();
-        config.static_memory_maximum_size(max_size);
-        config.dynamic_memory_guard_size(guard_size);
-        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+        config.memory_reservation(max_size);
+        config.memory_guard_size(guard_size);
+        config.allocation_strategy(pool);
 
         let engine = Engine::new(&config)?;
 
@@ -807,7 +780,7 @@ fn zero_memory_pages_disallows_oob() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.max_memory_size(0);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
 
     let engine = Engine::new(&config)?;
     let module = Module::new(
@@ -847,7 +820,7 @@ fn total_component_instances_limit() -> Result<()> {
     pool.total_component_instances(TOTAL_COMPONENT_INSTANCES);
     let mut config = Config::new();
     config.wasm_component_model(true);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
 
     let engine = Engine::new(&config)?;
     let linker = wasmtime::component::Linker::new(&engine);
@@ -874,20 +847,20 @@ fn total_component_instances_limit() -> Result<()> {
 
 #[test]
 #[cfg(feature = "component-model")]
+#[cfg(target_pointer_width = "64")] // error message tailored for 64-bit
 fn component_instance_size_limit() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.max_component_instance_size(1);
     let mut config = Config::new();
     config.wasm_component_model(true);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
     let engine = Engine::new(&config)?;
 
     match wasmtime::component::Component::new(&engine, "(component)") {
         Ok(_) => panic!("should have hit limit"),
-        Err(e) => assert_eq!(
-            e.to_string(),
-            "instance allocation for this component requires 64 bytes of `VMComponentContext` space \
-             which exceeds the configured maximum of 1 bytes"
+        Err(e) => e.assert_contains(
+            "instance allocation for this component requires 64 bytes of \
+            `VMComponentContext` space which exceeds the configured maximum of 1 bytes",
         ),
     }
 
@@ -903,7 +876,7 @@ fn total_tables_limit() -> Result<()> {
     pool.total_tables(TOTAL_TABLES)
         .total_core_instances(TOTAL_TABLES + 1);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
 
     let engine = Engine::new(&config)?;
     let linker = Linker::new(&engine);
@@ -939,8 +912,7 @@ async fn total_stacks_limit() -> Result<()> {
     pool.total_stacks(TOTAL_STACKS)
         .total_core_instances(TOTAL_STACKS + 1);
     let mut config = Config::new();
-    config.async_support(true);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
 
     let engine = Engine::new(&config)?;
 
@@ -965,6 +937,9 @@ async fn total_stacks_limit() -> Result<()> {
             (func (export "run")
                 call $yield
             )
+
+            (func $empty)
+            (start $empty)
         )
     "#,
     )?;
@@ -1001,15 +976,20 @@ async fn total_stacks_limit() -> Result<()> {
     let mut store1 = Store::new(&engine, ());
     let instance1 = linker.instantiate_async(&mut store1, &module).await?;
     let run1 = instance1.get_func(&mut store1, "run").unwrap();
-    let future1 = run1.call_async(store1, &[], &mut []);
+    let future1 = run1.call_async(&mut store1, &[], &mut []);
 
     let mut store2 = Store::new(&engine, ());
     let instance2 = linker.instantiate_async(&mut store2, &module).await?;
     let run2 = instance2.get_func(&mut store2, "run").unwrap();
-    let future2 = run2.call_async(store2, &[], &mut []);
+    let future2 = run2.call_async(&mut store2, &[], &mut []);
 
     future1.await?;
     future2.await?;
+
+    // Dispose one store via `Drop`, the other via `into_data`, and ensure that
+    // any lingering stacks make their way back to the pool.
+    drop(store1);
+    store2.into_data();
 
     Ok(())
 }
@@ -1021,7 +1001,7 @@ fn component_core_instances_limit() -> Result<()> {
     pool.max_core_instances_per_component(1);
     let mut config = Config::new();
     config.wasm_component_model(true);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
     let engine = Engine::new(&config)?;
 
     // One core instance works.
@@ -1047,10 +1027,9 @@ fn component_core_instances_limit() -> Result<()> {
         "#,
     ) {
         Ok(_) => panic!("should have hit limit"),
-        Err(e) => assert_eq!(
-            e.to_string(),
+        Err(e) => e.assert_contains(
             "The component transitively contains 2 core module instances, which exceeds the \
-             configured maximum of 1"
+             configured maximum of 1",
         ),
     }
 
@@ -1064,7 +1043,7 @@ fn component_memories_limit() -> Result<()> {
     pool.max_memories_per_component(1).total_memories(2);
     let mut config = Config::new();
     config.wasm_component_model(true);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
     let engine = Engine::new(&config)?;
 
     // One memory works.
@@ -1090,10 +1069,9 @@ fn component_memories_limit() -> Result<()> {
         "#,
     ) {
         Ok(_) => panic!("should have hit limit"),
-        Err(e) => assert_eq!(
-            e.to_string(),
+        Err(e) => e.assert_contains(
             "The component transitively contains 2 Wasm linear memories, which exceeds the \
-             configured maximum of 1"
+             configured maximum of 1",
         ),
     }
 
@@ -1107,7 +1085,7 @@ fn component_tables_limit() -> Result<()> {
     pool.max_tables_per_component(1).total_tables(2);
     let mut config = Config::new();
     config.wasm_component_model(true);
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
     let engine = Engine::new(&config)?;
 
     // One table works.
@@ -1133,10 +1111,9 @@ fn component_tables_limit() -> Result<()> {
         "#,
     ) {
         Ok(_) => panic!("should have hit limit"),
-        Err(e) => assert_eq!(
-            e.to_string(),
+        Err(e) => e.assert_contains(
             "The component transitively contains 2 tables, which exceeds the \
-             configured maximum of 1"
+             configured maximum of 1",
         ),
     }
 
@@ -1151,9 +1128,9 @@ fn total_memories_limit() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.total_memories(TOTAL_MEMORIES)
         .total_core_instances(TOTAL_MEMORIES + 1)
-        .memory_protection_keys(MpkEnabled::Disable);
+        .memory_protection_keys(Enabled::No);
     let mut config = Config::new();
-    config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+    config.allocation_strategy(pool);
 
     let engine = Engine::new(&config)?;
     let linker = Linker::new(&engine);
@@ -1195,9 +1172,9 @@ fn decommit_batching() -> Result<()> {
         pool.total_memories(capacity)
             .total_core_instances(capacity)
             .decommit_batch_size(batch_size)
-            .memory_protection_keys(MpkEnabled::Disable);
+            .memory_protection_keys(Enabled::No);
         let mut config = Config::new();
-        config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
+        config.allocation_strategy(pool);
 
         let engine = Engine::new(&config)?;
         let linker = Linker::new(&engine);
@@ -1212,6 +1189,224 @@ fn decommit_batching() -> Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+#[test]
+fn tricky_empty_table_with_empty_virtual_memory_alloc() -> Result<()> {
+    // Configure the pooling allocator to have no access to virtual memory, e.g.
+    // no table elements but a single table. This should technically support a
+    // single empty table being allocated into it but virtual memory isn't
+    // actually allocated here.
+    let mut cfg = PoolingAllocationConfig::default();
+    cfg.table_elements(0);
+    cfg.total_memories(0);
+    cfg.total_tables(1);
+    cfg.total_stacks(0);
+    cfg.total_core_instances(1);
+    cfg.max_memory_size(0);
+
+    let mut c = Config::new();
+    c.allocation_strategy(InstanceAllocationStrategy::Pooling(cfg));
+
+    // Disable lazy init to actually try to get this to do something interesting
+    // at runtime.
+    c.table_lazy_init(false);
+
+    let engine = Engine::new(&c)?;
+
+    // This module has a single empty table, with a single empty element
+    // segment. Nothing actually goes wrong here, it should instantiate
+    // successfully. Along the way though the empty mmap above will get viewed
+    // as an array-of-pointers, so everything internally should all line up to
+    // work ok.
+    let module = Module::new(
+        &engine,
+        r#"
+(module
+    (table 0 funcref)
+    (elem (i32.const 0) func)
+)
+"#,
+    )?;
+    let mut store = Store::new(&engine, ());
+    Instance::new(&mut store, &module, &[])?;
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn shared_memory_unsupported() -> Result<()> {
+    // Skip this test on platforms that don't support threads.
+    if crate::threads::engine().is_none() {
+        return Ok(());
+    }
+    let mut config = Config::new();
+    let mut cfg = PoolingAllocationConfig::default();
+    // shrink the size of this allocator
+    cfg.total_memories(1);
+    config.allocation_strategy(InstanceAllocationStrategy::Pooling(cfg));
+    let engine = Engine::new(&config)?;
+
+    let err = Module::new(
+        &engine,
+        r#"
+            (module
+                (memory 5 5 shared)
+            )
+        "#,
+    )
+    .unwrap_err();
+    err.assert_contains(
+        "memory is shared which is not supported \
+         in the pooling allocator",
+    );
+    err.assert_contains("memory index 0");
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn custom_page_sizes_reusing_same_slot() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_custom_page_sizes(true);
+    let mut cfg = crate::small_pool_config();
+    // force the memories below to collide in the same memory slot
+    cfg.total_memories(1);
+    config.allocation_strategy(InstanceAllocationStrategy::Pooling(cfg));
+    let engine = Engine::new(&config)?;
+
+    // Instantiate one module, leaving the slot 5 bytes big (but one page
+    // accessible)
+    {
+        let m1 = Module::new(
+            &engine,
+            r#"
+                (module
+                    (memory 5 (pagesize 1))
+
+                    (data (i32.const 0) "a")
+                )
+            "#,
+        )?;
+        let mut store = Store::new(&engine, ());
+        Instance::new(&mut store, &m1, &[])?;
+    }
+
+    // Instantiate a second module, which should work
+    {
+        let m2 = Module::new(
+            &engine,
+            r#"
+                (module
+                    (memory 6 (pagesize 1))
+
+                    (data (i32.const 0) "a")
+                )
+            "#,
+        )?;
+        let mut store = Store::new(&engine, ());
+        Instance::new(&mut store, &m2, &[])?;
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn instantiate_non_page_aligned_sizes() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_custom_page_sizes(true);
+    let mut cfg = crate::small_pool_config();
+    cfg.total_memories(1);
+    cfg.max_memory_size(761927);
+    config.allocation_strategy(InstanceAllocationStrategy::Pooling(cfg));
+    let engine = Engine::new(&config)?;
+
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+              (memory 761927 761927 (pagesize 0x1))
+            )
+        "#,
+    )?;
+    let mut store = Store::new(&engine, ());
+    Instance::new(&mut store, &module, &[])?;
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn pagemap_scan_enabled_or_disabled() -> Result<()> {
+    let mut config = Config::new();
+    let mut cfg = crate::small_pool_config();
+    cfg.total_memories(1);
+    cfg.pagemap_scan(Enabled::Yes);
+    config.allocation_strategy(InstanceAllocationStrategy::Pooling(cfg));
+    let result = Engine::new(&config);
+
+    if PoolingAllocationConfig::is_pagemap_scan_available() {
+        assert!(result.is_ok());
+    } else {
+        assert!(result.is_err());
+    }
+    Ok(())
+}
+
+// This test instantiates a memory with an image into a slot in the pooling
+// allocator in a way that maps the image into the allocator but fails
+// instantiation. Failure here is injected with `ResourceLimiter`. Afterwards
+// instantiation is allowed to succeed with a memory that has no image, and this
+// asserts that the previous image is indeed not available any more as that
+// would otherwise mean data was leaked between modules.
+#[test]
+fn memory_reset_if_instantiation_fails() -> Result<()> {
+    struct Limiter;
+
+    impl ResourceLimiter for Limiter {
+        fn memory_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn table_growing(&mut self, _: usize, _: usize, _: Option<usize>) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    let pool = crate::small_pool_config();
+    let mut config = Config::new();
+    config.allocation_strategy(pool);
+    let engine = Engine::new(&config)?;
+
+    let module_with_image = Module::new(
+        &engine,
+        r#"
+            (module
+                (memory 1)
+                (data (i32.const 0) "\aa")
+            )
+        "#,
+    )?;
+    let module_without_image = Module::new(
+        &engine,
+        r#"
+            (module
+                (memory (export "m") 1)
+            )
+        "#,
+    )?;
+
+    let mut store = Store::new(&engine, Limiter);
+    store.limiter(|s| s);
+    assert!(Instance::new(&mut store, &module_with_image, &[]).is_err());
+    drop(store);
+
+    let mut store = Store::new(&engine, Limiter);
+    let instance = Instance::new(&mut store, &module_without_image, &[])?;
+    let mem = instance.get_memory(&mut store, "m").unwrap();
+    let data = mem.data(&store);
+    assert_eq!(data[0], 0);
 
     Ok(())
 }

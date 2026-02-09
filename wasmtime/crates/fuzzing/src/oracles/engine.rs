@@ -2,8 +2,8 @@
 
 use crate::generators::{CompilerStrategy, Config, DiffValue, DiffValueType};
 use crate::oracles::{diff_wasmi::WasmiEngine, diff_wasmtime::WasmtimeEngine};
-use anyhow::Error;
 use arbitrary::Unstructured;
+use wasmtime::Error;
 use wasmtime::Trap;
 
 /// Returns a function which can be used to build the engine name specified.
@@ -16,7 +16,16 @@ pub fn build(
     config: &mut Config,
 ) -> arbitrary::Result<Option<Box<dyn DiffEngine>>> {
     let engine: Box<dyn DiffEngine> = match name {
-        "wasmtime" => Box::new(WasmtimeEngine::new(u, config, CompilerStrategy::Cranelift)?),
+        "wasmtime" => Box::new(WasmtimeEngine::new(
+            u,
+            config,
+            CompilerStrategy::CraneliftNative,
+        )?),
+        "pulley" => Box::new(WasmtimeEngine::new(
+            u,
+            config,
+            CompilerStrategy::CraneliftPulley,
+        )?),
         "wasmi" => Box::new(WasmiEngine::new(config)),
 
         #[cfg(target_arch = "x86_64")]
@@ -46,15 +55,18 @@ pub trait DiffEngine {
     fn name(&self) -> &'static str;
 
     /// Create a new instance with the given engine.
-    fn instantiate(&mut self, wasm: &[u8]) -> anyhow::Result<Box<dyn DiffInstance>>;
+    fn instantiate(&mut self, wasm: &[u8]) -> wasmtime::Result<Box<dyn DiffInstance>>;
 
     /// Tests that the wasmtime-originating `trap` matches the error this engine
     /// generated.
-    fn assert_error_match(&self, trap: &Trap, err: &Error);
+    fn assert_error_match(&self, err: &Error, trap: &Trap);
 
-    /// Returns whether the error specified from this engine might be stack
-    /// overflow.
-    fn is_stack_overflow(&self, err: &Error) -> bool;
+    /// Returns whether the error specified from this engine is
+    /// non-deterministic, like a stack overflow or an attempt to allocate an
+    /// object that is too large (which is non-deterministic because it may
+    /// depend on which collector it was configured with or memory available on
+    /// the system).
+    fn is_non_deterministic_error(&self, err: &Error) -> bool;
 }
 
 /// Provide a way to evaluate Wasm functions--a Wasm instance implemented by a
@@ -73,7 +85,7 @@ pub trait DiffInstance {
         function_name: &str,
         arguments: &[DiffValue],
         results: &[DiffValueType],
-    ) -> anyhow::Result<Option<Vec<DiffValue>>>;
+    ) -> wasmtime::Result<Option<Vec<DiffValue>>>;
 
     /// Attempts to return the value of the specified global, returning `None`
     /// if this engine doesn't support retrieving globals at this time.
@@ -93,14 +105,17 @@ pub fn setup_engine_runtimes() {
 /// Build a list of allowed values from the given `defaults` using the
 /// `env_list`.
 ///
+/// The entries in `defaults` are preserved, in order, and are replaced with
+/// `None` in the returned list if they are disabled.
+///
 /// ```
 /// # use wasmtime_fuzzing::oracles::engine::build_allowed_env_list;
 /// // Passing no `env_list` returns the defaults:
-/// assert_eq!(build_allowed_env_list(None, &["a"]), vec!["a"]);
+/// assert_eq!(build_allowed_env_list(None, &["a"]), vec![Some("a")]);
 /// // We can build up a subset of the defaults:
-/// assert_eq!(build_allowed_env_list(Some(vec!["b".to_string()]), &["a","b"]), vec!["b"]);
+/// assert_eq!(build_allowed_env_list(Some(vec!["b".to_string()]), &["a","b"]), vec![None, Some("b")]);
 /// // Alternately we can subtract from the defaults:
-/// assert_eq!(build_allowed_env_list(Some(vec!["-a".to_string()]), &["a","b"]), vec!["b"]);
+/// assert_eq!(build_allowed_env_list(Some(vec!["-a".to_string()]), &["a","b"]), vec![None, Some("b")]);
 /// ```
 /// ```should_panic
 /// # use wasmtime_fuzzing::oracles::engine::build_allowed_env_list;
@@ -116,7 +131,7 @@ pub fn setup_engine_runtimes() {
 pub fn build_allowed_env_list<'a>(
     env_list: Option<Vec<String>>,
     defaults: &[&'a str],
-) -> Vec<&'a str> {
+) -> Vec<Option<&'a str>> {
     if let Some(configured) = &env_list {
         // Check that the names are either all additions or all subtractions.
         let subtract_from_defaults = configured.iter().all(|c| c.starts_with("-"));
@@ -141,12 +156,14 @@ pub fn build_allowed_env_list<'a>(
         for &d in defaults {
             let mentioned = configured.iter().any(|c| &c[start..] == d);
             if (add_from_defaults && mentioned) || (subtract_from_defaults && !mentioned) {
-                allowed.push(d);
+                allowed.push(Some(d));
+            } else {
+                allowed.push(None);
             }
         }
         allowed
     } else {
-        defaults.to_vec()
+        defaults.iter().copied().map(Some).collect()
     }
 }
 
@@ -157,33 +174,23 @@ pub fn parse_env_list(env_variable: &str) -> Option<Vec<String>> {
         .map(|l| l.split(",").map(|s| s.to_owned()).collect())
 }
 
+/// Smoke test an engine with a given config.
 #[cfg(test)]
 pub fn smoke_test_engine<T>(
     mk_engine: impl Fn(&mut arbitrary::Unstructured<'_>, &mut Config) -> arbitrary::Result<T>,
 ) where
     T: DiffEngine,
 {
-    use rand::prelude::*;
-
-    let mut rng = SmallRng::seed_from_u64(0);
-    let mut buf = vec![0; 2048];
-    let n = 100;
-    for _ in 0..n {
-        rng.fill_bytes(&mut buf);
-        let mut u = Unstructured::new(&buf);
-        let mut config = match u.arbitrary::<Config>() {
-            Ok(config) => config,
-            Err(_) => continue,
-        };
+    crate::test::test_n_times(5, |mut config: Config, u| {
         // This will ensure that wasmtime, which uses this configuration
         // settings, can guaranteed instantiate a module.
         config.set_differential_config();
 
-        let mut engine = match mk_engine(&mut u, &mut config) {
+        let mut engine = match mk_engine(u, &mut config) {
             Ok(engine) => engine,
             Err(e) => {
                 println!("skip {e:?}");
-                continue;
+                return Ok(());
             }
         };
 
@@ -222,8 +229,6 @@ pub fn smoke_test_engine<T>(
             }
         }
 
-        return;
-    }
-
-    panic!("after {n} runs nothing ever ran, something is probably wrong");
+        Ok(())
+    })
 }

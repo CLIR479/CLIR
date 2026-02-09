@@ -1,7 +1,7 @@
-use anyhow::Result;
+use wasmtime::Result;
 use wasmtime::component::types::ComponentItem;
 use wasmtime::component::{Component, Linker, Type};
-use wasmtime::{Module, Precompiled, Store};
+use wasmtime::{Engine, Module, Precompiled, Store};
 
 #[test]
 fn module_component_mismatch() -> Result<()> {
@@ -101,6 +101,7 @@ fn cannot_serialize_exported_module() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn usable_exported_modules() -> Result<()> {
     let engine = super::engine();
     let component = Component::new(
@@ -126,10 +127,10 @@ fn usable_exported_modules() -> Result<()> {
 fn detect_precompiled() -> Result<()> {
     let engine = super::engine();
     let buffer = Component::new(&engine, "(component)")?.serialize()?;
-    assert_eq!(engine.detect_precompiled(&[]), None);
-    assert_eq!(engine.detect_precompiled(&buffer[..5]), None);
+    assert_eq!(Engine::detect_precompiled(&[]), None);
+    assert_eq!(Engine::detect_precompiled(&buffer[..5]), None);
     assert_eq!(
-        engine.detect_precompiled(&buffer),
+        Engine::detect_precompiled(&buffer),
         Some(Precompiled::Component)
     );
     Ok(())

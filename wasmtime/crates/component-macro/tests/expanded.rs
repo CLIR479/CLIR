@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use wasmtime::{Result, bail, error::Context};
 
 macro_rules! genexpand {
     ($id:ident $name:tt $path:tt) => {
@@ -11,7 +11,22 @@ macro_rules! genexpand {
 
         process_expanded($path, "_async", wasmtime::component::bindgen!({
             path: $path,
-            async: true,
+            stringify: true,
+            imports: { default: async },
+            exports: { default: async },
+        }))?;
+
+        process_expanded($path, "_concurrent", wasmtime::component::bindgen!({
+            path: $path,
+            imports: { default: async | store },
+            exports: { default: async | store },
+            stringify: true,
+        }))?;
+
+        process_expanded($path, "_tracing_async", wasmtime::component::bindgen!({
+            path: $path,
+            imports: { default: async | tracing },
+            exports: { default: async | tracing },
             stringify: true,
         }))?;
     };
@@ -46,13 +61,11 @@ fn process_expanded(path: &str, suffix: &str, src: &str) -> Result<()> {
                         .header("expected", "actual")
                 )
             }
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!(
+            Err(err) => return Err(err).with_context(|| {
+                format!(
                     "failed to read {expanded_path:?}; re-run with BINDGEN_TEST_BLESS=1 to create"
                 )
-                })
-            }
+            }),
         }
     }
     Ok(())

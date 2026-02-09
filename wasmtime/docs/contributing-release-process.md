@@ -73,6 +73,29 @@ carry on its way.
 
 ## Releasing a patch version
 
+Wasmtime does not currently have a cadence for patch version nor a strict set
+of criteria. It's done on an as-needed basis. Requirements, however, are:
+
+* All changes must land on `main` first (if applicable) and then get backported
+  to an older branch. Release branches should already exist from the above
+  major release steps.
+
+* When a patch release is made it must be applied to [all supported
+  versions](./stability-release.md#current-versions) that need the patch.
+  Wasmtime will not release a patch release until all versions have been
+  equally patched to ensure that releases remain consistent.
+
+* Patch releases must not contain API-breaking changes in public crates. The
+  list of `PUBLIC_CRATES` in `scripts/publish.rs` is the list of crates to worry
+  about in terms of breaking changes.
+
+* Wasm-level ABI-breaking changes are by default not allowed in patch releases.
+  Users are expected to, for example, be able to load `*.cwasm` artifacts from
+  before the patch release is made. If an ABI-breaking change is necessary then
+  be sure to update `crates/wasmtime/src/engine/serialization.rs` and the
+  `WasmtimeVersion` matching strategy to modify the string to ensure older
+  artifacts cannot be loaded.
+
 Making a patch release is somewhat more manual than a major version, but like
 before there's automation to help guide the process as well and take care of
 more mundane bits.
@@ -82,11 +105,9 @@ Like above human interaction is indicated with **bold** text in these steps.
 
 1. **Necessary changes are backported to the `release-2.0.0` branch from
    `main`**
-   * All changes must land on `main` first (if applicable) and then get
-     backported to an older branch. Release branches should already exist from
-     the above major release steps.
-   * CI may not have been run in some time for release branches so it may be
-     necessary to backport CI fixes and updates from `main` as well.
+   * CI for supported branches is run weekly, even after release, to ensure that
+     it's at most broken for a week. Nevertheless issues come up, so be aware
+     that CI may be green on `main` but red on a release branch.
    * When merging backports maintainers need to double-check that the
      `PUBLIC_CRATES` listed in `scripts/publish.rs` do not have
      semver-API-breaking changes (in the strictest sense). All security fixes
@@ -113,60 +134,34 @@ Like above human interaction is indicated with **bold** text in these steps.
 
 ## Releasing a security patch
 
-When making a patch release that has a security-related fix the contents of the
-patch are often kept private until the day of the patch release which means that
-the process here is slightly different from the patch release process above. In
-addition the precise [runbook is currently under discussion in an
-RFC](https://github.com/bytecodealliance/rfcs/pull/20) for security patches, so
-this intends to document what we've been doing so far and it'll get updated when
-the runbook is merged.
-
-1. **The fix for the security issue is developed in a GitHub Security
-   Advisory**
-   * This will not have any CI run, it's recommended to run `./ci/run-tests.sh`
-     locally at least.
-   * Develop fixes for all branches that will get a patch release in the
-     advisory, one PR per branch. When the advisory is published all branches
-     will be merged simultaneously. Be sure to run `./ci/run-tests.sh` in each
-     branch.
-   * Don't forget to update `RELEASES.md` with notes about the release on
-     each branch.
-2. **Send a PR for the version bump when an email goes out announcing there will
-   be a security release**
-   * An email is sent to the bytecodealliance security mailing list ahead of a
-     patch release to announce that a patch release will happen. At this time you
-     should [trigger the version bump][ci-trigger] against the appropriate
-     `release-x.y.z` branches with the `release-patch` argument.
-   * This will send a PR, but you should not merge it. Instead use this PR and
-     the time ahead of the security release to fix any issues with CI. Older
-     `release-x.y.z` branches haven't run CI in awhile so they may need to
-     backport fixes of one variety or another. DO NOT include the actual fix for
-     the security issue into the PR, that comes in the next step.
-3. **Make the advisories/patches public**
-   * Publishing the GitHub Security Advisory will merge all the PRs into each
-     branch from the advisory. Note that CI will run for release branches but
-     `main` will probably fail CI since it expected to be merged through the
-     merge queue, but that's ok.
-   * Double-check that CI for release branches finishes and completes
-     successfully.
-4. **Merge the version-bump PR**
-   * Like the patch release process this will kick everything else into motion.
-     Note that the actual security fixes should be merged either before or as
-     part of this PR.
+For security releases see the documentation [of the vulnerability
+runbook](./security-vulnerability-runbook.md).
 
 ## Releasing Notes
 
 Release notes for Wasmtime are written in the `RELEASES.md` file in the root of
 the repository. Management of this file looks like:
 
-* (theoretically) All changes on `main` which need to write an entry in
-  `RELEASES.md`.
-* When the `main` branch gets a version the `RELEASES.md` file is emptied and
-  replaced with `ci/RELEASES-template.md`. An entry for the upcoming release is
-  added to the bulleted list at the bottom.
+* (theoretically) All changes on `main` bundle an appropriate update of
+  `RELEASES.md`. In practice this almost never happens.
+* When the `main` branch gets a version bump the `RELEASES.md` file is emptied
+  and replaced with `ci/RELEASES-template.md`. An entry for the upcoming release
+  is added to the bulleted list at the bottom.
 * (realistically) After a `release-X.Y.Z` branch is created release notes are
-  updated and edited on the release branch.
+  updated and edited on the release branch directly.
 
 This means that `RELEASES.md` only has release notes for the release branch that
 it is on. Historical release notes can be found through links at the bottom to
 previous copies of `RELEASES.md`
+
+## Keeping Old release branch CI up-to-date
+
+Over time CI configuration goes out of date and may need to be updated. The
+Wasmtime repository has a cron job via GitHub Actions to run release CI on all
+supported release branches on a weekly basis to try to weed out these problems.
+If a release branch CI fails it'll open an issue and maintainers should resolve
+it expediently.
+
+Where possible old release branch CI should not update software to fix CI. Try
+to pin to older versions if something wasn't pinned already for example.
+Sometimes though updates are inevitable and may be required.

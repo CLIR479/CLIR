@@ -36,10 +36,10 @@ use wasi_preview1_component_adapter_provider::WASI_SNAPSHOT_PREVIEW1_REACTOR_ADA
 use wit_component::ComponentEncoder;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let wasm_p1_bytes = std::fs::read("path/to/your/your-component.p1.wasm");
+    let wasm_p1_bytes = std::fs::read("path/to/your/your-component.p1.wasm")?;
 
     let wasm_p2_bytes = ComponentEncoder::default()
-        .module(&wasm_module_bytes)?
+        .module(&wasm_p1_bytes)?
         .adapter(
             "wasi_snapshot_preview1",
             WASI_SNAPSHOT_PREVIEW1_REACTOR_ADAPTER,
@@ -61,7 +61,7 @@ To robustly support rich types, composition, and easier interoperability, the [C
 
 To standardize underlying system interoperability (ex. reading files, system time) in code compiled to WebAssembly, the [WebAssembly System Interface ("WASI")][wasi] was created. WASI is implemented by language tool chains (ex. Rust supports `wasm32-wasi`/`wasm32-wasip1` as a target, with [support for `wasm32-wasip2` on the way][rust-target-wasm32-wasi]), and enables compiling a WebAssembly component that utilizes [the interfaces that make up WASI Preview1][wasi-p1-interfaces].
 
-In the ongoing work of building WASI, WASI Preview2 which contains more functionality [has been released][wasi-p2-release] -- but building directly to Preview2 is not yet integrated into language toolchains. However, Preview1 components (which *can* be produced by curren toolchains) can be *adapted* to WASI Preview2.
+In the ongoing work of building WASI, WASI Preview2 which contains more functionality [has been released][wasi-p2-release] -- but building directly to Preview2 is not yet integrated into language toolchains. However, Preview1 components (which *can* be produced by current toolchains) can be *adapted* to WASI Preview2.
 
 This is where component adapters come in.
 

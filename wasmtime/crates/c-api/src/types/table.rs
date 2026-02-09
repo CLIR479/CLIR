@@ -1,5 +1,5 @@
-use crate::{wasm_externtype_t, wasm_limits_t, wasm_valtype_t, CExternType};
-use once_cell::unsync::OnceCell;
+use crate::{CExternType, wasm_externtype_t, wasm_limits_t, wasm_valtype_t};
+use std::cell::OnceCell;
 use wasmtime::{TableType, ValType};
 
 #[repr(transparent)]
@@ -49,7 +49,7 @@ impl CTableType {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_tabletype_new(
     ty: Box<wasm_valtype_t>,
     limits: &wasm_limits_t,
@@ -62,7 +62,7 @@ pub extern "C" fn wasm_tabletype_new(
     ))))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_tabletype_element(tt: &wasm_tabletype_t) -> &wasm_valtype_t {
     let tt = tt.ty();
     tt.element_cache.get_or_init(|| wasm_valtype_t {
@@ -70,21 +70,21 @@ pub extern "C" fn wasm_tabletype_element(tt: &wasm_tabletype_t) -> &wasm_valtype
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_tabletype_limits(tt: &wasm_tabletype_t) -> &wasm_limits_t {
     let tt = tt.ty();
     tt.limits_cache.get_or_init(|| wasm_limits_t {
-        min: tt.ty.minimum(),
-        max: tt.ty.maximum().unwrap_or(u32::max_value()),
+        min: u32::try_from(tt.ty.minimum()).unwrap(),
+        max: u32::try_from(tt.ty.maximum().unwrap_or(u64::from(u32::MAX))).unwrap(),
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_tabletype_as_externtype(ty: &wasm_tabletype_t) -> &wasm_externtype_t {
     &ty.ext
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_tabletype_as_externtype_const(ty: &wasm_tabletype_t) -> &wasm_externtype_t {
     &ty.ext
 }

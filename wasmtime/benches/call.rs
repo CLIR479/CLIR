@@ -1,5 +1,5 @@
 use criterion::measurement::WallTime;
-use criterion::{criterion_group, criterion_main, BenchmarkGroup, Criterion};
+use criterion::{BenchmarkGroup, Criterion, criterion_group, criterion_main};
 use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
@@ -16,6 +16,8 @@ fn measure_execution_time(c: &mut Criterion) {
 
     #[cfg(feature = "component-model")]
     component::measure_execution_time(c);
+
+    indirect::measure_execution_time(c);
 }
 
 #[derive(Copy, Clone)]
@@ -51,7 +53,7 @@ fn engines() -> Vec<(Engine, IsAsync)> {
 
     let mut pool = PoolingAllocationConfig::default();
     if std::env::var("WASMTIME_TEST_FORCE_MPK").is_ok() {
-        pool.memory_protection_keys(MpkEnabled::Enable);
+        pool.memory_protection_keys(Enabled::Yes);
     }
 
     vec![
@@ -65,10 +67,7 @@ fn engines() -> Vec<(Engine, IsAsync)> {
             .unwrap(),
             IsAsync::NoPooling,
         ),
-        (
-            Engine::new(config.async_support(true)).unwrap(),
-            IsAsync::Yes,
-        ),
+        (Engine::new(&config).unwrap(), IsAsync::Yes),
         (
             Engine::new(config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool)))
                 .unwrap(),
@@ -134,8 +133,8 @@ fn bench_host_to_wasm<Params, Results>(
     typed_params: Params,
     typed_results: Results,
 ) where
-    Params: WasmParams + ToVals + Copy,
-    Results: WasmResults + ToVals + Copy + PartialEq + Debug,
+    Params: WasmParams + ToVals + Copy + Sync,
+    Results: WasmResults + ToVals + Copy + Sync + PartialEq + Debug + 'static,
 {
     // Benchmark the "typed" version, which should be faster than the versions
     // below.
@@ -189,9 +188,7 @@ fn bench_host_to_wasm<Params, Results>(
             for (i, param) in params.iter().enumerate() {
                 space[i] = param.to_raw(&mut *store).unwrap();
             }
-            untyped
-                .call_unchecked(&mut *store, space.as_mut_ptr(), space.len())
-                .unwrap();
+            untyped.call_unchecked(&mut *store, &mut space[..]).unwrap();
             for (i, expected) in results.iter().enumerate() {
                 let ty = expected.ty(&store).unwrap();
                 let actual = Val::from_raw(&mut *store, space[i], ty);
@@ -337,15 +334,15 @@ fn wasm_to_host(c: &mut Criterion) {
             let ty = FuncType::new(&engine, [ValType::I32, ValType::I64], [ValType::F32]);
             unchecked
                 .func_new_unchecked("", "nop-params-and-results", ty, |mut caller, space| {
-                    match Val::from_raw(&mut caller, space[0], ValType::I32) {
+                    match Val::from_raw(&mut caller, space[0].assume_init(), ValType::I32) {
                         Val::I32(0) => {}
                         _ => unreachable!(),
                     }
-                    match Val::from_raw(&mut caller, space[1], ValType::I64) {
+                    match Val::from_raw(&mut caller, space[1].assume_init(), ValType::I64) {
                         Val::I64(0) => {}
                         _ => unreachable!(),
                     }
-                    space[0] = Val::F32(0).to_raw(&mut caller).unwrap();
+                    space[0].write(Val::F32(0).to_raw(&mut caller).unwrap());
                     Ok(())
                 })
                 .unwrap();
@@ -362,7 +359,7 @@ fn wasm_to_host(c: &mut Criterion) {
             return;
         }
 
-        let mut typed = Linker::new(&engine);
+        let mut typed = Linker::<()>::new(&engine);
         typed
             .func_wrap_async("", "nop", |caller, _: ()| {
                 Box::new(async {
@@ -445,7 +442,7 @@ trait ToVals {
 
 macro_rules! tuples {
     ($($t:ident)*) => (
-        #[allow(non_snake_case)]
+        #[allow(non_snake_case, reason = "macro-generated code")]
         impl<$($t:Copy + Into<Val>,)*> ToVals for ($($t,)*) {
             fn to_vals(&self) -> Vec<Val> {
                 let mut _dst = Vec::new();
@@ -534,7 +531,7 @@ mod component {
 
     macro_rules! tuples {
         ($($t:ident)*) => (
-            #[allow(non_snake_case)]
+            #[allow(non_snake_case, reason = "macro-generated code")]
             impl<$($t:Copy + ToComponentVal,)*> ToComponentVals for ($($t,)*) {
                 fn to_component_vals(&self) -> Vec<component::Val> {
                     let mut _dst = Vec::new();
@@ -569,7 +566,7 @@ mod component {
                         (func (export "nop")
                             (canon lift (core func $i "nop"))
                         )
-                        (func (export "nop-params-and-results") (param "x" u32) (param "y" u64) (result "z" float32)
+                        (func (export "nop-params-and-results") (param "x" u32) (param "y" u64) (result float32)
                             (canon lift (core func $i "nop-params-and-results"))
                         )
                     )
@@ -630,7 +627,8 @@ mod component {
             + PartialEq
             + Debug
             + Send
-            + Sync,
+            + Sync
+            + 'static,
     {
         // Benchmark the "typed" version.
         c.bench_function(&format!("component - host-to-wasm - typed - {name}"), |b| {
@@ -644,11 +642,6 @@ mod component {
                     typed.call(&mut *store, typed_params).unwrap()
                 };
                 assert_eq!(results, typed_results);
-                if is_async.use_async() {
-                    run_await(typed.post_return_async(&mut *store)).unwrap()
-                } else {
-                    typed.post_return(&mut *store).unwrap()
-                }
             })
         });
 
@@ -668,11 +661,6 @@ mod component {
                     }
                     for (expected, actual) in expected_results.iter().zip(&results) {
                         assert_eq!(expected, actual);
-                    }
-                    if is_async.use_async() {
-                        run_await(untyped.post_return_async(&mut *store)).unwrap()
-                    } else {
-                        untyped.post_return(&mut *store).unwrap()
                     }
                 })
             },
@@ -796,10 +784,10 @@ mod component {
             bench_instance(group, store, &instance, "typed", is_async);
 
             let mut untyped = component::Linker::new(&engine);
-            untyped.root().func_new("nop", |_, _, _| Ok(())).unwrap();
+            untyped.root().func_new("nop", |_, _, _, _| Ok(())).unwrap();
             untyped
                 .root()
-                .func_new("nop-params-and-results", |_caller, params, results| {
+                .func_new("nop-params-and-results", |_caller, _ty, params, results| {
                     assert_eq!(params.len(), 2);
                     match params[0] {
                         component::Val::U32(0) => {}
@@ -866,10 +854,8 @@ mod component {
                     let start = Instant::now();
                     if is_async.use_async() {
                         run_await(run.call_async(&mut *store, (iters,))).unwrap();
-                        run_await(run.post_return_async(&mut *store)).unwrap();
                     } else {
                         run.call(&mut *store, (iters,)).unwrap();
-                        run.post_return(&mut *store).unwrap();
                     }
                     start.elapsed()
                 })
@@ -884,15 +870,175 @@ mod component {
                         let start = Instant::now();
                         if is_async.use_async() {
                             run_await(run.call_async(&mut *store, (iters,))).unwrap();
-                            run_await(run.post_return_async(&mut *store)).unwrap();
                         } else {
                             run.call(&mut *store, (iters,)).unwrap();
-                            run.post_return(&mut *store).unwrap();
                         }
                         start.elapsed()
                     })
                 },
             );
         }
+    }
+}
+
+mod indirect {
+    use super::*;
+    use std::time::Duration;
+
+    pub fn measure_execution_time(c: &mut Criterion) {
+        let _ = env_logger::try_init();
+        let mut group = c.benchmark_group("call-indirect");
+        for lazy in [true, false] {
+            // Note: the seemingly useless loop over a single `calls` value is
+            // just there to make it easy to play around with different numbers
+            // of calls.
+            for calls in [65536] {
+                group.throughput(criterion::Throughput::Elements(calls));
+                same_callee(&mut group, lazy, calls);
+                different_callees(&mut group, lazy, calls);
+            }
+        }
+    }
+
+    fn same_callee(group: &mut BenchmarkGroup<'_, WallTime>, lazy: bool, calls: u64) {
+        let name = format!(
+            "same-callee/table-init-{}/{calls}-calls",
+            if lazy { "lazy" } else { "strict" }
+        );
+        group.bench_function(name, |b| {
+            let mut config = Config::new();
+            config.table_lazy_init(lazy);
+            let engine = Engine::new(&config).unwrap();
+
+            let table_module = Module::new(
+                &engine,
+                r#"
+                    (module
+                        (func)
+                        (table (export "table") 5 5 funcref)
+                        (elem (table 0) (i32.const 0) func 0 0 0 0 0)
+                    )
+                "#,
+            )
+            .unwrap();
+
+            let run_module = Module::new(
+                &engine,
+                r#"
+                    (module
+                        (type $ty (func))
+                        (import "" "table" (table 0 funcref))
+                        (func (export "run") (param $callee i32) (param $calls i32)
+                            loop
+                                (if (i32.eqz (local.get $calls))
+                                    (then (return)))
+                                (local.set $calls (i32.sub (local.get $calls) (i32.const 1)))
+                                (call_indirect (type $ty) (local.get $callee))
+                                br 0
+                            end
+                        )
+                    )
+                "#,
+            )
+            .unwrap();
+
+            b.iter_custom(move |iters| {
+                let mut total = Duration::from_millis(0);
+
+                for _ in 0..iters {
+                    let mut store = Store::new(&engine, ());
+
+                    let table_instance = Instance::new(&mut store, &table_module, &[]).unwrap();
+                    let table = table_instance.get_table(&mut store, "table").unwrap();
+
+                    let run_instance =
+                        Instance::new(&mut store, &run_module, &[table.into()]).unwrap();
+                    let run = run_instance
+                        .get_typed_func::<(u32, u32), ()>(&mut store, "run")
+                        .unwrap();
+
+                    let start = Instant::now();
+                    let result = run.call(&mut store, (0, calls.try_into().unwrap()));
+                    total += start.elapsed();
+
+                    result.unwrap();
+                }
+
+                total
+            });
+        });
+    }
+
+    fn different_callees(group: &mut BenchmarkGroup<'_, WallTime>, lazy: bool, calls: u64) {
+        let name = format!(
+            "different-callees/table-init-{}/{calls}-calls",
+            if lazy { "lazy" } else { "strict" }
+        );
+        group.bench_function(name, |b| {
+            let mut config = Config::new();
+            config.table_lazy_init(lazy);
+            let engine = Engine::new(&config).unwrap();
+
+            let mut table_wat = format!(
+                "
+                    (module
+                        (func)
+                        (table (export \"table\") {calls} {calls} funcref)
+                        (elem (table 0) (i32.const 0) func"
+            );
+            for _ in 0..calls {
+                table_wat.push_str(" 0");
+            }
+            table_wat.push_str("))");
+            let table_module = Module::new(&engine, &table_wat).unwrap();
+
+            let run_module = Module::new(
+                &engine,
+                r#"
+                    (module
+                        (type $ty (func))
+                        (import "" "table" (table 0 funcref))
+                        (func (export "run") (param $callee i32) (param $calls i32)
+                            loop
+                                (if (i32.eqz (local.get $calls))
+                                    (then (return)))
+                                (local.set $calls (i32.sub (local.get $calls) (i32.const 1)))
+
+                                (call_indirect (type $ty) (local.get $callee))
+                                (local.set $callee (i32.add (local.get $callee) (i32.const 1)))
+
+                                br 0
+                            end
+                        )
+                    )
+                "#,
+            )
+            .unwrap();
+
+            b.iter_custom(move |iters| {
+                let mut total = Duration::from_millis(0);
+
+                for _ in 0..iters {
+                    let mut store = Store::new(&engine, ());
+
+                    let table_instance = Instance::new(&mut store, &table_module, &[]).unwrap();
+                    let table = table_instance.get_table(&mut store, "table").unwrap();
+
+                    let run_instance =
+                        Instance::new(&mut store, &run_module, &[table.into()]).unwrap();
+                    let run = run_instance
+                        .get_typed_func::<(u32, u32), ()>(&mut store, "run")
+                        .unwrap();
+
+                    let start = Instant::now();
+                    let result = run.call(&mut store, (0, calls.try_into().unwrap()));
+                    total += start.elapsed();
+
+                    result.unwrap();
+                }
+
+                total
+            });
+        });
     }
 }

@@ -1,15 +1,23 @@
 //! Common functionality shared between command implementations.
 
-use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use std::net::TcpListener;
-use std::{path::Path, time::Duration};
-use wasmtime::{Engine, Module, Precompiled, StoreLimits, StoreLimitsBuilder};
-use wasmtime_cli_flags::{opt::WasmtimeOptionValue, CommonOptions};
+use std::{fs::File, path::Path, time::Duration};
+use wasmtime::{
+    Engine, Module, Precompiled, Result, StoreLimits, StoreLimitsBuilder, bail,
+    error::Context as _, format_err,
+};
+use wasmtime_cli_flags::{CommonOptions, opt::WasmtimeOptionValue};
 use wasmtime_wasi::WasiCtxBuilder;
 
 #[cfg(feature = "component-model")]
 use wasmtime::component::Component;
+
+/// Whether or not WASIp3 is enabled by default.
+///
+/// Currently this is disabled (the `&& false`), but that'll get removed in the
+/// future.
+pub const P3_DEFAULT: bool = cfg!(feature = "component-model-async") && false;
 
 pub enum RunTarget {
     Core(Module),
@@ -37,7 +45,7 @@ impl RunTarget {
 }
 
 /// Common command line arguments for run commands.
-#[derive(Parser, PartialEq)]
+#[derive(Parser)]
 pub struct RunCommon {
     #[command(flatten)]
     pub common: CommonOptions,
@@ -159,6 +167,8 @@ impl RunCommon {
             Some("-") => "/dev/stdin".as_ref(),
             _ => path,
         };
+        let file =
+            File::open(path).with_context(|| format!("failed to open wasm module {path:?}"))?;
 
         // First attempt to load the module as an mmap. If this succeeds then
         // detection can be done with the contents of the mmap and if a
@@ -178,7 +188,7 @@ impl RunCommon {
         // which isn't ready to happen at this time). It's hoped though that
         // opening a file twice isn't too bad in the grand scheme of things with
         // respect to the CLI.
-        match wasmtime::_internal::MmapVec::from_file(path) {
+        match wasmtime::_internal::MmapVec::from_file(file) {
             Ok(map) => self.load_module_contents(
                 engine,
                 path,
@@ -210,7 +220,7 @@ impl RunCommon {
         deserialize_module: impl FnOnce() -> Result<Module>,
         #[cfg(feature = "component-model")] deserialize_component: impl FnOnce() -> Result<Component>,
     ) -> Result<RunTarget> {
-        Ok(match engine.detect_precompiled(bytes) {
+        Ok(match Engine::detect_precompiled(bytes) {
             Some(Precompiled::Module) => {
                 self.ensure_allow_precompiled()?;
                 RunTarget::Core(deserialize_module()?)
@@ -249,7 +259,7 @@ impl RunCommon {
 
             #[cfg(not(any(feature = "cranelift", feature = "winch")))]
             None => {
-                let _ = path;
+                let _ = (path, engine);
                 bail!("support for compiling modules was disabled at compile time");
             }
         })
@@ -277,7 +287,7 @@ impl RunCommon {
                 None => match std::env::var_os(key) {
                     Some(val) => val
                         .into_string()
-                        .map_err(|_| anyhow!("environment variable `{key}` not valid utf-8"))?,
+                        .map_err(|_| format_err!("environment variable `{key}` not valid utf-8"))?,
                     None => {
                         // leave the env var un-set in the guest
                         continue;
@@ -332,6 +342,62 @@ impl RunCommon {
         }
         Ok(listeners)
     }
+
+    pub fn validate_p3_option(&self) -> Result<()> {
+        let p3 = self.common.wasi.p3.unwrap_or(P3_DEFAULT);
+        if p3 && !cfg!(feature = "component-model-async") {
+            bail!("support for WASIp3 disabled at compile time");
+        }
+        Ok(())
+    }
+
+    pub fn validate_cli_enabled(&self) -> Result<Option<bool>> {
+        let mut cli = self.common.wasi.cli;
+
+        // Accept -Scommon as a deprecated alias for -Scli.
+        if let Some(common) = self.common.wasi.common {
+            if cli.is_some() {
+                bail!(
+                    "The -Scommon option should not be use with -Scli as it is a deprecated alias"
+                );
+            } else {
+                // In the future, we may add a warning here to tell users to use
+                // `-S cli` instead of `-S common`.
+                cli = Some(common);
+            }
+        }
+
+        Ok(cli)
+    }
+
+    /// Adds `wasmtime-wasi` interfaces (dubbed "-Scli" in the flags to the
+    /// `wasmtime` command) to the `linker` provided.
+    ///
+    /// This will handle adding various WASI standard versions to the linker
+    /// internally.
+    #[cfg(feature = "component-model")]
+    pub fn add_wasmtime_wasi_to_linker<T>(
+        &self,
+        linker: &mut wasmtime::component::Linker<T>,
+    ) -> Result<()>
+    where
+        T: wasmtime_wasi::WasiView,
+    {
+        let mut p2_options = wasmtime_wasi::p2::bindings::LinkOptions::default();
+        p2_options.cli_exit_with_code(self.common.wasi.cli_exit_with_code.unwrap_or(false));
+        p2_options.network_error_code(self.common.wasi.network_error_code.unwrap_or(false));
+        wasmtime_wasi::p2::add_to_linker_with_options_async(linker, &p2_options)?;
+
+        #[cfg(feature = "component-model-async")]
+        if self.common.wasi.p3.unwrap_or(P3_DEFAULT) {
+            let mut p3_options = wasmtime_wasi::p3::bindings::LinkOptions::default();
+            p3_options.cli_exit_with_code(self.common.wasi.cli_exit_with_code.unwrap_or(false));
+            wasmtime_wasi::p3::add_to_linker_with_options(linker, &p3_options)
+                .context("failed to link `wasi:cli@0.3.x`")?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -348,6 +414,7 @@ impl Profile {
             ["perfmap"] => Ok(Profile::Native(wasmtime::ProfilingStrategy::PerfMap)),
             ["jitdump"] => Ok(Profile::Native(wasmtime::ProfilingStrategy::JitDump)),
             ["vtune"] => Ok(Profile::Native(wasmtime::ProfilingStrategy::VTune)),
+            ["pulley"] => Ok(Profile::Native(wasmtime::ProfilingStrategy::Pulley)),
             ["guest"] => Ok(Profile::Guest {
                 path: "wasmtime-guest-profile.json".to_string(),
                 interval: Duration::from_millis(10),
@@ -364,3 +431,9 @@ impl Profile {
         }
     }
 }
+
+#[derive(Default, Clone)]
+#[cfg(all(feature = "wasi-http", feature = "component-model-async"))]
+pub struct DefaultP3Ctx;
+#[cfg(all(feature = "wasi-http", feature = "component-model-async"))]
+impl wasmtime_wasi_http::p3::WasiHttpCtx for DefaultP3Ctx {}

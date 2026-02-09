@@ -1,10 +1,9 @@
 use crate::{
-    handle_result, wasm_extern_t, wasm_ref_t, wasm_store_t, wasm_tabletype_t, wasmtime_error_t,
-    wasmtime_val_t, WasmtimeStoreContext, WasmtimeStoreContextMut,
+    WasmtimeStoreContext, WasmtimeStoreContextMut, handle_result, wasm_extern_t, wasm_ref_t,
+    wasm_store_t, wasm_tabletype_t, wasmtime_error_t, wasmtime_val_t,
 };
-use anyhow::anyhow;
 use std::mem::MaybeUninit;
-use wasmtime::{Extern, Ref, RootScope, Table, TableType};
+use wasmtime::{Extern, Ref, RootScope, Table, TableType, format_err};
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -37,7 +36,7 @@ fn option_wasm_ref_t_to_ref(r: Option<&wasm_ref_t>, table_ty: &TableType) -> Ref
         .unwrap_or_else(|| Ref::null(table_ty.element().heap_type()))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_table_new(
     store: &mut wasm_store_t,
     tt: &wasm_tabletype_t,
@@ -54,24 +53,24 @@ pub unsafe extern "C" fn wasm_table_new(
     }))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_table_type(t: &wasm_table_t) -> Box<wasm_tabletype_t> {
     let table = t.table();
     let store = t.ext.store.context();
     Box::new(wasm_tabletype_t::new(table.ty(&store)))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_table_get(
     t: &mut wasm_table_t,
     index: wasm_table_size_t,
 ) -> Option<Box<wasm_ref_t>> {
     let table = t.table();
-    let r = table.get(t.ext.store.context_mut(), index)?;
+    let r = table.get(t.ext.store.context_mut(), u64::from(index))?;
     wasm_ref_t::new(r)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_table_set(
     t: &mut wasm_table_t,
     index: wasm_table_size_t,
@@ -79,17 +78,19 @@ pub unsafe extern "C" fn wasm_table_set(
 ) -> bool {
     let table = t.table();
     let val = option_wasm_ref_t_to_ref(r, &table.ty(t.ext.store.context()));
-    table.set(t.ext.store.context_mut(), index, val).is_ok()
+    table
+        .set(t.ext.store.context_mut(), u64::from(index), val)
+        .is_ok()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_table_size(t: &wasm_table_t) -> wasm_table_size_t {
     let table = t.table();
     let store = t.ext.store.context();
-    table.size(&store)
+    u32::try_from(table.size(&store)).unwrap()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_table_grow(
     t: &mut wasm_table_t,
     delta: wasm_table_size_t,
@@ -97,20 +98,22 @@ pub unsafe extern "C" fn wasm_table_grow(
 ) -> bool {
     let table = t.table();
     let init = option_wasm_ref_t_to_ref(init, &table.ty(t.ext.store.context()));
-    table.grow(t.ext.store.context_mut(), delta, init).is_ok()
+    table
+        .grow(t.ext.store.context_mut(), u64::from(delta), init)
+        .is_ok()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_table_as_extern(t: &mut wasm_table_t) -> &mut wasm_extern_t {
     &mut t.ext
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_table_as_extern_const(t: &wasm_table_t) -> &wasm_extern_t {
     &t.ext
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_table_new(
     mut store: WasmtimeStoreContextMut<'_>,
     tt: &wasm_tabletype_t,
@@ -121,13 +124,13 @@ pub unsafe extern "C" fn wasmtime_table_new(
     handle_result(
         init.to_val(&mut scope)
             .ref_()
-            .ok_or_else(|| anyhow!("wasmtime_table_new init value is not a reference"))
+            .ok_or_else(|| format_err!("wasmtime_table_new init value is not a reference"))
             .and_then(|init| Table::new(scope, tt.ty().ty.clone(), init)),
         |table| *out = table,
     )
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_table_type(
     store: WasmtimeStoreContext<'_>,
     table: &Table,
@@ -135,11 +138,11 @@ pub unsafe extern "C" fn wasmtime_table_type(
     Box::new(wasm_tabletype_t::new(table.ty(store)))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_table_get(
     store: WasmtimeStoreContextMut<'_>,
     table: &Table,
-    index: u32,
+    index: u64,
     ret: &mut MaybeUninit<wasmtime_val_t>,
 ) -> bool {
     let mut scope = RootScope::new(store);
@@ -152,41 +155,41 @@ pub extern "C" fn wasmtime_table_get(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_table_set(
     mut store: WasmtimeStoreContextMut<'_>,
     table: &Table,
-    index: u32,
+    index: u64,
     val: &wasmtime_val_t,
 ) -> Option<Box<wasmtime_error_t>> {
     let mut scope = RootScope::new(&mut store);
     handle_result(
         val.to_val(&mut scope)
             .ref_()
-            .ok_or_else(|| anyhow!("wasmtime_table_set value is not a reference"))
+            .ok_or_else(|| format_err!("wasmtime_table_set value is not a reference"))
             .and_then(|val| table.set(scope, index, val)),
         |()| {},
     )
 }
 
-#[no_mangle]
-pub extern "C" fn wasmtime_table_size(store: WasmtimeStoreContext<'_>, table: &Table) -> u32 {
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_table_size(store: WasmtimeStoreContext<'_>, table: &Table) -> u64 {
     table.size(store)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_table_grow(
     mut store: WasmtimeStoreContextMut<'_>,
     table: &Table,
-    delta: u32,
+    delta: u64,
     val: &wasmtime_val_t,
-    prev_size: &mut u32,
+    prev_size: &mut u64,
 ) -> Option<Box<wasmtime_error_t>> {
     let mut scope = RootScope::new(&mut store);
     handle_result(
         val.to_val(&mut scope)
             .ref_()
-            .ok_or_else(|| anyhow!("wasmtime_table_grow value is not a reference"))
+            .ok_or_else(|| format_err!("wasmtime_table_grow value is not a reference"))
             .and_then(|val| table.grow(scope, delta, val)),
         |prev| *prev_size = prev,
     )

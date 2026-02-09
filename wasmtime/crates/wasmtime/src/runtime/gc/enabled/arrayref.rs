@@ -1,17 +1,19 @@
 //! Working with GC `array` objects.
 
 use crate::runtime::vm::VMGcRef;
-use crate::store::StoreId;
-use crate::vm::{GcArrayLayout, GcLayout, VMArrayRef, VMGcHeader};
+use crate::store::{Asyncness, StoreId, StoreResourceLimiter};
+#[cfg(feature = "async")]
+use crate::vm::VMStore;
+use crate::vm::{self, VMArrayRef, VMGcHeader};
+use crate::{AnyRef, FieldType};
 use crate::{
+    ArrayType, AsContext, AsContextMut, EqRef, GcHeapOutOfMemory, GcRefImpl, GcRootIndex, HeapType,
+    OwnedRooted, RefType, Rooted, Val, ValRaw, ValType, WasmTy,
     prelude::*,
     store::{AutoAssertNoGc, StoreContextMut, StoreOpaque},
-    ArrayType, AsContext, AsContextMut, GcHeapOutOfMemory, GcRefImpl, GcRootIndex, HeapType,
-    ManuallyRooted, RefType, Rooted, Val, ValRaw, ValType, WasmTy,
 };
-use crate::{AnyRef, FieldType};
 use core::mem::{self, MaybeUninit};
-use wasmtime_environ::{VMGcKind, VMSharedTypeIndex};
+use wasmtime_environ::{GcArrayLayout, GcLayout, VMGcKind, VMSharedTypeIndex};
 
 /// An allocator for a particular Wasm GC array type.
 ///
@@ -58,7 +60,7 @@ use wasmtime_environ::{VMGcKind, VMSharedTypeIndex};
 /// }
 /// # Ok(())
 /// # }
-/// # foo().unwrap();
+/// # let _ = foo();
 /// ```
 pub struct ArrayRefPre {
     store_id: StoreId,
@@ -108,7 +110,7 @@ impl ArrayRefPre {
 /// `0x12345678` into a reference, pretend it is a valid `arrayref`, and trick
 /// the host into dereferencing it and segfaulting or worse.
 ///
-/// Note that you can also use `Rooted<ArrayRef>` and `ManuallyRooted<ArrayRef>`
+/// Note that you can also use `Rooted<ArrayRef>` and `OwnedRooted<ArrayRef>`
 /// as a type parameter with [`Func::typed`][crate::Func::typed]- and
 /// [`Func::wrap`][crate::Func::wrap]-style APIs.
 ///
@@ -142,22 +144,22 @@ impl ArrayRefPre {
 ///     let elem = Val::I32(42);
 ///     let my_array = match ArrayRef::new(&mut scope, &allocator, &elem, len) {
 ///         Ok(s) => s,
+///         Err(e) => match e.downcast::<GcHeapOutOfMemory<()>>() {
+///             // If the heap is out of memory, then do a GC to free up some
+///             // space and try again.
+///             Ok(oom) => {
+///                 // Do a GC! Note: in an async context, you'd want to do
+///                 // `scope.as_context_mut().gc_async().await`.
+///                 scope.as_context_mut().gc(Some(&oom))?;
 ///
-///         // If the heap is out of memory, then do a GC to free up some space
-///         // and try again.
-///         Err(e) if e.is::<GcHeapOutOfMemory<()>>() => {
-///             // Do a GC! Note: in an async context, you'd want to do
-///             // `scope.as_context_mut().gc_async().await`.
-///             scope.as_context_mut().gc();
-///
-///             // Try again. If the GC heap is still out of memory, then we
-///             // weren't able to free up resources for this allocation, so
-///             // propagate the error.
-///             ArrayRef::new(&mut scope, &allocator, &elem, len)?
+///                 // Try again. If the GC heap is still out of memory, then we
+///                 // weren't able to free up resources for this allocation, so
+///                 // propagate the error.
+///                 ArrayRef::new(&mut scope, &allocator, &elem, len)?
+///             }
+///             // Propagate any other kind of error.
+///             Err(e) => return Err(e),
 ///         }
-///
-///         // Propagate any other kind of error.
-///         Err(e) => return Err(e),
 ///     };
 ///
 ///     // That instance's elements should have the initial value.
@@ -183,7 +185,6 @@ pub struct ArrayRef {
 }
 
 unsafe impl GcRefImpl for ArrayRef {
-    #[allow(private_interfaces)]
     fn transmute_ref(index: &GcRootIndex) -> &Self {
         // Safety: `ArrayRef` is a newtype of a `GcRootIndex`.
         let me: &Self = unsafe { mem::transmute(index) };
@@ -206,13 +207,56 @@ impl Rooted<ArrayRef> {
     pub fn to_anyref(self) -> Rooted<AnyRef> {
         self.unchecked_cast()
     }
+
+    /// Upcast this `arrayref` into an `eqref`.
+    #[inline]
+    pub fn to_eqref(self) -> Rooted<EqRef> {
+        self.unchecked_cast()
+    }
 }
 
-impl ManuallyRooted<ArrayRef> {
+impl OwnedRooted<ArrayRef> {
     /// Upcast this `arrayref` into an `anyref`.
     #[inline]
-    pub fn to_anyref(self) -> ManuallyRooted<AnyRef> {
+    pub fn to_anyref(self) -> OwnedRooted<AnyRef> {
         self.unchecked_cast()
+    }
+
+    /// Upcast this `arrayref` into an `eqref`.
+    #[inline]
+    pub fn to_eqref(self) -> OwnedRooted<EqRef> {
+        self.unchecked_cast()
+    }
+}
+
+/// An iterator for elements in `ArrayRef::new[_async].
+///
+/// NB: We can't use `iter::repeat(elem).take(len)` because that doesn't
+/// implement `ExactSizeIterator`.
+#[derive(Clone)]
+struct RepeatN<'a>(&'a Val, u32);
+
+impl<'a> Iterator for RepeatN<'a> {
+    type Item = &'a Val;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.1 == 0 {
+            None
+        } else {
+            self.1 -= 1;
+            Some(self.0)
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for RepeatN<'_> {
+    fn len(&self) -> usize {
+        usize::try_from(self.1).unwrap()
     }
 }
 
@@ -225,15 +269,25 @@ impl ArrayRef {
     ///
     /// This is similar to the `array.new` instruction.
     ///
+    /// # Automatic Garbage Collection
+    ///
+    /// If the GC heap is at capacity, and there isn't room for allocating this
+    /// new array, then this method will automatically trigger a synchronous
+    /// collection in an attempt to free up space in the GC heap.
+    ///
     /// # Errors
     ///
     /// If the given `elem` value's type does not match the `allocator`'s array
     /// type's element type, an error is returned.
     ///
     /// If the allocation cannot be satisfied because the GC heap is currently
-    /// out of memory, but performing a garbage collection might free up space
-    /// such that retrying the allocation afterwards might succeed, then a
-    /// [`GcHeapOutOfMemory<()>`][crate::GcHeapOutOfMemory] error is returned.
+    /// out of memory, then a [`GcHeapOutOfMemory<()>`][crate::GcHeapOutOfMemory]
+    /// error is returned. The allocation might succeed on a second attempt if
+    /// you drop some rooted GC references and try again.
+    ///
+    /// If `store` is configured with a
+    /// [`ResourceLimiterAsync`](crate::ResourceLimiterAsync) then an error will
+    /// be returned because [`ArrayRef::new_async`] should be used instead.
     ///
     /// # Panics
     ///
@@ -245,14 +299,93 @@ impl ArrayRef {
         elem: &Val,
         len: u32,
     ) -> Result<Rooted<ArrayRef>> {
-        Self::_new(store.as_context_mut().0, allocator, elem, len)
+        let (mut limiter, store) = store
+            .as_context_mut()
+            .0
+            .validate_sync_resource_limiter_and_store_opaque()?;
+        vm::assert_ready(Self::_new_async(
+            store,
+            limiter.as_mut(),
+            allocator,
+            elem,
+            len,
+            Asyncness::No,
+        ))
     }
 
-    pub(crate) fn _new(
-        store: &mut StoreOpaque,
+    /// Asynchronously allocate a new `array` of the given length, with every
+    /// element initialized to `elem`.
+    ///
+    /// For example, `ArrayRef::new(ctx, pre, &Val::I64(9), 3)` allocates the
+    /// array `[9, 9, 9]`.
+    ///
+    /// This is similar to the `array.new` instruction.
+    ///
+    /// # Automatic Garbage Collection
+    ///
+    /// If the GC heap is at capacity, and there isn't room for allocating this
+    /// new array, then this method will automatically trigger a asynchronous
+    /// collection in an attempt to free up space in the GC heap.
+    ///
+    /// # Errors
+    ///
+    /// If the given `elem` value's type does not match the `allocator`'s array
+    /// type's element type, an error is returned.
+    ///
+    /// If the allocation cannot be satisfied because the GC heap is currently
+    /// out of memory, then a [`GcHeapOutOfMemory<()>`][crate::GcHeapOutOfMemory]
+    /// error is returned. The allocation might succeed on a second attempt if
+    /// you drop some rooted GC references and try again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if your engine is not configured for async; use
+    /// [`ArrayRef::new_async`][crate::ArrayRef::new_async] to perform
+    /// synchronous allocation instead.
+    ///
+    /// Panics if either the allocator or the `elem` value is not associated
+    /// with the given store.
+    #[cfg(feature = "async")]
+    pub async fn new_async(
+        mut store: impl AsContextMut,
         allocator: &ArrayRefPre,
         elem: &Val,
         len: u32,
+    ) -> Result<Rooted<ArrayRef>> {
+        let (mut limiter, store) = store.as_context_mut().0.resource_limiter_and_store_opaque();
+        Self::_new_async(
+            store,
+            limiter.as_mut(),
+            allocator,
+            elem,
+            len,
+            Asyncness::Yes,
+        )
+        .await
+    }
+
+    pub(crate) async fn _new_async(
+        store: &mut StoreOpaque,
+        limiter: Option<&mut StoreResourceLimiter<'_>>,
+        allocator: &ArrayRefPre,
+        elem: &Val,
+        len: u32,
+        asyncness: Asyncness,
+    ) -> Result<Rooted<ArrayRef>> {
+        store
+            .retry_after_gc_async(limiter, (), asyncness, |store, ()| {
+                Self::new_from_iter(store, allocator, RepeatN(elem, len))
+            })
+            .await
+    }
+
+    /// Allocate a new array of the given elements.
+    ///
+    /// Does not attempt a GC on OOM; leaves that to callers.
+    fn new_from_iter<'a>(
+        store: &mut StoreOpaque,
+        allocator: &ArrayRefPre,
+        elems: impl Clone + ExactSizeIterator<Item = &'a Val>,
     ) -> Result<Rooted<ArrayRef>> {
         assert_eq!(
             store.id(),
@@ -260,59 +393,21 @@ impl ArrayRef {
             "attempted to use a `ArrayRefPre` with the wrong store"
         );
 
-        // Type check the initial element value against the element type.
-        elem.ensure_matches_ty(store, allocator.ty.element_type().unpack())
-            .context("element type mismatch")?;
-
-        return Self::_new_unchecked(store, allocator, RepeatN(elem, len));
-
-        // NB: Can't use `iter::repeat(elem).take(len)` above because that
-        // doesn't implement `ExactSizeIterator`.
-        struct RepeatN<'a>(&'a Val, u32);
-
-        impl<'a> Iterator for RepeatN<'a> {
-            type Item = &'a Val;
-
-            fn next(&mut self) -> Option<Self::Item> {
-                if self.1 == 0 {
-                    None
-                } else {
-                    self.1 -= 1;
-                    Some(self.0)
-                }
-            }
-
-            fn size_hint(&self) -> (usize, Option<usize>) {
-                let len = self.len();
-                (len, Some(len))
-            }
+        // Type check the elements against the element type.
+        for elem in elems.clone() {
+            elem.ensure_matches_ty(store, allocator.ty.element_type().unpack())
+                .context("element type mismatch")?;
         }
 
-        impl ExactSizeIterator for RepeatN<'_> {
-            fn len(&self) -> usize {
-                usize::try_from(self.1).unwrap()
-            }
-        }
-    }
-
-    /// Allocate a new array of the given elements, without checking that the
-    /// elements' types match the array's element type.
-    fn _new_unchecked<'a>(
-        store: &mut StoreOpaque,
-        allocator: &ArrayRefPre,
-        elems: impl ExactSizeIterator<Item = &'a Val>,
-    ) -> Result<Rooted<ArrayRef>> {
         let len = u32::try_from(elems.len()).unwrap();
 
         // Allocate the array and write each field value into the appropriate
         // offset.
         let arrayref = store
-            .gc_store_mut()?
+            .require_gc_store_mut()?
             .alloc_uninit_array(allocator.type_index(), len, allocator.layout())
-            .err2anyhow()
             .context("unrecoverable error when allocating new `arrayref`")?
-            .ok_or_else(|| GcHeapOutOfMemory::new(()))
-            .err2anyhow()?;
+            .map_err(|n| GcHeapOutOfMemory::new((), n))?;
 
         // From this point on, if we get any errors, then the array is not
         // fully initialized, so we need to eagerly deallocate it before the
@@ -330,18 +425,24 @@ impl ArrayRef {
         })() {
             Ok(()) => Ok(Rooted::new(&mut store, arrayref.into())),
             Err(e) => {
-                store.gc_store_mut()?.dealloc_uninit_array(arrayref);
+                store.require_gc_store_mut()?.dealloc_uninit_array(arrayref);
                 Err(e)
             }
         }
     }
 
-    /// Allocate a new `array` containing the given elements.
+    /// Synchronously allocate a new `array` containing the given elements.
     ///
     /// For example, `ArrayRef::new_fixed(ctx, pre, &[Val::I64(4), Val::I64(5),
     /// Val::I64(6)])` allocates the array `[4, 5, 6]`.
     ///
     /// This is similar to the `array.new_fixed` instruction.
+    ///
+    /// # Automatic Garbage Collection
+    ///
+    /// If the GC heap is at capacity, and there isn't room for allocating this
+    /// new array, then this method will automatically trigger a synchronous
+    /// collection in an attempt to free up space in the GC heap.
     ///
     /// # Errors
     ///
@@ -349,9 +450,14 @@ impl ArrayRef {
     /// array type's element type, an error is returned.
     ///
     /// If the allocation cannot be satisfied because the GC heap is currently
-    /// out of memory, but performing a garbage collection might free up space
-    /// such that retrying the allocation afterwards might succeed, then a
-    /// [`GcHeapOutOfMemory<()>`][crate::GcHeapOutOfMemory] error is returned.
+    /// out of memory, then a [`GcHeapOutOfMemory<()>`][crate::GcHeapOutOfMemory]
+    /// error is returned. The allocation might succeed on a second attempt if
+    /// you drop some rooted GC references and try again.
+    ///
+    /// If `store` is configured with a
+    /// [`ResourceLimiterAsync`](crate::ResourceLimiterAsync) then an error
+    /// will be returned because [`ArrayRef::new_fixed_async`] should be used
+    /// instead.
     ///
     /// # Panics
     ///
@@ -362,27 +468,76 @@ impl ArrayRef {
         allocator: &ArrayRefPre,
         elems: &[Val],
     ) -> Result<Rooted<ArrayRef>> {
-        Self::_new_fixed(store.as_context_mut().0, allocator, elems)
+        let (mut limiter, store) = store
+            .as_context_mut()
+            .0
+            .validate_sync_resource_limiter_and_store_opaque()?;
+        vm::assert_ready(Self::_new_fixed_async(
+            store,
+            limiter.as_mut(),
+            allocator,
+            elems,
+            Asyncness::No,
+        ))
     }
 
-    pub(crate) fn _new_fixed(
-        store: &mut StoreOpaque,
+    /// Asynchronously allocate a new `array` containing the given elements.
+    ///
+    /// For example, `ArrayRef::new_fixed_async(ctx, pre, &[Val::I64(4),
+    /// Val::I64(5), Val::I64(6)])` allocates the array `[4, 5, 6]`.
+    ///
+    /// This is similar to the `array.new_fixed` instruction.
+    ///
+    /// If your engine is not configured for async, use
+    /// [`ArrayRef::new_fixed`][crate::ArrayRef::new_fixed] to perform
+    /// synchronous allocation.
+    ///
+    /// # Automatic Garbage Collection
+    ///
+    /// If the GC heap is at capacity, and there isn't room for allocating this
+    /// new array, then this method will automatically trigger a synchronous
+    /// collection in an attempt to free up space in the GC heap.
+    ///
+    /// # Errors
+    ///
+    /// If any of the `elems` values' type does not match the `allocator`'s
+    /// array type's element type, an error is returned.
+    ///
+    /// If the allocation cannot be satisfied because the GC heap is currently
+    /// out of memory, then a [`GcHeapOutOfMemory<()>`][crate::GcHeapOutOfMemory]
+    /// error is returned. The allocation might succeed on a second attempt if
+    /// you drop some rooted GC references and try again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `store` is not configured for async; use
+    /// [`ArrayRef::new_fixed`][crate::ArrayRef::new_fixed] to perform
+    /// synchronous allocation instead.
+    ///
+    /// Panics if the allocator or any of the `elems` values are not associated
+    /// with the given store.
+    #[cfg(feature = "async")]
+    pub async fn new_fixed_async(
+        mut store: impl AsContextMut,
         allocator: &ArrayRefPre,
         elems: &[Val],
     ) -> Result<Rooted<ArrayRef>> {
-        assert_eq!(
-            store.id(),
-            allocator.store_id,
-            "attempted to use a `ArrayRefPre` with the wrong store"
-        );
+        let (mut limiter, store) = store.as_context_mut().0.resource_limiter_and_store_opaque();
+        Self::_new_fixed_async(store, limiter.as_mut(), allocator, elems, Asyncness::Yes).await
+    }
 
-        // Type check the elements against the element type.
-        for elem in elems {
-            elem.ensure_matches_ty(store, allocator.ty.element_type().unpack())
-                .context("element type mismatch")?;
-        }
-
-        return Self::_new_unchecked(store, allocator, elems.iter());
+    pub(crate) async fn _new_fixed_async(
+        store: &mut StoreOpaque,
+        limiter: Option<&mut StoreResourceLimiter<'_>>,
+        allocator: &ArrayRefPre,
+        elems: &[Val],
+        asyncness: Asyncness,
+    ) -> Result<Rooted<ArrayRef>> {
+        store
+            .retry_after_gc_async(limiter, (), asyncness, |store, ()| {
+                Self::new_from_iter(store, allocator, elems.iter())
+            })
+            .await
     }
 
     #[inline]
@@ -459,7 +614,7 @@ impl ArrayRef {
         assert!(self.comes_from_same_store(store));
         let gc_ref = self.inner.try_gc_ref(store)?;
         debug_assert!({
-            let header = store.gc_store()?.header(gc_ref);
+            let header = store.require_gc_store()?.header(gc_ref);
             header.kind().matches(VMGcKind::ArrayRef)
         });
         let arrayref = gc_ref.as_arrayref_unchecked();
@@ -468,7 +623,7 @@ impl ArrayRef {
 
     /// Get the values of this array's elements.
     ///
-    /// Note that `i8` and `i16` field values are zero-extended into
+    /// Note that `i8` and `i16` element values are zero-extended into
     /// `Val::I32(_)`s.
     ///
     /// # Errors
@@ -478,7 +633,7 @@ impl ArrayRef {
     /// # Panics
     ///
     /// Panics if this reference is associated with a different store.
-    pub fn elems<'a, T: 'a>(
+    pub fn elems<'a, T: 'static>(
         &'a self,
         store: impl Into<StoreContextMut<'a, T>>,
     ) -> Result<impl ExactSizeIterator<Item = Val> + 'a> {
@@ -493,7 +648,7 @@ impl ArrayRef {
         let store = AutoAssertNoGc::new(store);
 
         let gc_ref = self.inner.try_gc_ref(&store)?;
-        let header = store.gc_store()?.header(gc_ref);
+        let header = store.require_gc_store()?.header(gc_ref);
         debug_assert!(header.kind().matches(VMGcKind::ArrayRef));
 
         let len = self._len(&store)?;
@@ -546,7 +701,7 @@ impl ArrayRef {
     fn header<'a>(&self, store: &'a AutoAssertNoGc<'_>) -> Result<&'a VMGcHeader> {
         assert!(self.comes_from_same_store(&store));
         let gc_ref = self.inner.try_gc_ref(store)?;
-        Ok(store.gc_store()?.header(gc_ref))
+        Ok(store.require_gc_store()?.header(gc_ref))
     }
 
     fn arrayref<'a>(&self, store: &'a AutoAssertNoGc<'_>) -> Result<&'a VMArrayRef> {
@@ -556,7 +711,7 @@ impl ArrayRef {
         Ok(gc_ref.as_arrayref_unchecked())
     }
 
-    fn layout(&self, store: &AutoAssertNoGc<'_>) -> Result<GcArrayLayout> {
+    pub(crate) fn layout(&self, store: &AutoAssertNoGc<'_>) -> Result<GcArrayLayout> {
         assert!(self.comes_from_same_store(&store));
         let type_index = self.type_index(store)?;
         let layout = store
@@ -668,7 +823,7 @@ impl ArrayRef {
 
     pub(crate) fn type_index(&self, store: &StoreOpaque) -> Result<VMSharedTypeIndex> {
         let gc_ref = self.inner.try_gc_ref(store)?;
-        let header = store.gc_store()?.header(gc_ref);
+        let header = store.require_gc_store()?.header(gc_ref);
         debug_assert!(header.kind().matches(VMGcKind::ArrayRef));
         Ok(header.ty().expect("arrayrefs should have concrete types"))
     }
@@ -682,7 +837,7 @@ impl ArrayRef {
         store: &mut AutoAssertNoGc<'_>,
         gc_ref: VMGcRef,
     ) -> Rooted<Self> {
-        debug_assert!(!gc_ref.is_i31());
+        debug_assert!(gc_ref.is_arrayref(&*store.unwrap_gc_store().gc_heap));
         Rooted::new(store, gc_ref)
     }
 }
@@ -717,6 +872,12 @@ unsafe impl WasmTy for Rooted<ArrayRef> {
             | HeapType::I31
             | HeapType::Struct
             | HeapType::ConcreteStruct(_)
+            | HeapType::Cont
+            | HeapType::NoCont
+            | HeapType::ConcreteCont(_)
+            | HeapType::Exn
+            | HeapType::NoExn
+            | HeapType::ConcreteExn(_)
             | HeapType::None => bail!(
                 "type mismatch: expected `(ref {ty})`, got `(ref {})`",
                 self._ty(store)?,
@@ -781,7 +942,7 @@ unsafe impl WasmTy for Option<Rooted<ArrayRef>> {
     }
 }
 
-unsafe impl WasmTy for ManuallyRooted<ArrayRef> {
+unsafe impl WasmTy for OwnedRooted<ArrayRef> {
     #[inline]
     fn valtype() -> ValType {
         ValType::Ref(RefType::new(false, HeapType::Array))
@@ -811,6 +972,12 @@ unsafe impl WasmTy for ManuallyRooted<ArrayRef> {
             | HeapType::I31
             | HeapType::Struct
             | HeapType::ConcreteStruct(_)
+            | HeapType::Cont
+            | HeapType::NoCont
+            | HeapType::ConcreteCont(_)
+            | HeapType::Exn
+            | HeapType::NoExn
+            | HeapType::ConcreteExn(_)
             | HeapType::None => bail!(
                 "type mismatch: expected `(ref {ty})`, got `(ref {})`",
                 self._ty(store)?,
@@ -827,7 +994,7 @@ unsafe impl WasmTy for ManuallyRooted<ArrayRef> {
     }
 }
 
-unsafe impl WasmTy for Option<ManuallyRooted<ArrayRef>> {
+unsafe impl WasmTy for Option<OwnedRooted<ArrayRef>> {
     #[inline]
     fn valtype() -> ValType {
         ValType::ARRAYREF
@@ -847,9 +1014,7 @@ unsafe impl WasmTy for Option<ManuallyRooted<ArrayRef>> {
         ty: &HeapType,
     ) -> Result<()> {
         match self {
-            Some(s) => {
-                ManuallyRooted::<ArrayRef>::dynamic_concrete_type_check(s, store, nullable, ty)
-            }
+            Some(s) => OwnedRooted::<ArrayRef>::dynamic_concrete_type_check(s, store, nullable, ty),
             None => {
                 ensure!(
                     nullable,
@@ -866,11 +1031,11 @@ unsafe impl WasmTy for Option<ManuallyRooted<ArrayRef>> {
     }
 
     fn store(self, store: &mut AutoAssertNoGc<'_>, ptr: &mut MaybeUninit<ValRaw>) -> Result<()> {
-        <ManuallyRooted<ArrayRef>>::wasm_ty_option_store(self, store, ptr, ValRaw::anyref)
+        <OwnedRooted<ArrayRef>>::wasm_ty_option_store(self, store, ptr, ValRaw::anyref)
     }
 
     unsafe fn load(store: &mut AutoAssertNoGc<'_>, ptr: &ValRaw) -> Self {
-        <ManuallyRooted<ArrayRef>>::wasm_ty_option_load(
+        <OwnedRooted<ArrayRef>>::wasm_ty_option_load(
             store,
             ptr.get_anyref(),
             ArrayRef::from_cloned_gc_ref,

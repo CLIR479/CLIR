@@ -2,12 +2,12 @@
 //!
 //! The `unwind` test command runs each function through the full code generator pipeline.
 
-use crate::subtest::{run_filecheck, Context, SubTest};
+use crate::subtest::{Context, SubTest, run_filecheck};
 use cranelift_codegen::{ir, isa::unwind::UnwindInfo};
 use cranelift_reader::TestCommand;
 use gimli::{
-    write::{Address, EhFrame, EndianVec, FrameTable},
     LittleEndian,
+    write::{Address, EhFrame, EndianVec, FrameTable},
 };
 use std::borrow::Cow;
 
@@ -16,7 +16,7 @@ struct TestUnwind;
 pub fn subtest(parsed: &TestCommand) -> anyhow::Result<Box<dyn SubTest>> {
     assert_eq!(parsed.command, "unwind");
     if !parsed.options.is_empty() {
-        anyhow::bail!("No options allowed on {}", parsed);
+        anyhow::bail!("No options allowed on {parsed}");
     }
     Ok(Box::new(TestUnwind))
 }
@@ -63,7 +63,7 @@ impl SubTest for TestUnwind {
                 systemv::dump(&mut text, &eh_frame.0.into_vec(), isa.pointer_bytes())
             }
             Some(ui) => {
-                anyhow::bail!("Unexpected unwind info type: {:?}", ui);
+                anyhow::bail!("Unexpected unwind info type: {ui:?}");
             }
             None => {}
         }
@@ -108,7 +108,7 @@ mod windowsx64 {
         version: u8,
         flags: u8,
         prologue_size: u8,
-        #[allow(dead_code)]
+        #[expect(dead_code, reason = "may get used later")]
         unwind_code_count_raw: u8,
         frame_register: u8,
         frame_register_offset: u8,
@@ -560,9 +560,6 @@ mod systemv {
                     }
                     Nop => {
                         writeln!(w, "                DW_CFA_nop")?;
-                    }
-                    _ => {
-                        writeln!(w, "                DW_CFA_<unknown>")?;
                     }
                 },
             }

@@ -3,62 +3,161 @@ target pulley32
 
 function %trap() {
 block0:
-  trap user0
+  trap user1
 }
 
 ; VCode:
 ; block0:
-;   trap // code = User(0)
+;   trap // trap=TrapCode(1)
 ;
 ; Disassembled:
-;        0: 3d 00 00                        trap
+; trap
 
 function %trapnz(i64) {
 block0(v0: i64):
   v1 = iconst.i64 42
   v2 = icmp eq v0, v1
-  trapnz v2, user0
+  trapnz v2, user1
   return
 }
 
 ; VCode:
 ; block0:
-;   x3 = xconst8 42
-;   x3 = xeq64 x0, x3
-;   br_if x3, label2; jump label1
-; block1:
+;   trap_if_xeq64_i32 x0, 42 // code = TrapCode(1)
 ;   ret
-; block2:
-;   trap // code = User(0)
 ;
 ; Disassembled:
-;        0: 0e 03 2a                        xconst8 x3, 42
-;        3: 14 03 0c                        xeq64 x3, x0, x3
-;        6: 03 03 07 00 00 00               br_if x3, 0x7    // target = 0xd
-;        c: 00                              ret
-;        d: 3d 00 00                        trap
+; br_if_xeq64_i8 x0, 42, 0x8    // target = 0x8
+; ret
+; trap
 
 function %trapz(i64) {
 block0(v0: i64):
   v1 = iconst.i64 42
   v2 = icmp eq v0, v1
-  trapz v2, user0
+  trapz v2, user1
   return
 }
 
 ; VCode:
 ; block0:
-;   x3 = xconst8 42
-;   x3 = xeq64 x0, x3
-;   br_if x3, label2; jump label1
-; block2:
+;   trap_if_xneq64_i32 x0, 42 // code = TrapCode(1)
 ;   ret
-; block1:
-;   trap // code = User(0)
 ;
 ; Disassembled:
-;        0: 0e 03 2a                        xconst8 x3, 42
-;        3: 14 03 0c                        xeq64 x3, x0, x3
-;        6: 04 03 07 00 00 00               br_if_not x3, 0x7    // target = 0xd
-;        c: 00                              ret
-;        d: 3d 00 00                        trap
+; br_if_xneq64_i8 x0, 42, 0x8    // target = 0x8
+; ret
+; trap
+
+function %trapnz_icmp_fold(i64) {
+block0(v0: i64):
+  v1 = iconst.i64 42
+  v2 = icmp eq v0, v1
+  trapnz v2, user1
+  return
+}
+
+; VCode:
+; block0:
+;   trap_if_xeq64_i32 x0, 42 // code = TrapCode(1)
+;   ret
+;
+; Disassembled:
+; br_if_xeq64_i8 x0, 42, 0x8    // target = 0x8
+; ret
+; trap
+
+function %trapz_icmp_fold(i64) {
+block0(v0: i64):
+  v1 = iconst.i64 42
+  v2 = icmp eq v0, v1
+  trapz v2, user1
+  return
+}
+
+; VCode:
+; block0:
+;   trap_if_xneq64_i32 x0, 42 // code = TrapCode(1)
+;   ret
+;
+; Disassembled:
+; br_if_xneq64_i8 x0, 42, 0x8    // target = 0x8
+; ret
+; trap
+
+function %trapnz_iconst_fold(i64) {
+block0(v0: i64):
+  brif v0, block1, block2
+
+block1:
+  v1 = iconst.i64 42
+  trapnz v1, user1
+  return
+
+block2:
+  v2 = iconst.i64 0
+  trapnz v2, user1
+  return
+}
+
+; VCode:
+; block0:
+;   br_if_xneq64_i32 x0, 0, label2; jump label1
+; block1:
+;   xzero x4
+;   trap_if_xneq64_i32 x4, 0 // code = TrapCode(1)
+;   ret
+; block2:
+;   xconst8 x6, 42
+;   trap_if_xneq64_i32 x6, 0 // code = TrapCode(1)
+;   ret
+;
+; Disassembled:
+; br_if_xneq64_i8 x0, 0, 0x11    // target = 0x11
+; xzero x4
+; br_if_xneq64_i8 x4, 0, 0x13    // target = 0x1c
+; ret
+; xconst8 x6, 42
+; br_if_xneq64_i8 x6, 0, 0xb    // target = 0x1f
+; ret
+; trap
+; trap
+
+function %trapz_iconst_fold(i64) {
+block0(v0: i64):
+  brif v0, block1, block2
+
+block1:
+  v1 = iconst.i64 42
+  trapz v1, user1
+  return
+
+block2:
+  v2 = iconst.i64 0
+  trapz v2, user1
+  return
+}
+
+; VCode:
+; block0:
+;   br_if_xneq64_i32 x0, 0, label2; jump label1
+; block1:
+;   xzero x4
+;   trap_if_xeq64_i32 x4, 0 // code = TrapCode(1)
+;   ret
+; block2:
+;   xconst8 x6, 42
+;   trap_if_xeq64_i32 x6, 0 // code = TrapCode(1)
+;   ret
+;
+; Disassembled:
+; br_if_xneq64_i8 x0, 0, 0x11    // target = 0x11
+; xzero x4
+; br_if_xeq64_i8 x4, 0, 0x13    // target = 0x1c
+; ret
+; xconst8 x6, 42
+; br_if_xeq64_i8 x6, 0, 0xb    // target = 0x1f
+; ret
+; trap
+; trap
+

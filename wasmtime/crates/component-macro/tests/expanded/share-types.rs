@@ -6,11 +6,11 @@
 /// has been created through a [`Linker`](wasmtime::component::Linker).
 ///
 /// For more information see [`HttpInterface`] as well.
-pub struct HttpInterfacePre<T> {
+pub struct HttpInterfacePre<T: 'static> {
     instance_pre: wasmtime::component::InstancePre<T>,
     indices: HttpInterfaceIndices,
 }
-impl<T> Clone for HttpInterfacePre<T> {
+impl<T: 'static> Clone for HttpInterfacePre<T> {
     fn clone(&self) -> Self {
         Self {
             instance_pre: self.instance_pre.clone(),
@@ -18,7 +18,7 @@ impl<T> Clone for HttpInterfacePre<T> {
         }
     }
 }
-impl<_T> HttpInterfacePre<_T> {
+impl<_T: 'static> HttpInterfacePre<_T> {
     /// Creates a new copy of `HttpInterfacePre` bindings which can then
     /// be used to instantiate into a particular store.
     ///
@@ -27,7 +27,7 @@ impl<_T> HttpInterfacePre<_T> {
     pub fn new(
         instance_pre: wasmtime::component::InstancePre<_T>,
     ) -> wasmtime::Result<Self> {
-        let indices = HttpInterfaceIndices::new(instance_pre.component())?;
+        let indices = HttpInterfaceIndices::new(&instance_pre)?;
         Ok(Self { instance_pre, indices })
     }
     pub fn engine(&self) -> &wasmtime::Engine {
@@ -49,6 +49,17 @@ impl<_T> HttpInterfacePre<_T> {
     ) -> wasmtime::Result<HttpInterface> {
         let mut store = store.as_context_mut();
         let instance = self.instance_pre.instantiate(&mut store)?;
+        self.indices.load(&mut store, &instance)
+    }
+}
+impl<_T: Send + 'static> HttpInterfacePre<_T> {
+    /// Same as [`Self::instantiate`], except with `async`.
+    pub async fn instantiate_async(
+        &self,
+        mut store: impl wasmtime::AsContextMut<Data = _T>,
+    ) -> wasmtime::Result<HttpInterface> {
+        let mut store = store.as_context_mut();
+        let instance = self.instance_pre.instantiate_async(&mut store).await?;
         self.indices.load(&mut store, &instance)
     }
 }
@@ -82,11 +93,6 @@ pub struct HttpInterfaceIndices {
 /// * If you've instantiated the instance yourself already
 ///   then you can use [`HttpInterface::new`].
 ///
-/// * You can also access the guts of instantiation through
-///   [`HttpInterfaceIndices::new_instance`] followed
-///   by [`HttpInterfaceIndices::load`] to crate an instance of this
-///   type.
-///
 /// These methods are all equivalent to one another and move
 /// around the tradeoff of what work is performed when.
 ///
@@ -97,37 +103,18 @@ pub struct HttpInterface {
     interface0: exports::http_handler::Guest,
 }
 const _: () = {
-    #[allow(unused_imports)]
-    use wasmtime::component::__internal::anyhow;
     impl HttpInterfaceIndices {
         /// Creates a new copy of `HttpInterfaceIndices` bindings which can then
         /// be used to instantiate into a particular store.
         ///
         /// This method may fail if the component does not have the
         /// required exports.
-        pub fn new(
-            component: &wasmtime::component::Component,
+        pub fn new<_T>(
+            _instance_pre: &wasmtime::component::InstancePre<_T>,
         ) -> wasmtime::Result<Self> {
-            let _component = component;
-            let interface0 = exports::http_handler::GuestIndices::new(_component)?;
-            Ok(HttpInterfaceIndices { interface0 })
-        }
-        /// Creates a new instance of [`HttpInterfaceIndices`] from an
-        /// instantiated component.
-        ///
-        /// This method of creating a [`HttpInterface`] will perform string
-        /// lookups for all exports when this method is called. This
-        /// will only succeed if the provided instance matches the
-        /// requirements of [`HttpInterface`].
-        pub fn new_instance(
-            mut store: impl wasmtime::AsContextMut,
-            instance: &wasmtime::component::Instance,
-        ) -> wasmtime::Result<Self> {
-            let _instance = instance;
-            let interface0 = exports::http_handler::GuestIndices::new_instance(
-                &mut store,
-                _instance,
-            )?;
+            let _component = _instance_pre.component();
+            let _instance_type = _instance_pre.instance_type();
+            let interface0 = exports::http_handler::GuestIndices::new(_instance_pre)?;
             Ok(HttpInterfaceIndices { interface0 })
         }
         /// Uses the indices stored in `self` to load an instance
@@ -140,6 +127,7 @@ const _: () = {
             mut store: impl wasmtime::AsContextMut,
             instance: &wasmtime::component::Instance,
         ) -> wasmtime::Result<HttpInterface> {
+            let _ = &mut store;
             let _instance = instance;
             let interface0 = self.interface0.load(&mut store, &_instance)?;
             Ok(HttpInterface { interface0 })
@@ -149,31 +137,46 @@ const _: () = {
         /// Convenience wrapper around [`HttpInterfacePre::new`] and
         /// [`HttpInterfacePre::instantiate`].
         pub fn instantiate<_T>(
-            mut store: impl wasmtime::AsContextMut<Data = _T>,
+            store: impl wasmtime::AsContextMut<Data = _T>,
             component: &wasmtime::component::Component,
             linker: &wasmtime::component::Linker<_T>,
         ) -> wasmtime::Result<HttpInterface> {
             let pre = linker.instantiate_pre(component)?;
             HttpInterfacePre::new(pre)?.instantiate(store)
         }
-        /// Convenience wrapper around [`HttpInterfaceIndices::new_instance`] and
+        /// Convenience wrapper around [`HttpInterfaceIndices::new`] and
         /// [`HttpInterfaceIndices::load`].
         pub fn new(
             mut store: impl wasmtime::AsContextMut,
             instance: &wasmtime::component::Instance,
         ) -> wasmtime::Result<HttpInterface> {
-            let indices = HttpInterfaceIndices::new_instance(&mut store, instance)?;
-            indices.load(store, instance)
+            let indices = HttpInterfaceIndices::new(&instance.instance_pre(&store))?;
+            indices.load(&mut store, instance)
         }
-        pub fn add_to_linker<T, U>(
+        /// Convenience wrapper around [`HttpInterfacePre::new`] and
+        /// [`HttpInterfacePre::instantiate_async`].
+        pub async fn instantiate_async<_T>(
+            store: impl wasmtime::AsContextMut<Data = _T>,
+            component: &wasmtime::component::Component,
+            linker: &wasmtime::component::Linker<_T>,
+        ) -> wasmtime::Result<HttpInterface>
+        where
+            _T: Send,
+        {
+            let pre = linker.instantiate_pre(component)?;
+            HttpInterfacePre::new(pre)?.instantiate_async(store).await
+        }
+        pub fn add_to_linker<T, D>(
             linker: &mut wasmtime::component::Linker<T>,
-            get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
+            host_getter: fn(&mut T) -> D::Data<'_>,
         ) -> wasmtime::Result<()>
         where
-            U: foo::foo::http_types::Host + http_fetch::Host,
+            D: foo::foo::http_types::HostWithStore + http_fetch::HostWithStore,
+            for<'a> D::Data<'a>: foo::foo::http_types::Host + http_fetch::Host,
+            T: 'static,
         {
-            foo::foo::http_types::add_to_linker(linker, get)?;
-            http_fetch::add_to_linker(linker, get)?;
+            foo::foo::http_types::add_to_linker::<T, D>(linker, host_getter)?;
+            http_fetch::add_to_linker::<T, D>(linker, host_getter)?;
             Ok(())
         }
         pub fn http_handler(&self) -> &exports::http_handler::Guest {
@@ -186,7 +189,7 @@ pub mod foo {
         #[allow(clippy::all)]
         pub mod http_types {
             #[allow(unused_imports)]
-            use wasmtime::component::__internal::anyhow;
+            use wasmtime::component::__internal::Box;
             #[derive(wasmtime::component::ComponentType)]
             #[derive(wasmtime::component::Lift)]
             #[derive(wasmtime::component::Lower)]
@@ -225,43 +228,32 @@ pub mod foo {
                     4 == < Response as wasmtime::component::ComponentType >::ALIGN32
                 );
             };
-            pub trait Host {}
-            pub trait GetHost<
-                T,
-            >: Fn(T) -> <Self as GetHost<T>>::Host + Send + Sync + Copy + 'static {
-                type Host: Host;
-            }
-            impl<F, T, O> GetHost<T> for F
+            pub trait HostWithStore: wasmtime::component::HasData {}
+            impl<_T: ?Sized> HostWithStore for _T
             where
-                F: Fn(T) -> O + Send + Sync + Copy + 'static,
-                O: Host,
-            {
-                type Host = O;
-            }
-            pub fn add_to_linker_get_host<T>(
+                _T: wasmtime::component::HasData,
+            {}
+            pub trait Host {}
+            impl<_T: Host + ?Sized> Host for &mut _T {}
+            pub fn add_to_linker<T, D>(
                 linker: &mut wasmtime::component::Linker<T>,
-                host_getter: impl for<'a> GetHost<&'a mut T>,
-            ) -> wasmtime::Result<()> {
+                host_getter: fn(&mut T) -> D::Data<'_>,
+            ) -> wasmtime::Result<()>
+            where
+                D: HostWithStore,
+                for<'a> D::Data<'a>: Host,
+                T: 'static,
+            {
                 let mut inst = linker.instance("foo:foo/http-types")?;
                 Ok(())
             }
-            pub fn add_to_linker<T, U>(
-                linker: &mut wasmtime::component::Linker<T>,
-                get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-            ) -> wasmtime::Result<()>
-            where
-                U: Host,
-            {
-                add_to_linker_get_host(linker, get)
-            }
-            impl<_T: Host + ?Sized> Host for &mut _T {}
         }
     }
 }
 #[allow(clippy::all)]
 pub mod http_fetch {
     #[allow(unused_imports)]
-    use wasmtime::component::__internal::anyhow;
+    use wasmtime::component::__internal::Box;
     pub type Request = super::foo::foo::http_types::Request;
     const _: () = {
         assert!(8 == < Request as wasmtime::component::ComponentType >::SIZE32);
@@ -272,25 +264,28 @@ pub mod http_fetch {
         assert!(8 == < Response as wasmtime::component::ComponentType >::SIZE32);
         assert!(4 == < Response as wasmtime::component::ComponentType >::ALIGN32);
     };
+    pub trait HostWithStore: wasmtime::component::HasData {}
+    impl<_T: ?Sized> HostWithStore for _T
+    where
+        _T: wasmtime::component::HasData,
+    {}
     pub trait Host {
         fn fetch_request(&mut self, request: Request) -> Response;
     }
-    pub trait GetHost<
-        T,
-    >: Fn(T) -> <Self as GetHost<T>>::Host + Send + Sync + Copy + 'static {
-        type Host: Host;
+    impl<_T: Host + ?Sized> Host for &mut _T {
+        fn fetch_request(&mut self, request: Request) -> Response {
+            Host::fetch_request(*self, request)
+        }
     }
-    impl<F, T, O> GetHost<T> for F
-    where
-        F: Fn(T) -> O + Send + Sync + Copy + 'static,
-        O: Host,
-    {
-        type Host = O;
-    }
-    pub fn add_to_linker_get_host<T>(
+    pub fn add_to_linker<T, D>(
         linker: &mut wasmtime::component::Linker<T>,
-        host_getter: impl for<'a> GetHost<&'a mut T>,
-    ) -> wasmtime::Result<()> {
+        host_getter: fn(&mut T) -> D::Data<'_>,
+    ) -> wasmtime::Result<()>
+    where
+        D: HostWithStore,
+        for<'a> D::Data<'a>: Host,
+        T: 'static,
+    {
         let mut inst = linker.instance("http-fetch")?;
         inst.func_wrap(
             "fetch-request",
@@ -302,26 +297,12 @@ pub mod http_fetch {
         )?;
         Ok(())
     }
-    pub fn add_to_linker<T, U>(
-        linker: &mut wasmtime::component::Linker<T>,
-        get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-    ) -> wasmtime::Result<()>
-    where
-        U: Host,
-    {
-        add_to_linker_get_host(linker, get)
-    }
-    impl<_T: Host + ?Sized> Host for &mut _T {
-        fn fetch_request(&mut self, request: Request) -> Response {
-            Host::fetch_request(*self, request)
-        }
-    }
 }
 pub mod exports {
     #[allow(clippy::all)]
     pub mod http_handler {
         #[allow(unused_imports)]
-        use wasmtime::component::__internal::anyhow;
+        use wasmtime::component::__internal::Box;
         pub type Request = super::super::foo::foo::http_types::Request;
         const _: () = {
             assert!(8 == < Request as wasmtime::component::ComponentType >::SIZE32);
@@ -332,6 +313,7 @@ pub mod exports {
             assert!(8 == < Response as wasmtime::component::ComponentType >::SIZE32);
             assert!(4 == < Response as wasmtime::component::ComponentType >::ALIGN32);
         };
+        #[derive(Clone)]
         pub struct Guest {
             handle_request: wasmtime::component::Func,
         }
@@ -346,44 +328,25 @@ pub mod exports {
             ///
             /// This constructor can be used to front-load string lookups to find exports
             /// within a component.
-            pub fn new(
-                component: &wasmtime::component::Component,
+            pub fn new<_T>(
+                _instance_pre: &wasmtime::component::InstancePre<_T>,
             ) -> wasmtime::Result<GuestIndices> {
-                let (_, instance) = component
-                    .export_index(None, "http-handler")
+                let instance = _instance_pre
+                    .component()
+                    .get_export_index(None, "http-handler")
                     .ok_or_else(|| {
-                        anyhow::anyhow!("no exported instance named `http-handler`")
+                        wasmtime::format_err!(
+                            "no exported instance named `http-handler`"
+                        )
                     })?;
-                Self::_new(|name| {
-                    component.export_index(Some(&instance), name).map(|p| p.1)
-                })
-            }
-            /// This constructor is similar to [`GuestIndices::new`] except that it
-            /// performs string lookups after instantiation time.
-            pub fn new_instance(
-                mut store: impl wasmtime::AsContextMut,
-                instance: &wasmtime::component::Instance,
-            ) -> wasmtime::Result<GuestIndices> {
-                let instance_export = instance
-                    .get_export(&mut store, None, "http-handler")
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("no exported instance named `http-handler`")
-                    })?;
-                Self::_new(|name| {
-                    instance.get_export(&mut store, Some(&instance_export), name)
-                })
-            }
-            fn _new(
-                mut lookup: impl FnMut(
-                    &str,
-                ) -> Option<wasmtime::component::ComponentExportIndex>,
-            ) -> wasmtime::Result<GuestIndices> {
                 let mut lookup = move |name| {
-                    lookup(name)
+                    _instance_pre
+                        .component()
+                        .get_export_index(Some(&instance), name)
                         .ok_or_else(|| {
-                            anyhow::anyhow!(
+                            wasmtime::format_err!(
                                 "instance export `http-handler` does \
-            not have export `{name}`"
+              not have export `{name}`"
                             )
                         })
                 };
@@ -396,9 +359,11 @@ pub mod exports {
                 mut store: impl wasmtime::AsContextMut,
                 instance: &wasmtime::component::Instance,
             ) -> wasmtime::Result<Guest> {
+                let _instance = instance;
+                let _instance_pre = _instance.instance_pre(&store);
+                let _instance_type = _instance_pre.instance_type();
                 let mut store = store.as_context_mut();
                 let _ = &mut store;
-                let _instance = instance;
                 let handle_request = *_instance
                     .get_typed_func::<
                         (&Request,),
@@ -421,7 +386,6 @@ pub mod exports {
                     >::new_unchecked(self.handle_request)
                 };
                 let (ret0,) = callee.call(store.as_context_mut(), (arg0,))?;
-                callee.post_return(store.as_context_mut())?;
                 Ok(ret0)
             }
         }

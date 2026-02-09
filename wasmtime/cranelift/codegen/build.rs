@@ -31,6 +31,7 @@ fn main() {
     let target_triple = env::var("TARGET").expect("The TARGET environment variable must be set");
 
     let all_arch = env::var("CARGO_FEATURE_ALL_ARCH").is_ok();
+    let all_native_arch = env::var("CARGO_FEATURE_ALL_NATIVE_ARCH").is_ok();
 
     let mut isas = meta::isa::Isa::all()
         .iter()
@@ -47,52 +48,41 @@ fn main() {
         .collect::<Vec<_>>();
 
     // Don't require host isa if under 'all-arch' feature.
-    let host_isa = env::var("CARGO_FEATURE_HOST_ARCH").is_ok() && !all_arch;
+    let host_isa = env::var("CARGO_FEATURE_HOST_ARCH").is_ok() && !all_native_arch;
 
     if isas.is_empty() || host_isa {
         // Try to match native target.
         let target_name = target_triple.split('-').next().unwrap();
-        let isa = meta::isa_from_arch(&target_name).expect("error when identifying target");
-        println!("cargo:rustc-cf-constructor=feature=\"{isa}\"");
-        isas.push(isa);
+        if let Ok(isa) = meta::isa_from_arch(&target_name) {
+            println!("cargo:rustc-cfg=feature=\"{isa}\"");
+            isas.push(isa);
+        }
     }
 
     let cur_dir = env::current_dir().expect("Can't access current working directory");
     let crate_dir = cur_dir.as_path();
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=ISLE_SOURCE_DIR");
 
-    let explicit_isle_dir = &crate_dir.join("isle_generated_code");
-    #[cfg(feature = "isle-in-source-tree")]
-    let isle_dir = explicit_isle_dir;
-    #[cfg(not(feature = "isle-in-source-tree"))]
-    let isle_dir = &out_dir;
+    let isle_dir = if let Ok(path) = std::env::var("ISLE_SOURCE_DIR") {
+        // This will canonicalize any relative path in terms of the
+        // crate root, and will take any absolute path as overriding the
+        // `crate_dir`.
+        crate_dir.join(&path)
+    } else {
+        out_dir.into()
+    };
 
-    #[cfg(feature = "isle-in-source-tree")]
-    {
-        std::fs::create_dir_all(isle_dir).expect("Could not create ISLE source directory");
-    }
-    #[cfg(not(feature = "isle-in-source-tree"))]
-    {
-        if explicit_isle_dir.is_dir() {
-            eprintln!(concat!(
-                "Error: directory isle_generated_code/ exists but is only used when\n",
-                "`--feature isle-in-source-tree` is specified. To prevent confusion,\n",
-                "this build script requires the directory to be removed when reverting\n",
-                "to the usual generated code in target/. Please delete the directory and\n",
-                "re-run this build.\n",
-            ));
-            std::process::exit(1);
-        }
-    }
+    std::fs::create_dir_all(&isle_dir).expect("Could not create ISLE source directory");
 
-    if let Err(err) = meta::generate(&isas, &out_dir, isle_dir) {
+    if let Err(err) = meta::generate(&isas, &out_dir, &isle_dir) {
         eprintln!("Error: {err}");
         process::exit(1);
     }
 
     if &std::env::var("SKIP_ISLE").unwrap_or("0".to_string()) != "1" {
-        if let Err(err) = build_isle(crate_dir, isle_dir) {
+        if let Err(err) = build_isle(crate_dir, &isle_dir) {
             eprintln!("Error: {err}");
             process::exit(1);
         }
@@ -221,13 +211,28 @@ fn run_compilation(compilation: &IsleCompilation) -> Result<(), Errors> {
         // https://github.com/rust-lang/rust/issues/47995.)
         options.exclude_global_allow_pragmas = true;
 
+        // When `cranelift-codegen` is built with detailed tracing enabled, also
+        // ask the ISLE compiler to emit `log::{debug,trace}!` invocations in
+        // the generated code to help debug rule matching.
+        options.emit_logging = std::env::var("CARGO_FEATURE_TRACE_LOG").is_ok();
+
+        // Enable optional match-arm splitting in iterator terms for faster compile times.
+        options.split_match_arms = std::env::var("CARGO_FEATURE_ISLE_SPLIT_MATCH").is_ok();
+        if let Ok(value) = std::env::var("ISLE_SPLIT_MATCH_THRESHOLD") {
+            options.match_arm_split_threshold = Some(value.parse().unwrap_or_else(|err| {
+                panic!("invalid ISLE_SPLIT_MATCH_THRESHOLD value '{value}': {err}");
+            }));
+        }
+
+        if let Ok(out_dir) = std::env::var("OUT_DIR") {
+            options.prefixes.push(isle::codegen::Prefix {
+                prefix: out_dir,
+                name: "<OUT_DIR>".to_string(),
+            })
+        };
+
         isle::compile::from_files(file_paths, &options)?
     };
-
-    let code = rustfmt(&code).unwrap_or_else(|e| {
-        println!("cargo:warning=Failed to run `rustfmt` on ISLE-generated code: {e:?}");
-        code
-    });
 
     eprintln!(
         "Writing ISLE-generated Rust code to {}",
@@ -237,31 +242,4 @@ fn run_compilation(compilation: &IsleCompilation) -> Result<(), Errors> {
         .map_err(|e| Errors::from_io(e, "failed writing output"))?;
 
     Ok(())
-}
-
-fn rustfmt(code: &str) -> std::io::Result<String> {
-    use std::io::Write;
-
-    let mut rustfmt = std::process::Command::new("rustfmt")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()?;
-
-    let mut stdin = rustfmt.stdin.take().unwrap();
-    stdin.write_all(code.as_bytes())?;
-    drop(stdin);
-
-    let mut stdout = rustfmt.stdout.take().unwrap();
-    let mut data = vec![];
-    stdout.read_to_end(&mut data)?;
-
-    let status = rustfmt.wait()?;
-    if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("`rustfmt` exited with status {status}"),
-        ));
-    }
-
-    Ok(String::from_utf8(data).expect("rustfmt always writs utf-8 to stdout"))
 }

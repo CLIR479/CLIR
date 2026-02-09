@@ -1,11 +1,8 @@
-use anyhow::Error;
 use std::sync::Arc;
 use tokio::time::Duration;
+use wasmtime::Error;
 use wasmtime::{Config, Engine, Linker, Module, Store};
-// For this example we want to use the async version of wasi_common.
-// Notably, this version of wasi uses a scheduler that will async yield
-// when sleeping in `poll_oneoff`.
-use wasi_common::{tokio::WasiCtxBuilder, WasiCtx};
+use wasmtime_wasi::{WasiCtx, p1::WasiP1Ctx};
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -42,15 +39,14 @@ async fn main() -> Result<(), Error> {
 struct Environment {
     engine: Engine,
     module: Module,
-    linker: Arc<Linker<WasiCtx>>,
+    linker: Arc<Linker<WasiP1Ctx>>,
 }
 
 impl Environment {
     pub fn new() -> Result<Self, Error> {
         let mut config = Config::new();
-        // We need this engine's `Store`s to be async, and consume fuel, so
-        // that they can co-operatively yield during execution.
-        config.async_support(true);
+        // Consume fuel for guests so that they can co-operatively yield during
+        // execution.
         config.consume_fuel(true);
 
         let engine = Engine::new(&config)?;
@@ -61,7 +57,7 @@ impl Environment {
         // adds WASI functions to the linker, notably the async versions built
         // on tokio.
         let mut linker = Linker::new(&engine);
-        wasi_common::tokio::add_to_linker(&mut linker, |cx| cx)?;
+        wasmtime_wasi::p1::add_to_linker_async(&mut linker, |cx| cx)?;
 
         Ok(Self {
             engine,
@@ -86,12 +82,12 @@ impl Inputs {
 }
 
 async fn run_wasm(inputs: Inputs) -> Result<(), Error> {
-    let wasi = WasiCtxBuilder::new()
+    let wasi = WasiCtx::builder()
         // Let wasi print to this process's stdout.
         .inherit_stdout()
         // Set an environment variable so the wasm knows its name.
-        .env("NAME", &inputs.name)?
-        .build();
+        .env("NAME", &inputs.name)
+        .build_p1();
     let mut store = Store::new(&inputs.env.engine, wasi);
 
     // Put effectively unlimited fuel so it can run forever.

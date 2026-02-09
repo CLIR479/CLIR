@@ -93,9 +93,7 @@ fn test_limits() -> Result<()> {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn test_limits_async() -> Result<()> {
-    let mut config = Config::new();
-    config.async_support(true);
-    let engine = Engine::new(&config).unwrap();
+    let engine = Engine::default();
     let module = Module::new(
         &engine,
         r#"(module (memory (export "m") 0) (table (export "t") 0 funcref))"#,
@@ -103,7 +101,7 @@ async fn test_limits_async() -> Result<()> {
 
     struct LimitsAsync {
         memory_size: usize,
-        table_elements: u32,
+        table_elements: usize,
     }
     #[async_trait::async_trait]
     impl ResourceLimiterAsync for LimitsAsync {
@@ -117,9 +115,9 @@ async fn test_limits_async() -> Result<()> {
         }
         async fn table_growing(
             &mut self,
-            _current: u32,
-            desired: u32,
-            _maximum: Option<u32>,
+            _current: usize,
+            desired: usize,
+            _maximum: Option<usize>,
         ) -> Result<bool> {
             Ok(desired <= self.table_elements)
         }
@@ -355,7 +353,7 @@ fn test_pooling_allocator_initial_limits_exceeded() -> Result<()> {
     pool.total_memories(2)
         .max_memories_per_module(2)
         .max_memory_size(5 << 16)
-        .memory_protection_keys(MpkEnabled::Disable);
+        .memory_protection_keys(Enabled::No);
     let mut config = Config::new();
     config.wasm_multi_memory(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
@@ -419,9 +417,9 @@ impl ResourceLimiter for MemoryContext {
     }
     fn table_growing(
         &mut self,
-        _current: u32,
-        _desired: u32,
-        _maximum: Option<u32>,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
     ) -> Result<bool> {
         Ok(true)
     }
@@ -533,9 +531,9 @@ impl ResourceLimiterAsync for MemoryContext {
     }
     async fn table_growing(
         &mut self,
-        _current: u32,
-        _desired: u32,
-        _maximum: Option<u32>,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
     ) -> Result<bool> {
         Ok(true)
     }
@@ -544,9 +542,7 @@ impl ResourceLimiterAsync for MemoryContext {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn test_custom_memory_limiter_async() -> Result<()> {
-    let mut config = Config::new();
-    config.async_support(true);
-    let engine = Engine::new(&config).unwrap();
+    let engine = Engine::default();
     let mut linker = Linker::new(&engine);
 
     // This approximates a function that would "allocate" resources that the host tracks.
@@ -626,8 +622,8 @@ async fn test_custom_memory_limiter_async() -> Result<()> {
 }
 
 struct TableContext {
-    elements_used: u32,
-    element_limit: u32,
+    elements_used: usize,
+    element_limit: usize,
     limit_exceeded: bool,
 }
 
@@ -640,9 +636,14 @@ impl ResourceLimiter for TableContext {
     ) -> Result<bool> {
         Ok(true)
     }
-    fn table_growing(&mut self, current: u32, desired: u32, maximum: Option<u32>) -> Result<bool> {
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool> {
         // Check if the desired exceeds a maximum (either from Wasm or from the host)
-        assert!(desired < maximum.unwrap_or(u32::MAX));
+        assert!(desired < maximum.unwrap_or(usize::MAX));
         assert_eq!(current, self.elements_used);
         Ok(if desired > self.element_limit {
             self.limit_exceeded = true;
@@ -704,8 +705,8 @@ struct FailureDetector {
     /// Display impl of most recent call to memory_grow_failed
     memory_error: Option<String>,
     /// Arguments of most recent call to table_growing
-    table_current: u32,
-    table_desired: u32,
+    table_current: usize,
+    table_desired: usize,
     /// Display impl of most recent call to table_grow_failed
     table_error: Option<String>,
 }
@@ -721,16 +722,21 @@ impl ResourceLimiter for FailureDetector {
         self.memory_desired = desired;
         Ok(true)
     }
-    fn memory_grow_failed(&mut self, err: anyhow::Error) -> Result<()> {
+    fn memory_grow_failed(&mut self, err: wasmtime::Error) -> Result<()> {
         self.memory_error = Some(err.to_string());
         Ok(())
     }
-    fn table_growing(&mut self, current: u32, desired: u32, _maximum: Option<u32>) -> Result<bool> {
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool> {
         self.table_current = current;
         self.table_desired = desired;
         Ok(true)
     }
-    fn table_grow_failed(&mut self, err: anyhow::Error) -> Result<()> {
+    fn table_grow_failed(&mut self, err: wasmtime::Error) -> Result<()> {
         self.table_error = Some(err.to_string());
         Ok(())
     }
@@ -825,22 +831,22 @@ impl ResourceLimiterAsync for FailureDetector {
         self.memory_desired = desired;
         Ok(true)
     }
-    fn memory_grow_failed(&mut self, err: anyhow::Error) -> Result<()> {
+    fn memory_grow_failed(&mut self, err: wasmtime::Error) -> Result<()> {
         self.memory_error = Some(err.to_string());
         Ok(())
     }
 
     async fn table_growing(
         &mut self,
-        current: u32,
-        desired: u32,
-        _maximum: Option<u32>,
+        current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
     ) -> Result<bool> {
         self.table_current = current;
         self.table_desired = desired;
         Ok(true)
     }
-    fn table_grow_failed(&mut self, err: anyhow::Error) -> Result<()> {
+    fn table_grow_failed(&mut self, err: wasmtime::Error) -> Result<()> {
         self.table_error = Some(err.to_string());
         Ok(())
     }
@@ -855,10 +861,9 @@ async fn custom_limiter_async_detect_grow_failure() -> Result<()> {
     let mut pool = crate::small_pool_config();
     pool.max_memory_size(10 << 16).table_elements(10);
     let mut config = Config::new();
-    config.async_support(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
     let engine = Engine::new(&config).unwrap();
-    let linker = Linker::new(&engine);
+    let linker = Linker::<FailureDetector>::new(&engine);
 
     let module = Module::new(
         &engine,
@@ -941,9 +946,9 @@ impl ResourceLimiter for Panic {
     }
     fn table_growing(
         &mut self,
-        _current: u32,
-        _desired: u32,
-        _maximum: Option<u32>,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
     ) -> Result<bool> {
         panic!("resource limiter table growing");
     }
@@ -960,9 +965,9 @@ impl ResourceLimiterAsync for Panic {
     }
     async fn table_growing(
         &mut self,
-        _current: u32,
-        _desired: u32,
-        _maximum: Option<u32>,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
     ) -> Result<bool> {
         panic!("async resource limiter table growing");
     }
@@ -1036,10 +1041,8 @@ fn panic_in_table_limiter() {
 #[should_panic(expected = "async resource limiter memory growing")]
 #[cfg_attr(miri, ignore)]
 async fn panic_in_async_memory_limiter() {
-    let mut config = Config::new();
-    config.async_support(true);
-    let engine = Engine::new(&config).unwrap();
-    let linker = Linker::new(&engine);
+    let engine = Engine::default();
+    let linker = Linker::<Panic>::new(&engine);
 
     let module = Module::new(&engine, r#"(module (memory (export "m") 0))"#).unwrap();
 
@@ -1058,10 +1061,8 @@ async fn panic_in_async_memory_limiter() {
 async fn panic_in_async_memory_limiter_wasm_stack() {
     // Like the test above, except the memory.grow happens in
     // wasm code instead of a host function call.
-    let mut config = Config::new();
-    config.async_support(true);
-    let engine = Engine::new(&config).unwrap();
-    let linker = Linker::new(&engine);
+    let engine = Engine::default();
+    let linker = Linker::<Panic>::new(&engine);
 
     let module = Module::new(
         &engine,
@@ -1088,10 +1089,8 @@ async fn panic_in_async_memory_limiter_wasm_stack() {
 #[should_panic(expected = "async resource limiter table growing")]
 #[cfg_attr(miri, ignore)]
 async fn panic_in_async_table_limiter() {
-    let mut config = Config::new();
-    config.async_support(true);
-    let engine = Engine::new(&config).unwrap();
-    let linker = Linker::new(&engine);
+    let engine = Engine::default();
+    let linker = Linker::<Panic>::new(&engine);
 
     let module = Module::new(&engine, r#"(module (table (export "t") 0 funcref))"#).unwrap();
 

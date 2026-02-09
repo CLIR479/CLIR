@@ -49,10 +49,70 @@ enum wasmtime_trap_code_enum {
   WASMTIME_TRAP_CODE_INTERRUPT,
   /// Execution has run out of the configured fuel amount.
   WASMTIME_TRAP_CODE_OUT_OF_FUEL,
+  /// Used to indicate that a trap was raised by atomic wait operations on non
+  /// shared memory.
+  WASMTIME_TRAP_CODE_ATOMIC_WAIT_NON_SHARED_MEMORY,
+  /// Call to a null reference.
+  WASMTIME_TRAP_CODE_NULL_REFERENCE,
+  /// Attempt to access beyond the bounds of an array.
+  WASMTIME_TRAP_CODE_ARRAY_OUT_OF_BOUNDS,
+  /// Attempted an allocation that was too large to succeed.
+  WASMTIME_TRAP_CODE_ALLOCATION_TOO_LARGE,
+  /// Attempted to cast a reference to a type that it is not an instance of.
+  WASMTIME_TRAP_CODE_CAST_FAILURE,
+  /// When the `component-model` feature is enabled this trap represents a
+  /// scenario where one component tried to call another component but it
+  /// would have violated the reentrance rules of the component model,
+  /// triggering a trap instead.
+  WASMTIME_TRAP_CODE_CANNOT_ENTER_COMPONENT,
+  /// Async-lifted export failed to produce a result by calling `task.return`
+  /// before returning `STATUS_DONE` and/or after all host tasks completed.
+  WASMTIME_TRAP_CODE_NO_ASYNC_RESULT,
+  /// We are suspending to a tag for which there is no active handler.
+  WASMTIME_TRAP_CODE_UNHANDLED_TAG,
+  /// Attempt to resume a continuation twice.
+  WASMTIME_TRAP_CODE_CONTINUATION_ALREADY_CONSUMED,
+  /// A Pulley opcode was executed at runtime when the opcode was disabled at
+  /// compile time.
+  WASMTIME_TRAP_CODE_DISABLED_OPCODE,
+  /// Async event loop deadlocked; i.e. it cannot make further progress given
+  /// that all host tasks have completed and any/all host-owned stream/future
+  /// handles have been dropped.
+  WASMTIME_TRAP_CODE_ASYNC_DEADLOCK,
+  /// When the `component-model` feature is enabled this trap represents a
+  /// scenario where a component instance tried to call an import or intrinsic
+  /// when it wasn't allowed to, e.g. from a post-return function.
+  WASMTIME_TRAP_CODE_CANNOT_LEAVE_COMPONENT,
+  /// A synchronous task attempted to make a potentially blocking call prior
+  /// to returning.
+  WASMTIME_TRAP_CODE_CANNOT_BLOCK_SYNC_TASK,
+  /// A component tried to lift a `char` with an invalid bit pattern.
+  WASMTIME_TRAP_CODE_INVALID_CHAR,
+  /// Debug assertion generated for a fused adapter regarding the expected
+  /// completion of a string encoding operation.
+  WASMTIME_TRAP_CODE_DEBUG_ASSERT_STRING_ENCODING_FINISHED,
+  /// Debug assertion generated for a fused adapter regarding a string
+  /// encoding operation.
+  WASMTIME_TRAP_CODE_DEBUG_ASSERT_EQUAL_CODE_UNITS,
+  /// Debug assertion generated for a fused adapter regarding the alignment of
+  /// a pointer.
+  WASMTIME_TRAP_CODE_DEBUG_ASSERT_POINTER_ALIGNED,
+  /// Debug assertion generated for a fused adapter regarding the upper bits
+  /// of a 64-bit value.
+  WASMTIME_TRAP_CODE_DEBUG_ASSERT_UPPER_BITS_UNSET,
+  /// A component tried to lift or lower a string past the end of its memory.
+  WASMTIME_TRAP_CODE_STRING_OUT_OF_BOUNDS,
+  /// A component tried to lift or lower a list past the end of its memory.
+  WASMTIME_TRAP_CODE_LIST_OUT_OF_BOUNDS,
+  /// A component used an invalid discriminant when lowering a variant value.
+  WASMTIME_TRAP_CODE_INVALID_DISCRIMINANT,
+  /// A component passed an unaligned pointer when lifting or lowering a
+  /// value.
+  WASMTIME_TRAP_CODE_UNALIGNED_POINTER,
 };
 
 /**
- * \brief Creates a new trap.
+ * \brief Creates a new trap with the given message.
  *
  * \param msg the message to associate with this trap
  * \param msg_len the byte length of `msg`
@@ -60,6 +120,15 @@ enum wasmtime_trap_code_enum {
  * The #wasm_trap_t returned is owned by the caller.
  */
 WASM_API_EXTERN wasm_trap_t *wasmtime_trap_new(const char *msg, size_t msg_len);
+
+/**
+ * \brief Creates a new trap from the given trap code.
+ *
+ * \param code the trap code to associate with this trap
+ *
+ * The #wasm_trap_t returned is owned by the caller.
+ */
+WASM_API_EXTERN wasm_trap_t *wasmtime_trap_new_code(wasmtime_trap_code_t code);
 
 /**
  * \brief Attempts to extract the trap code from this trap.

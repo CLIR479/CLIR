@@ -1,107 +1,11 @@
 //! Data structures for representing decoded wasm modules.
 
 use crate::prelude::*;
-use crate::{PrimaryMap, Tunables};
+use crate::*;
 use alloc::collections::BTreeMap;
 use core::ops::Range;
-use cranelift_entity::{packed_option::ReservedValue, EntityRef};
+use cranelift_entity::{EntityRef, packed_option::ReservedValue};
 use serde_derive::{Deserialize, Serialize};
-use wasmtime_types::*;
-
-/// Implementation styles for WebAssembly linear memory.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-pub enum MemoryStyle {
-    /// The actual memory can be resized and moved.
-    Dynamic {
-        /// Extra space to reserve when a memory must be moved due to growth.
-        reserve: u64,
-    },
-    /// Address space is allocated up front.
-    Static {
-        /// The number of bytes which are reserved for this linear memory. Only
-        /// the lower bytes which represent the actual linear memory need be
-        /// mapped, but other bytes must be guaranteed to be unmapped.
-        byte_reservation: u64,
-    },
-}
-
-impl MemoryStyle {
-    /// Decide on an implementation style for the given `Memory`.
-    pub fn for_memory(memory: Memory, tunables: &Tunables) -> (Self, u64) {
-        let is_static =
-            // Ideally we would compare against (an upper bound on) the target's
-            // page size, but unfortunately that is a little hard to plumb
-            // through here.
-            memory.page_size_log2 >= Memory::DEFAULT_PAGE_SIZE_LOG2
-            && match memory.maximum_byte_size() {
-                Ok(mut maximum) => {
-                    if tunables.static_memory_bound_is_maximum {
-                        maximum = maximum.min(tunables.static_memory_reservation);
-                    }
-
-                    // Ensure the minimum is less than the maximum; the minimum might exceed the maximum
-                    // when the memory is artificially bounded via `static_memory_bound_is_maximum` above
-                    memory.minimum_byte_size().unwrap() <= maximum
-                        && maximum <= tunables.static_memory_reservation
-                }
-
-                // If the maximum size of this memory is not representable with
-                // `u64` then use the `static_memory_bound_is_maximum` to indicate
-                // whether it's a static memory or not. It should be ok to discard
-                // the linear memory's maximum size here as growth to the maximum is
-                // always fallible and never guaranteed.
-                Err(_) => tunables.static_memory_bound_is_maximum,
-            };
-
-        if is_static {
-            return (
-                Self::Static {
-                    byte_reservation: tunables.static_memory_reservation,
-                },
-                tunables.static_memory_offset_guard_size,
-            );
-        }
-
-        // Otherwise, make it dynamic.
-        (
-            Self::Dynamic {
-                reserve: tunables.dynamic_memory_growth_reserve,
-            },
-            tunables.dynamic_memory_offset_guard_size,
-        )
-    }
-}
-
-/// A WebAssembly linear memory description along with our chosen style for
-/// implementing it.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-pub struct MemoryPlan {
-    /// The WebAssembly linear memory description.
-    pub memory: Memory,
-    /// Our chosen implementation style.
-    pub style: MemoryStyle,
-    /// Chosen size of a guard page before the linear memory allocation.
-    pub pre_guard_size: u64,
-    /// Our chosen offset-guard size.
-    pub offset_guard_size: u64,
-}
-
-impl MemoryPlan {
-    /// Draw up a plan for implementing a `Memory`.
-    pub fn for_memory(memory: Memory, tunables: &Tunables) -> Self {
-        let (style, offset_guard_size) = MemoryStyle::for_memory(memory, tunables);
-        Self {
-            memory,
-            style,
-            offset_guard_size,
-            pre_guard_size: if tunables.guard_before_linear_memory {
-                offset_guard_size
-            } else {
-                0
-            },
-        }
-    }
-}
 
 /// A WebAssembly linear memory initializer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -310,44 +214,6 @@ pub trait InitMemory {
     fn write(&mut self, memory_index: MemoryIndex, init: &StaticMemoryInitializer) -> bool;
 }
 
-/// Implementation styles for WebAssembly tables.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-pub enum TableStyle {
-    /// Signatures are stored in the table and checked in the caller.
-    CallerChecksSignature {
-        /// Whether this table is initialized lazily and requires an
-        /// initialization check on every access.
-        lazy_init: bool,
-    },
-}
-
-impl TableStyle {
-    /// Decide on an implementation style for the given `Table`.
-    pub fn for_table(_table: Table, tunables: &Tunables) -> Self {
-        Self::CallerChecksSignature {
-            lazy_init: tunables.table_lazy_init,
-        }
-    }
-}
-
-/// A WebAssembly table description along with our chosen style for
-/// implementing it.
-#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
-pub struct TablePlan {
-    /// The WebAssembly table description.
-    pub table: Table,
-    /// Our chosen implementation style.
-    pub style: TableStyle,
-}
-
-impl TablePlan {
-    /// Draw up a plan for implementing a `Table`.
-    pub fn for_table(table: Table, tunables: &Tunables) -> Self {
-        let style = TableStyle::for_table(table, tunables);
-        Self { table, style }
-    }
-}
-
 /// Table initialization data for all tables in the module.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TableInitialization {
@@ -413,18 +279,21 @@ pub enum TableSegmentElements {
 
 impl TableSegmentElements {
     /// Returns the number of elements in this segment.
-    pub fn len(&self) -> u32 {
+    pub fn len(&self) -> u64 {
         match self {
-            Self::Functions(s) => s.len() as u32,
-            Self::Expressions(s) => s.len() as u32,
+            Self::Functions(s) => u64::try_from(s.len()).unwrap(),
+            Self::Expressions(s) => u64::try_from(s.len()).unwrap(),
         }
     }
 }
 
 /// A translated WebAssembly module, excluding the function bodies and
 /// memory initializers.
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Module {
+    /// This module's index.
+    pub module_index: StaticModuleIndex,
+
     /// The name of this wasm module, often found in the wasm file.
     pub name: Option<String>,
 
@@ -453,7 +322,7 @@ pub struct Module {
     pub passive_data_map: BTreeMap<DataIndex, Range<u32>>,
 
     /// Types declared in the wasm module.
-    pub types: PrimaryMap<TypeIndex, ModuleInternedTypeIndex>,
+    pub types: PrimaryMap<TypeIndex, EngineOrModuleTypeIndex>,
 
     /// Number of imported or aliased functions in the module.
     pub num_imported_funcs: usize,
@@ -467,6 +336,12 @@ pub struct Module {
     /// Number of imported or aliased globals in the module.
     pub num_imported_globals: usize,
 
+    /// Number of imported or aliased tags in the module.
+    pub num_imported_tags: usize,
+
+    /// Does this module need a GC heap to run?
+    pub needs_gc_heap: bool,
+
     /// Number of functions that "escape" from this module may need to have a
     /// `VMFuncRef` constructed for them.
     ///
@@ -474,23 +349,23 @@ pub struct Module {
     /// an `func_ref` index (and is the maximum func_ref index).
     pub num_escaped_funcs: usize,
 
-    /// Number of call-indirect caches.
-    pub num_call_indirect_caches: usize,
-
     /// Types of functions, imported and local.
     pub functions: PrimaryMap<FuncIndex, FunctionType>,
 
     /// WebAssembly tables.
-    pub table_plans: PrimaryMap<TableIndex, TablePlan>,
+    pub tables: PrimaryMap<TableIndex, Table>,
 
     /// WebAssembly linear memory plans.
-    pub memory_plans: PrimaryMap<MemoryIndex, MemoryPlan>,
+    pub memories: PrimaryMap<MemoryIndex, Memory>,
 
     /// WebAssembly global variables.
     pub globals: PrimaryMap<GlobalIndex, Global>,
 
     /// WebAssembly global initializers for locally-defined globals.
     pub global_initializers: PrimaryMap<DefinedGlobalIndex, ConstExpr>,
+
+    /// WebAssembly exception and control tags.
+    pub tags: PrimaryMap<TagIndex, Tag>,
 }
 
 /// Initialization routines for creating an instance, encompassing imports,
@@ -511,8 +386,33 @@ pub enum Initializer {
 
 impl Module {
     /// Allocates the module data structures.
-    pub fn new() -> Self {
-        Module::default()
+    pub fn new(module_index: StaticModuleIndex) -> Self {
+        Self {
+            module_index,
+            name: Default::default(),
+            initializers: Default::default(),
+            exports: Default::default(),
+            start_func: Default::default(),
+            table_initialization: Default::default(),
+            memory_initialization: Default::default(),
+            passive_elements: Default::default(),
+            passive_elements_map: Default::default(),
+            passive_data_map: Default::default(),
+            types: Default::default(),
+            num_imported_funcs: Default::default(),
+            num_imported_tables: Default::default(),
+            num_imported_memories: Default::default(),
+            num_imported_globals: Default::default(),
+            num_imported_tags: Default::default(),
+            needs_gc_heap: Default::default(),
+            num_escaped_funcs: Default::default(),
+            functions: Default::default(),
+            tables: Default::default(),
+            memories: Default::default(),
+            globals: Default::default(),
+            global_initializers: Default::default(),
+            tags: Default::default(),
+        }
     }
 
     /// Convert a `DefinedFuncIndex` into a `FuncIndex`.
@@ -589,7 +489,7 @@ impl Module {
     #[inline]
     pub fn owned_memory_index(&self, memory: DefinedMemoryIndex) -> OwnedMemoryIndex {
         assert!(
-            memory.index() < self.memory_plans.len(),
+            memory.index() < self.memories.len(),
             "non-shared memory must have an owned index"
         );
 
@@ -597,11 +497,11 @@ impl Module {
         // plans, we can iterate through the plans up to the memory index and
         // count how many are not shared (i.e., owned).
         let owned_memory_index = self
-            .memory_plans
+            .memories
             .iter()
             .skip(self.num_imported_memories)
             .take(memory.index())
-            .filter(|(_, mp)| !mp.memory.shared)
+            .filter(|(_, mp)| !mp.shared)
             .count();
         OwnedMemoryIndex::new(owned_memory_index)
     }
@@ -637,6 +537,29 @@ impl Module {
         index.index() < self.num_imported_globals
     }
 
+    /// Test whether the given tag index is for an imported tag.
+    #[inline]
+    pub fn is_imported_tag(&self, index: TagIndex) -> bool {
+        index.index() < self.num_imported_tags
+    }
+
+    /// Convert a `DefinedTagIndex` into a `TagIndex`.
+    #[inline]
+    pub fn tag_index(&self, defined_tag: DefinedTagIndex) -> TagIndex {
+        TagIndex::new(self.num_imported_tags + defined_tag.index())
+    }
+
+    /// Convert a `TagIndex` into a `DefinedTagIndex`. Returns None if the
+    /// index is an imported tag.
+    #[inline]
+    pub fn defined_tag_index(&self, tag: TagIndex) -> Option<DefinedTagIndex> {
+        if tag.index() < self.num_imported_tags {
+            None
+        } else {
+            Some(DefinedTagIndex::new(tag.index() - self.num_imported_tags))
+        }
+    }
+
     /// Returns an iterator of all the imports in this module, along with their
     /// module name, field name, and type that's being imported.
     pub fn imports(&self) -> impl ExactSizeIterator<Item = (&str, &str, EntityType)> {
@@ -647,22 +570,43 @@ impl Module {
         })
     }
 
+    /// Get this module's `i`th import.
+    pub fn import(&self, i: usize) -> Option<(&str, &str, EntityType)> {
+        match self.initializers.get(i)? {
+            Initializer::Import { name, field, index } => Some((name, field, self.type_of(*index))),
+        }
+    }
+
     /// Returns the type of an item based on its index
     pub fn type_of(&self, index: EntityIndex) -> EntityType {
         match index {
             EntityIndex::Global(i) => EntityType::Global(self.globals[i]),
-            EntityIndex::Table(i) => EntityType::Table(self.table_plans[i].table),
-            EntityIndex::Memory(i) => EntityType::Memory(self.memory_plans[i].memory),
-            EntityIndex::Function(i) => {
-                EntityType::Function(EngineOrModuleTypeIndex::Module(self.functions[i].signature))
-            }
+            EntityIndex::Table(i) => EntityType::Table(self.tables[i]),
+            EntityIndex::Memory(i) => EntityType::Memory(self.memories[i]),
+            EntityIndex::Function(i) => EntityType::Function(self.functions[i].signature),
+            EntityIndex::Tag(i) => EntityType::Tag(self.tags[i]),
         }
+    }
+
+    /// Appends a new tag to this module with the given type information.
+    pub fn push_tag(
+        &mut self,
+        signature: impl Into<EngineOrModuleTypeIndex>,
+        exception: impl Into<EngineOrModuleTypeIndex>,
+    ) -> TagIndex {
+        let signature = signature.into();
+        let exception = exception.into();
+        self.tags.push(Tag {
+            signature,
+            exception,
+        })
     }
 
     /// Appends a new function to this module with the given type information,
     /// used for functions that either don't escape or aren't certain whether
     /// they escape yet.
-    pub fn push_function(&mut self, signature: ModuleInternedTypeIndex) -> FuncIndex {
+    pub fn push_function(&mut self, signature: impl Into<EngineOrModuleTypeIndex>) -> FuncIndex {
+        let signature = signature.into();
         self.functions.push(FunctionType {
             signature,
             func_ref: FuncRefIndex::reserved_value(),
@@ -671,8 +615,153 @@ impl Module {
 
     /// Returns an iterator over all of the defined function indices in this
     /// module.
-    pub fn defined_func_indices(&self) -> impl Iterator<Item = DefinedFuncIndex> {
+    pub fn defined_func_indices(&self) -> impl ExactSizeIterator<Item = DefinedFuncIndex> + use<> {
         (0..self.functions.len() - self.num_imported_funcs).map(|i| DefinedFuncIndex::new(i))
+    }
+
+    /// Returns the number of functions defined by this module itself: all
+    /// functions minus imported functions.
+    pub fn num_defined_funcs(&self) -> usize {
+        self.functions.len() - self.num_imported_funcs
+    }
+
+    /// Returns the number of tables defined by this module itself: all tables
+    /// minus imported tables.
+    pub fn num_defined_tables(&self) -> usize {
+        self.tables.len() - self.num_imported_tables
+    }
+
+    /// Returns the number of memories defined by this module itself: all
+    /// memories minus imported memories.
+    pub fn num_defined_memories(&self) -> usize {
+        self.memories.len() - self.num_imported_memories
+    }
+
+    /// Returns the number of globals defined by this module itself: all
+    /// globals minus imported globals.
+    pub fn num_defined_globals(&self) -> usize {
+        self.globals.len() - self.num_imported_globals
+    }
+
+    /// Returns the number of tags defined by this module itself: all tags
+    /// minus imported tags.
+    pub fn num_defined_tags(&self) -> usize {
+        self.tags.len() - self.num_imported_tags
+    }
+
+    /// Tests whether `index` is valid for this module.
+    pub fn is_valid(&self, index: EntityIndex) -> bool {
+        match index {
+            EntityIndex::Function(i) => self.functions.is_valid(i),
+            EntityIndex::Table(i) => self.tables.is_valid(i),
+            EntityIndex::Memory(i) => self.memories.is_valid(i),
+            EntityIndex::Global(i) => self.globals.is_valid(i),
+            EntityIndex::Tag(i) => self.tags.is_valid(i),
+        }
+    }
+}
+
+impl TypeTrace for Module {
+    fn trace<F, E>(&self, func: &mut F) -> Result<(), E>
+    where
+        F: FnMut(EngineOrModuleTypeIndex) -> Result<(), E>,
+    {
+        // NB: Do not `..` elide unmodified fields so that we get compile errors
+        // when adding new fields that might need re-canonicalization.
+        let Self {
+            module_index: _,
+            name: _,
+            initializers: _,
+            exports: _,
+            start_func: _,
+            table_initialization: _,
+            memory_initialization: _,
+            passive_elements: _,
+            passive_elements_map: _,
+            passive_data_map: _,
+            types,
+            num_imported_funcs: _,
+            num_imported_tables: _,
+            num_imported_memories: _,
+            num_imported_globals: _,
+            num_imported_tags: _,
+            num_escaped_funcs: _,
+            needs_gc_heap: _,
+            functions,
+            tables,
+            memories: _,
+            globals,
+            global_initializers: _,
+            tags,
+        } = self;
+
+        for t in types.values().copied() {
+            func(t)?;
+        }
+        for f in functions.values() {
+            f.trace(func)?;
+        }
+        for t in tables.values() {
+            t.trace(func)?;
+        }
+        for g in globals.values() {
+            g.trace(func)?;
+        }
+        for t in tags.values() {
+            t.trace(func)?;
+        }
+        Ok(())
+    }
+
+    fn trace_mut<F, E>(&mut self, func: &mut F) -> Result<(), E>
+    where
+        F: FnMut(&mut EngineOrModuleTypeIndex) -> Result<(), E>,
+    {
+        // NB: Do not `..` elide unmodified fields so that we get compile errors
+        // when adding new fields that might need re-canonicalization.
+        let Self {
+            module_index: _,
+            name: _,
+            initializers: _,
+            exports: _,
+            start_func: _,
+            table_initialization: _,
+            memory_initialization: _,
+            passive_elements: _,
+            passive_elements_map: _,
+            passive_data_map: _,
+            types,
+            num_imported_funcs: _,
+            num_imported_tables: _,
+            num_imported_memories: _,
+            num_imported_globals: _,
+            num_imported_tags: _,
+            num_escaped_funcs: _,
+            needs_gc_heap: _,
+            functions,
+            tables,
+            memories: _,
+            globals,
+            global_initializers: _,
+            tags,
+        } = self;
+
+        for t in types.values_mut() {
+            func(t)?;
+        }
+        for f in functions.values_mut() {
+            f.trace_mut(func)?;
+        }
+        for t in tables.values_mut() {
+            t.trace_mut(func)?;
+        }
+        for g in globals.values_mut() {
+            g.trace_mut(func)?;
+        }
+        for t in tags.values_mut() {
+            t.trace_mut(func)?;
+        }
+        Ok(())
     }
 }
 
@@ -681,10 +770,26 @@ impl Module {
 pub struct FunctionType {
     /// The type of this function, indexed into the module-wide type tables for
     /// a module compilation.
-    pub signature: ModuleInternedTypeIndex,
+    pub signature: EngineOrModuleTypeIndex,
     /// The index into the funcref table, if present. Note that this is
     /// `reserved_value()` if the function does not escape from a module.
     pub func_ref: FuncRefIndex,
+}
+
+impl TypeTrace for FunctionType {
+    fn trace<F, E>(&self, func: &mut F) -> Result<(), E>
+    where
+        F: FnMut(EngineOrModuleTypeIndex) -> Result<(), E>,
+    {
+        func(self.signature)
+    }
+
+    fn trace_mut<F, E>(&mut self, func: &mut F) -> Result<(), E>
+    where
+        F: FnMut(&mut EngineOrModuleTypeIndex) -> Result<(), E>,
+    {
+        func(&mut self.signature)
+    }
 }
 
 impl FunctionType {

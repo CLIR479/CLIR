@@ -33,7 +33,7 @@ fn main() {
 ///     "
 /// );
 ///
-/// #[no_mangle]
+/// #[unsafe(no_mangle)]
 /// extern "C" fn get_state_ptr() -> *mut u8 {
 ///     unsafe {
 ///         let ret: *mut u8;
@@ -48,7 +48,7 @@ fn main() {
 ///     }
 /// }
 ///
-/// #[no_mangle]
+/// #[unsafe(no_mangle)]
 /// extern "C" fn set_state_ptr(val: *mut u8) {
 ///     unsafe {
 ///         std::arch::asm!(
@@ -74,8 +74,8 @@ fn build_raw_intrinsics() -> Vec<u8> {
     let mut module = Module::new();
 
     let mut types = TypeSection::new();
-    types.function([], [ValType::I32]);
-    types.function([ValType::I32], []);
+    types.ty().function([], [ValType::I32]);
+    types.ty().function([ValType::I32], []);
     module.section(&types);
 
     // Declare the functions, using the type we just added.
@@ -239,7 +239,7 @@ fn build_raw_intrinsics() -> Vec<u8> {
 /// Like above this is still tricky, mainly around the production of the symbol
 /// table.
 fn build_archive(wasm: &[u8]) -> Vec<u8> {
-    use object::{bytes_of, endian::BigEndian, U32Bytes};
+    use object::{U32Bytes, bytes_of, endian::BigEndian};
 
     let mut archive = Vec::new();
     archive.extend_from_slice(&object::archive::MAGIC);

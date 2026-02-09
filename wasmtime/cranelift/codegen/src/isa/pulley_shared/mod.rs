@@ -8,15 +8,16 @@ mod settings;
 use self::inst::EmitInfo;
 use super::{Builder as IsaBuilder, FunctionAlignment};
 use crate::{
+    MachTextSectionBuilder, TextSectionBuilder,
     dominator_tree::DominatorTree,
     ir,
-    isa::{self, OwnedTargetIsa, TargetIsa},
+    isa::{self, IsaFlagsHashKey, OwnedTargetIsa, TargetIsa},
     machinst::{self, CompiledCodeStencil, MachInst, SigSet, VCode},
     result::CodegenResult,
     settings::{self as shared_settings, Flags},
-    MachTextSectionBuilder, TextSectionBuilder,
 };
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::marker::PhantomData;
@@ -53,6 +54,10 @@ impl PointerWidth {
             PointerWidth::PointerWidth32 => 32,
             PointerWidth::PointerWidth64 => 64,
         }
+    }
+
+    pub fn bytes(self) -> u8 {
+        self.bits() / 8
     }
 }
 
@@ -119,7 +124,11 @@ where
         domtree: &DominatorTree,
         ctrl_plane: &mut ControlPlane,
     ) -> CodegenResult<(VCode<inst::InstAndKind<P>>, regalloc2::Output)> {
-        let emit_info = EmitInfo::new(self.flags.clone(), self.isa_flags.clone());
+        let emit_info = EmitInfo::new(
+            func.signature.call_conv,
+            self.flags.clone(),
+            self.isa_flags.clone(),
+        );
         let sigs = SigSet::new::<abi::PulleyMachineDeps<P>>(func, &self.flags)?;
         let abi = abi::PulleyCallee::new(func, self, &self.isa_flags, &sigs)?;
         machinst::compile::<Self>(func, domtree, self, abi, emit_info, sigs, ctrl_plane)
@@ -146,6 +155,10 @@ where
         self.isa_flags.iter().collect()
     }
 
+    fn isa_flags_hash_key(&self) -> IsaFlagsHashKey<'_> {
+        IsaFlagsHashKey(self.isa_flags.hash_key())
+    }
+
     fn dynamic_vector_bytes(&self, _dynamic_ty: ir::Type) -> u32 {
         512
     }
@@ -167,23 +180,17 @@ where
         let want_disasm =
             want_disasm || (cfg!(feature = "trace-log") && log::log_enabled!(log::Level::Debug));
         let emit_result = vcode.emit(&regalloc_result, want_disasm, &self.flags, ctrl_plane);
-        let frame_size = emit_result.frame_size;
         let value_labels_ranges = emit_result.value_labels_ranges;
         let buffer = emit_result.buffer;
-        let sized_stackslot_offsets = emit_result.sized_stackslot_offsets;
-        let dynamic_stackslot_offsets = emit_result.dynamic_stackslot_offsets;
 
         if let Some(disasm) = emit_result.disasm.as_ref() {
-            log::debug!("disassembly:\n{}", disasm);
+            log::debug!("disassembly:\n{disasm}");
         }
 
         Ok(CompiledCodeStencil {
             buffer,
-            frame_size,
             vcode: emit_result.disasm,
             value_labels_ranges,
-            sized_stackslot_offsets,
-            dynamic_stackslot_offsets,
             bb_starts: emit_result.bb_offsets,
             bb_edges: emit_result.bb_edges,
         })
@@ -211,11 +218,21 @@ where
         inst::InstAndKind::<P>::function_alignment()
     }
 
-    fn has_native_fma(&self) -> bool {
-        false
+    fn pretty_print_reg(&self, reg: crate::Reg, _size: u8) -> String {
+        format!("{reg:?}")
     }
 
-    fn has_x86_blendv_lowering(&self, _ty: ir::Type) -> bool {
+    fn has_native_fma(&self) -> bool {
+        // The pulley interpreter does have fma opcodes.
+        true
+    }
+
+    fn has_round(&self) -> bool {
+        // The pulley interpreter does have rounding opcodes.
+        true
+    }
+
+    fn has_blendv_lowering(&self, _ty: ir::Type) -> bool {
         false
     }
 
@@ -230,18 +247,18 @@ where
     fn has_x86_pmaddubsw_lowering(&self) -> bool {
         false
     }
+
+    fn default_argument_extension(&self) -> ir::ArgumentExtension {
+        ir::ArgumentExtension::None
+    }
 }
 
 /// Create a new Pulley ISA builder.
 pub fn isa_builder(triple: Triple) -> IsaBuilder {
-    assert!(matches!(
-        triple.architecture,
-        Architecture::Pulley32 | Architecture::Pulley64
-    ));
     let constructor = match triple.architecture {
-        Architecture::Pulley32 => isa_constructor_32,
-        Architecture::Pulley64 => isa_constructor_64,
-        _ => unreachable!(),
+        Architecture::Pulley32 | Architecture::Pulley32be => isa_constructor_32,
+        Architecture::Pulley64 | Architecture::Pulley64be => isa_constructor_64,
+        other => panic!("unexpected architecture {other:?}"),
     };
     IsaBuilder {
         triple,
@@ -258,6 +275,9 @@ fn isa_constructor_32(
     use crate::settings::Configurable;
     let mut builder = builder.clone();
     builder.set("pointer_width", "pointer32").unwrap();
+    if triple.endianness().unwrap() == target_lexicon::Endianness::Big {
+        builder.enable("big_endian").unwrap();
+    }
     let isa_flags = PulleyFlags::new(&shared_flags, &builder);
 
     let backend =
@@ -273,9 +293,22 @@ fn isa_constructor_64(
     use crate::settings::Configurable;
     let mut builder = builder.clone();
     builder.set("pointer_width", "pointer64").unwrap();
+    if triple.endianness().unwrap() == target_lexicon::Endianness::Big {
+        builder.enable("big_endian").unwrap();
+    }
     let isa_flags = PulleyFlags::new(&shared_flags, &builder);
 
     let backend =
         PulleyBackend::<super::pulley64::Pulley64>::new_with_flags(triple, shared_flags, isa_flags);
     Ok(backend.wrapped())
+}
+
+impl PulleyFlags {
+    fn endianness(&self) -> ir::Endianness {
+        if self.big_endian() {
+            ir::Endianness::Big
+        } else {
+            ir::Endianness::Little
+        }
+    }
 }

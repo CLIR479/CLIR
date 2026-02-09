@@ -1,17 +1,17 @@
 use crate::file::TableFileExt;
 use crate::sched::{
-    subscription::{RwEventFlags, SubscriptionResult},
     Poll, Userdata,
+    subscription::{RwEventFlags, SubscriptionResult},
 };
 use crate::snapshots::preview_1::types as snapshot1_types;
 use crate::snapshots::preview_1::wasi_snapshot_preview1::WasiSnapshotPreview1 as Snapshot1;
-use crate::{ErrorExt, WasiCtx};
+use crate::{EnvError, ErrorExt, WasiCtx};
 use cap_std::time::Duration;
 use std::collections::HashSet;
 use wiggle::{GuestMemory, GuestPtr};
 
 wiggle::from_witx!({
-    witx: ["$CARGO_MANIFEST_DIR/witx/preview0/wasi_unstable.witx"],
+    witx: ["witx/preview0/wasi_unstable.witx"],
     errors: { errno => trappable Error },
     async: *,
     wasmtime: false,
@@ -280,14 +280,14 @@ convert_struct!(
 impl From<snapshot1_types::Filestat> for types::Filestat {
     fn from(f: snapshot1_types::Filestat) -> types::Filestat {
         types::Filestat {
-            dev: f.dev.into(),
-            ino: f.ino.into(),
+            dev: f.dev,
+            ino: f.ino,
             filetype: f.filetype.into(),
             nlink: f.nlink.try_into().unwrap_or(u32::MAX),
-            size: f.size.into(),
-            atim: f.atim.into(),
-            mtim: f.mtim.into(),
-            ctim: f.ctim.into(),
+            size: f.size,
+            atim: f.atim,
+            mtim: f.mtim,
+            ctim: f.ctim,
         }
     }
 }
@@ -383,7 +383,6 @@ convert_flags_bidirectional!(
 
 // This implementation, wherever possible, delegates directly to the Snapshot1 implementation,
 // performing the no-op type conversions along the way.
-#[wiggle::async_trait]
 impl wasi_unstable::WasiUnstable for WasiCtx {
     async fn args_get(
         &mut self,
@@ -1005,7 +1004,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
         &mut self,
         memory: &mut GuestMemory<'_>,
         status: types::Exitcode,
-    ) -> anyhow::Error {
+    ) -> EnvError {
         Snapshot1::proc_exit(self, memory, status).await
     }
 
@@ -1014,7 +1013,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
         _memory: &mut GuestMemory<'_>,
         _sig: types::Signal,
     ) -> Result<(), Error> {
-        Err(Error::trap(anyhow::Error::msg("proc_raise unsupported")))
+        Err(Error::trap(EnvError::msg("proc_raise unsupported")))
     }
 
     async fn sched_yield(&mut self, memory: &mut GuestMemory<'_>) -> Result<(), Error> {
@@ -1039,7 +1038,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
         _ri_data: types::IovecArray,
         _ri_flags: types::Riflags,
     ) -> Result<(types::Size, types::Roflags), Error> {
-        Err(Error::trap(anyhow::Error::msg("sock_recv unsupported")))
+        Err(Error::trap(EnvError::msg("sock_recv unsupported")))
     }
 
     async fn sock_send(
@@ -1049,7 +1048,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
         _si_data: types::CiovecArray,
         _si_flags: types::Siflags,
     ) -> Result<types::Size, Error> {
-        Err(Error::trap(anyhow::Error::msg("sock_send unsupported")))
+        Err(Error::trap(EnvError::msg("sock_send unsupported")))
     }
 
     async fn sock_shutdown(
@@ -1058,7 +1057,7 @@ impl wasi_unstable::WasiUnstable for WasiCtx {
         _fd: types::Fd,
         _how: types::Sdflags,
     ) -> Result<(), Error> {
-        Err(Error::trap(anyhow::Error::msg("sock_shutdown unsupported")))
+        Err(Error::trap(EnvError::msg("sock_shutdown unsupported")))
     }
 }
 

@@ -31,23 +31,23 @@
 //! $ sysctl vm.max_map_count=$LARGER_LIMIT
 //! ```
 
-use anyhow::anyhow;
 use bytesize::ByteSize;
 use clap::Parser;
 use log::{info, warn};
 use std::str::FromStr;
+use wasmtime::format_err;
 use wasmtime::*;
 
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
-    info!("{:?}", args);
+    info!("{args:?}");
 
-    let without_mpk = probe_engine_size(&args, MpkEnabled::Disable)?;
+    let without_mpk = probe_engine_size(&args, Enabled::No)?;
     println!("without MPK:\t{}", without_mpk.to_string());
 
     if PoolingAllocationConfig::are_memory_protection_keys_available() {
-        let with_mpk = probe_engine_size(&args, MpkEnabled::Enable)?;
+        let with_mpk = probe_engine_size(&args, Enabled::Yes)?;
         println!("with MPK:\t{}", with_mpk.to_string());
         println!(
             "\t\t{}x more slots per reserved memory",
@@ -66,31 +66,31 @@ struct Args {
     /// The maximum number of bytes for each WebAssembly linear memory in the
     /// pool.
     #[arg(long, default_value = "128MiB", value_parser = parse_byte_size)]
-    memory_size: usize,
+    memory_size: u64,
 
     /// The maximum number of bytes a memory is considered static; see
-    /// `Config::static_memory_maximum_size` for more details and the default
+    /// `Config::memory_reservation` for more details and the default
     /// value if unset.
     #[arg(long, value_parser = parse_byte_size)]
-    static_memory_maximum_size: Option<u64>,
+    memory_reservation: Option<u64>,
 
     /// The size in bytes of the guard region to expect between static memory
-    /// slots; see [`Config::static_memory_guard_size`] for more details and the
+    /// slots; see [`Config::memory_guard_size`] for more details and the
     /// default value if unset.
     #[arg(long, value_parser = parse_byte_size)]
-    static_memory_guard_size: Option<u64>,
+    memory_guard_size: Option<u64>,
 }
 
 /// Parse a human-readable byte size--e.g., "512 MiB"--into the correct number
 /// of bytes.
 fn parse_byte_size(value: &str) -> Result<u64> {
-    let size = ByteSize::from_str(value).map_err(|e| anyhow!(e))?;
+    let size = ByteSize::from_str(value).map_err(|e| format_err!(e))?;
     Ok(size.as_u64())
 }
 
 /// Find the engine with the largest number of memories we can create on this
 /// machine.
-fn probe_engine_size(args: &Args, mpk: MpkEnabled) -> Result<Pool> {
+fn probe_engine_size(args: &Args, mpk: Enabled) -> Result<Pool> {
     let mut search = ExponentialSearch::new();
     let mut mapped_bytes = 0;
     while !search.done() {
@@ -101,7 +101,7 @@ fn probe_engine_size(args: &Args, mpk: MpkEnabled) -> Result<Pool> {
                 search.record(true)
             }
             Err(e) => {
-                warn!("failed engine allocation, continuing search: {:?}", e);
+                warn!("failed engine allocation, continuing search: {e:?}");
                 search.record(false)
             }
         }
@@ -113,7 +113,6 @@ fn probe_engine_size(args: &Args, mpk: MpkEnabled) -> Result<Pool> {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 struct Pool {
     num_memories: u32,
     mapped_bytes: usize,
@@ -121,7 +120,7 @@ struct Pool {
 impl Pool {
     /// Print a human-readable, tab-separated description of this structure.
     fn to_string(&self) -> String {
-        let human_size = ByteSize::b(self.mapped_bytes as u64).to_string_as(true);
+        let human_size = ByteSize::b(self.mapped_bytes as u64).display().si();
         format!(
             "{} memory slots\t{} reserved",
             self.num_memories, human_size
@@ -183,20 +182,22 @@ impl ExponentialSearch {
 }
 
 /// Build a pool-allocated engine with `num_memories` slots.
-fn build_engine(args: &Args, num_memories: u32, enable_mpk: MpkEnabled) -> Result<usize> {
+fn build_engine(args: &Args, num_memories: u32, enable_mpk: Enabled) -> Result<usize> {
     // Configure the memory pool.
     let mut pool = PoolingAllocationConfig::default();
-    pool.max_memory_size(args.memory_size);
-    pool.total_memories(num_memories)
+    let max_memory_size =
+        usize::try_from(args.memory_size).expect("memory size should fit in `usize`");
+    pool.max_memory_size(max_memory_size)
+        .total_memories(num_memories)
         .memory_protection_keys(enable_mpk);
 
     // Configure the engine itself.
     let mut config = Config::new();
-    if let Some(static_memory_maximum_size) = args.static_memory_maximum_size {
-        config.static_memory_maximum_size(static_memory_maximum_size);
+    if let Some(memory_reservation) = args.memory_reservation {
+        config.memory_reservation(memory_reservation);
     }
-    if let Some(static_memory_guard_size) = args.static_memory_guard_size {
-        config.static_memory_guard_size(static_memory_guard_size);
+    if let Some(memory_guard_size) = args.memory_guard_size {
+        config.memory_guard_size(memory_guard_size);
     }
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
 
@@ -209,10 +210,7 @@ fn build_engine(args: &Args, num_memories: u32, enable_mpk: MpkEnabled) -> Resul
     engine.increment_epoch();
 
     let mapped_bytes = mapped_bytes_after - mapped_bytes_before;
-    info!(
-        "{}-slot pool ({:?}): {} bytes mapped",
-        num_memories, enable_mpk, mapped_bytes
-    );
+    info!("{num_memories}-slot pool ({enable_mpk:?}): {mapped_bytes} bytes mapped");
     Ok(mapped_bytes)
 }
 
@@ -241,15 +239,15 @@ fn num_bytes_mapped() -> Result<usize> {
         let range = line
             .split_whitespace()
             .next()
-            .ok_or(anyhow!("parse failure: expected whitespace"))?;
+            .ok_or(format_err!("parse failure: expected whitespace"))?;
         let mut addresses = range.split("-");
-        let start = addresses
-            .next()
-            .ok_or(anyhow!("parse failure: expected dash-separated address"))?;
+        let start = addresses.next().ok_or(format_err!(
+            "parse failure: expected dash-separated address"
+        ))?;
         let start = usize::from_str_radix(start, 16)?;
-        let end = addresses
-            .next()
-            .ok_or(anyhow!("parse failure: expected dash-separated address"))?;
+        let end = addresses.next().ok_or(format_err!(
+            "parse failure: expected dash-separated address"
+        ))?;
         let end = usize::from_str_radix(end, 16)?;
 
         total += end - start;
@@ -259,5 +257,5 @@ fn num_bytes_mapped() -> Result<usize> {
 
 #[cfg(not(target_os = "linux"))]
 fn num_bytes_mapped() -> Result<usize> {
-    anyhow::bail!("this example can only read virtual memory maps on Linux")
+    wasmtime::bail!("this example can only read virtual memory maps on Linux")
 }

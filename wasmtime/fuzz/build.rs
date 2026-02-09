@@ -1,23 +1,24 @@
-fn main() -> anyhow::Result<()> {
+fn main() -> wasmtime::Result<()> {
     component::generate_static_api_tests()?;
 
     Ok(())
 }
 
 mod component {
-    use anyhow::{anyhow, Context, Error, Result};
     use arbitrary::Unstructured;
-    use component_fuzz_util::{Declarations, TestCase, Type, MAX_TYPE_DEPTH};
     use proc_macro2::TokenStream;
     use quote::quote;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
+    use std::collections::HashMap;
     use std::env;
     use std::fmt::Write;
     use std::fs;
     use std::iter;
     use std::path::PathBuf;
     use std::process::Command;
+    use wasmtime::{Error, Result, error::Context as _, format_err};
+    use wasmtime_test_util::component_fuzz::{Declarations, MAX_TYPE_DEPTH, TestCase, Type};
 
     pub fn generate_static_api_tests() -> Result<()> {
         println!("cargo:rerun-if-changed=build.rs");
@@ -37,11 +38,12 @@ mod component {
     }
 
     fn write_static_api_tests(out: &mut String) -> Result<()> {
+        println!("cargo:rerun-if-env-changed=WASMTIME_FUZZ_SEED");
         let seed = if let Ok(seed) = env::var("WASMTIME_FUZZ_SEED") {
             seed.parse::<u64>()
-                .with_context(|| anyhow!("expected u64 in WASMTIME_FUZZ_SEED"))?
+                .with_context(|| format_err!("expected u64 in WASMTIME_FUZZ_SEED"))?
         } else {
-            StdRng::from_entropy().gen()
+            StdRng::from_entropy().r#gen()
         };
 
         eprintln!(
@@ -51,18 +53,18 @@ mod component {
         let mut rng = StdRng::seed_from_u64(seed);
 
         const TYPE_COUNT: usize = 50;
-        const MAX_ARITY: u32 = 5;
         const TEST_CASE_COUNT: usize = 100;
 
         let mut type_fuel = 1000;
         let mut types = Vec::new();
+        let mut rust_type_names = Vec::new();
         let name_counter = &mut 0;
         let mut declarations = TokenStream::new();
         let mut tests = TokenStream::new();
 
         // First generate a set of type to select from.
         for _ in 0..TYPE_COUNT {
-            let ty = gen(&mut rng, |u| {
+            let ty = generate(&mut rng, |u| {
                 // Only discount fuel if the generation was successful,
                 // otherwise we'll get more random data and try again.
                 let mut fuel = type_fuel;
@@ -73,37 +75,40 @@ mod component {
                 ret
             })?;
 
-            let name = component_fuzz_util::rust_type(&ty, name_counter, &mut declarations);
-            types.push((name, ty));
+            let rust_ty_name =
+                wasmtime_test_util::component_fuzz::rust_type(&ty, name_counter, &mut declarations);
+            types.push(ty);
+            rust_type_names.push(rust_ty_name);
         }
+
+        fn hash_key(ty: &Type) -> usize {
+            let ty: *const Type = ty;
+            ty.addr()
+        }
+
+        let type_to_name_map = types
+            .iter()
+            .map(hash_key)
+            .zip(rust_type_names.iter().cloned())
+            .collect::<HashMap<_, _>>();
 
         // Next generate a set of static API test cases driven by the above
         // types.
         for index in 0..TEST_CASE_COUNT {
-            let (case, rust_params, rust_results) = gen(&mut rng, |u| {
-                let mut params = Vec::new();
-                let mut results = Vec::new();
+            let (case, rust_params, rust_results) = generate(&mut rng, |u| {
                 let mut rust_params = TokenStream::new();
                 let mut rust_results = TokenStream::new();
-                for _ in 0..u.int_in_range(0..=MAX_ARITY)? {
-                    let (name, ty) = u.choose(&types)?;
-                    params.push(ty);
+                let case = TestCase::generate(&types, u)?;
+                for ty in case.params.iter() {
+                    let name = &type_to_name_map[&hash_key(ty)];
                     rust_params.extend(name.clone());
                     rust_params.extend(quote!(,));
                 }
-                for _ in 0..u.int_in_range(0..=MAX_ARITY)? {
-                    let (name, ty) = u.choose(&types)?;
-                    results.push(ty);
+                if let Some(ty) = &case.result {
+                    let name = &type_to_name_map[&hash_key(ty)];
                     rust_results.extend(name.clone());
                     rust_results.extend(quote!(,));
                 }
-
-                let case = TestCase {
-                    params,
-                    results,
-                    encoding1: u.arbitrary()?,
-                    encoding2: u.arbitrary()?,
-                };
                 Ok((case, rust_params, rust_results))
             })?;
 
@@ -112,12 +117,12 @@ mod component {
                 type_instantiation_args,
                 params,
                 results,
-                import_and_export,
-                encoding1,
-                encoding2,
+                caller_module,
+                callee_module,
+                options,
             } = case.declarations();
 
-            let test = quote!(#index => component_types::static_api_test::<(#rust_params), (#rust_results)>(
+            let test = quote!(#index => component_api::static_api_test::<(#rust_params), (#rust_results)>(
                 input,
                 {
                     static DECLS: Declarations = Declarations {
@@ -125,9 +130,9 @@ mod component {
                         type_instantiation_args: Cow::Borrowed(#type_instantiation_args),
                         params: Cow::Borrowed(#params),
                         results: Cow::Borrowed(#results),
-                        import_and_export: Cow::Borrowed(#import_and_export),
-                        encoding1: #encoding1,
-                        encoding2: #encoding2,
+                        caller_module: Cow::Borrowed(#caller_module),
+                        callee_module: Cow::Borrowed(#callee_module),
+                        options: #options,
                     };
                     &DECLS
                 }
@@ -137,16 +142,16 @@ mod component {
         }
 
         let module = quote! {
-            #[allow(unused_imports)]
+            #[allow(unused_imports, reason = "macro-generated code")]
             fn static_component_api_target(input: &mut libfuzzer_sys::arbitrary::Unstructured) -> libfuzzer_sys::arbitrary::Result<()> {
-                use anyhow::Result;
-                use component_fuzz_util::Declarations;
-                use component_test_util::{self, Float32, Float64};
+                use wasmtime::Result;
+                use wasmtime_test_util::component_fuzz::Declarations;
+                use wasmtime_test_util::component::{Float32, Float64};
                 use libfuzzer_sys::arbitrary::{self, Arbitrary};
                 use std::borrow::Cow;
                 use std::sync::{Arc, Once};
                 use wasmtime::component::{ComponentType, Lift, Lower};
-                use wasmtime_fuzzing::generators::component_types;
+                use wasmtime_fuzzing::oracles::component_api;
 
                 const SEED: u64 = #seed;
 
@@ -173,14 +178,14 @@ mod component {
         Ok(())
     }
 
-    fn gen<T>(
+    fn generate<T>(
         rng: &mut StdRng,
         mut f: impl FnMut(&mut Unstructured<'_>) -> arbitrary::Result<T>,
     ) -> Result<T> {
         let mut bytes = Vec::new();
         loop {
             let count = rng.gen_range(1000..2000);
-            bytes.extend(iter::repeat_with(|| rng.gen::<u8>()).take(count));
+            bytes.extend(iter::repeat_with(|| rng.r#gen::<u8>()).take(count));
 
             match f(&mut Unstructured::new(&bytes)) {
                 Ok(ret) => break Ok(ret),

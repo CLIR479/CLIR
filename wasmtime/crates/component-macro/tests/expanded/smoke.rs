@@ -6,11 +6,11 @@
 /// has been created through a [`Linker`](wasmtime::component::Linker).
 ///
 /// For more information see [`TheWorld`] as well.
-pub struct TheWorldPre<T> {
+pub struct TheWorldPre<T: 'static> {
     instance_pre: wasmtime::component::InstancePre<T>,
     indices: TheWorldIndices,
 }
-impl<T> Clone for TheWorldPre<T> {
+impl<T: 'static> Clone for TheWorldPre<T> {
     fn clone(&self) -> Self {
         Self {
             instance_pre: self.instance_pre.clone(),
@@ -18,7 +18,7 @@ impl<T> Clone for TheWorldPre<T> {
         }
     }
 }
-impl<_T> TheWorldPre<_T> {
+impl<_T: 'static> TheWorldPre<_T> {
     /// Creates a new copy of `TheWorldPre` bindings which can then
     /// be used to instantiate into a particular store.
     ///
@@ -27,7 +27,7 @@ impl<_T> TheWorldPre<_T> {
     pub fn new(
         instance_pre: wasmtime::component::InstancePre<_T>,
     ) -> wasmtime::Result<Self> {
-        let indices = TheWorldIndices::new(instance_pre.component())?;
+        let indices = TheWorldIndices::new(&instance_pre)?;
         Ok(Self { instance_pre, indices })
     }
     pub fn engine(&self) -> &wasmtime::Engine {
@@ -49,6 +49,17 @@ impl<_T> TheWorldPre<_T> {
     ) -> wasmtime::Result<TheWorld> {
         let mut store = store.as_context_mut();
         let instance = self.instance_pre.instantiate(&mut store)?;
+        self.indices.load(&mut store, &instance)
+    }
+}
+impl<_T: Send + 'static> TheWorldPre<_T> {
+    /// Same as [`Self::instantiate`], except with `async`.
+    pub async fn instantiate_async(
+        &self,
+        mut store: impl wasmtime::AsContextMut<Data = _T>,
+    ) -> wasmtime::Result<TheWorld> {
+        let mut store = store.as_context_mut();
+        let instance = self.instance_pre.instantiate_async(&mut store).await?;
         self.indices.load(&mut store, &instance)
     }
 }
@@ -80,11 +91,6 @@ pub struct TheWorldIndices {}
 /// * If you've instantiated the instance yourself already
 ///   then you can use [`TheWorld::new`].
 ///
-/// * You can also access the guts of instantiation through
-///   [`TheWorldIndices::new_instance`] followed
-///   by [`TheWorldIndices::load`] to crate an instance of this
-///   type.
-///
 /// These methods are all equivalent to one another and move
 /// around the tradeoff of what work is performed when.
 ///
@@ -93,32 +99,17 @@ pub struct TheWorldIndices {}
 /// [`Linker`]: wasmtime::component::Linker
 pub struct TheWorld {}
 const _: () = {
-    #[allow(unused_imports)]
-    use wasmtime::component::__internal::anyhow;
     impl TheWorldIndices {
         /// Creates a new copy of `TheWorldIndices` bindings which can then
         /// be used to instantiate into a particular store.
         ///
         /// This method may fail if the component does not have the
         /// required exports.
-        pub fn new(
-            component: &wasmtime::component::Component,
+        pub fn new<_T>(
+            _instance_pre: &wasmtime::component::InstancePre<_T>,
         ) -> wasmtime::Result<Self> {
-            let _component = component;
-            Ok(TheWorldIndices {})
-        }
-        /// Creates a new instance of [`TheWorldIndices`] from an
-        /// instantiated component.
-        ///
-        /// This method of creating a [`TheWorld`] will perform string
-        /// lookups for all exports when this method is called. This
-        /// will only succeed if the provided instance matches the
-        /// requirements of [`TheWorld`].
-        pub fn new_instance(
-            mut store: impl wasmtime::AsContextMut,
-            instance: &wasmtime::component::Instance,
-        ) -> wasmtime::Result<Self> {
-            let _instance = instance;
+            let _component = _instance_pre.component();
+            let _instance_type = _instance_pre.instance_type();
             Ok(TheWorldIndices {})
         }
         /// Uses the indices stored in `self` to load an instance
@@ -131,6 +122,7 @@ const _: () = {
             mut store: impl wasmtime::AsContextMut,
             instance: &wasmtime::component::Instance,
         ) -> wasmtime::Result<TheWorld> {
+            let _ = &mut store;
             let _instance = instance;
             Ok(TheWorld {})
         }
@@ -139,30 +131,45 @@ const _: () = {
         /// Convenience wrapper around [`TheWorldPre::new`] and
         /// [`TheWorldPre::instantiate`].
         pub fn instantiate<_T>(
-            mut store: impl wasmtime::AsContextMut<Data = _T>,
+            store: impl wasmtime::AsContextMut<Data = _T>,
             component: &wasmtime::component::Component,
             linker: &wasmtime::component::Linker<_T>,
         ) -> wasmtime::Result<TheWorld> {
             let pre = linker.instantiate_pre(component)?;
             TheWorldPre::new(pre)?.instantiate(store)
         }
-        /// Convenience wrapper around [`TheWorldIndices::new_instance`] and
+        /// Convenience wrapper around [`TheWorldIndices::new`] and
         /// [`TheWorldIndices::load`].
         pub fn new(
             mut store: impl wasmtime::AsContextMut,
             instance: &wasmtime::component::Instance,
         ) -> wasmtime::Result<TheWorld> {
-            let indices = TheWorldIndices::new_instance(&mut store, instance)?;
-            indices.load(store, instance)
+            let indices = TheWorldIndices::new(&instance.instance_pre(&store))?;
+            indices.load(&mut store, instance)
         }
-        pub fn add_to_linker<T, U>(
+        /// Convenience wrapper around [`TheWorldPre::new`] and
+        /// [`TheWorldPre::instantiate_async`].
+        pub async fn instantiate_async<_T>(
+            store: impl wasmtime::AsContextMut<Data = _T>,
+            component: &wasmtime::component::Component,
+            linker: &wasmtime::component::Linker<_T>,
+        ) -> wasmtime::Result<TheWorld>
+        where
+            _T: Send,
+        {
+            let pre = linker.instantiate_pre(component)?;
+            TheWorldPre::new(pre)?.instantiate_async(store).await
+        }
+        pub fn add_to_linker<T, D>(
             linker: &mut wasmtime::component::Linker<T>,
-            get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
+            host_getter: fn(&mut T) -> D::Data<'_>,
         ) -> wasmtime::Result<()>
         where
-            U: imports::Host,
+            D: imports::HostWithStore,
+            for<'a> D::Data<'a>: imports::Host,
+            T: 'static,
         {
-            imports::add_to_linker(linker, get)?;
+            imports::add_to_linker::<T, D>(linker, host_getter)?;
             Ok(())
         }
     }
@@ -170,26 +177,29 @@ const _: () = {
 #[allow(clippy::all)]
 pub mod imports {
     #[allow(unused_imports)]
-    use wasmtime::component::__internal::anyhow;
+    use wasmtime::component::__internal::Box;
+    pub trait HostWithStore: wasmtime::component::HasData {}
+    impl<_T: ?Sized> HostWithStore for _T
+    where
+        _T: wasmtime::component::HasData,
+    {}
     pub trait Host {
         fn y(&mut self) -> ();
     }
-    pub trait GetHost<
-        T,
-    >: Fn(T) -> <Self as GetHost<T>>::Host + Send + Sync + Copy + 'static {
-        type Host: Host;
+    impl<_T: Host + ?Sized> Host for &mut _T {
+        fn y(&mut self) -> () {
+            Host::y(*self)
+        }
     }
-    impl<F, T, O> GetHost<T> for F
-    where
-        F: Fn(T) -> O + Send + Sync + Copy + 'static,
-        O: Host,
-    {
-        type Host = O;
-    }
-    pub fn add_to_linker_get_host<T>(
+    pub fn add_to_linker<T, D>(
         linker: &mut wasmtime::component::Linker<T>,
-        host_getter: impl for<'a> GetHost<&'a mut T>,
-    ) -> wasmtime::Result<()> {
+        host_getter: fn(&mut T) -> D::Data<'_>,
+    ) -> wasmtime::Result<()>
+    where
+        D: HostWithStore,
+        for<'a> D::Data<'a>: Host,
+        T: 'static,
+    {
         let mut inst = linker.instance("imports")?;
         inst.func_wrap(
             "y",
@@ -200,19 +210,5 @@ pub mod imports {
             },
         )?;
         Ok(())
-    }
-    pub fn add_to_linker<T, U>(
-        linker: &mut wasmtime::component::Linker<T>,
-        get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-    ) -> wasmtime::Result<()>
-    where
-        U: Host,
-    {
-        add_to_linker_get_host(linker, get)
-    }
-    impl<_T: Host + ?Sized> Host for &mut _T {
-        fn y(&mut self) -> () {
-            Host::y(*self)
-        }
     }
 }

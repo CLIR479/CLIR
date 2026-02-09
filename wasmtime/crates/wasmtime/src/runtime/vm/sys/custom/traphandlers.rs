@@ -1,37 +1,26 @@
-use crate::runtime::vm::traphandlers::{tls, TrapRegisters, TrapTest};
-use crate::runtime::vm::VMContext;
-use core::mem;
+use crate::prelude::*;
 
-pub use crate::runtime::vm::sys::capi::{self, wasmtime_longjmp};
+pub type SignalHandler = Box<dyn Fn() + Send + Sync>;
 
-#[allow(missing_docs)]
-pub type SignalHandler<'a> = dyn Fn() + Send + Sync + 'a;
-
-pub unsafe fn wasmtime_setjmp(
-    jmp_buf: *mut *const u8,
-    callback: extern "C" fn(*mut u8, *mut VMContext),
-    payload: *mut u8,
-    callee: *mut VMContext,
-) -> i32 {
-    let callback = mem::transmute::<
-        extern "C" fn(*mut u8, *mut VMContext),
-        extern "C" fn(*mut u8, *mut u8),
-    >(callback);
-    capi::wasmtime_setjmp(jmp_buf, callback, payload, callee.cast())
-}
-
+#[cfg(has_native_signals)]
 pub struct TrapHandler;
 
+#[cfg(has_native_signals)]
 impl TrapHandler {
     pub unsafe fn new(_macos_use_mach_ports: bool) -> TrapHandler {
-        capi::wasmtime_init_traps(handle_trap);
+        unsafe {
+            crate::runtime::vm::sys::capi::wasmtime_init_traps(handle_trap);
+        }
         TrapHandler
     }
 
     pub fn validate_config(&self, _macos_use_mach_ports: bool) {}
 }
 
+#[cfg(has_native_signals)]
 extern "C" fn handle_trap(pc: usize, fp: usize, has_faulting_addr: bool, faulting_addr: usize) {
+    use crate::runtime::vm::traphandlers::{TrapRegisters, TrapTest, tls};
+
     tls::with(|info| {
         let info = match info {
             Some(info) => info,
@@ -49,7 +38,7 @@ extern "C" fn handle_trap(pc: usize, fp: usize, has_faulting_addr: bool, faultin
         match test {
             TrapTest::NotWasm => {}
             TrapTest::HandledByEmbedder => unreachable!(),
-            TrapTest::Trap { jmp_buf } => unsafe { wasmtime_longjmp(jmp_buf) },
+            TrapTest::Trap(handler) => unsafe { handler.resume_tailcc(0, 0) },
         }
     })
 }

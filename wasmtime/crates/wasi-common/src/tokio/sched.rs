@@ -9,14 +9,14 @@ mod windows;
 pub use windows::poll_oneoff;
 
 use crate::{
-    sched::{Duration, Poll, WasiSched},
     Error,
+    sched::{Duration, Poll, WasiSched},
 };
 
 pub fn sched_ctx() -> Box<dyn crate::WasiSched> {
     struct AsyncSched;
 
-    #[wiggle::async_trait]
+    #[async_trait::async_trait]
     impl WasiSched for AsyncSched {
         async fn poll_oneoff<'a>(&self, poll: &mut Poll<'a>) -> Result<(), Error> {
             poll_oneoff(poll).await

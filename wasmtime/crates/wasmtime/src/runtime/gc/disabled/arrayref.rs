@@ -1,7 +1,6 @@
-use crate::runtime::vm::VMGcRef;
 use crate::{
-    store::{AutoAssertNoGc, StoreContextMut, StoreOpaque},
-    ArrayType, AsContext, AsContextMut, GcRefImpl, Result, Rooted, Val, I31,
+    ArrayType, AsContext, AsContextMut, GcRefImpl, Result, Val,
+    store::{StoreContextMut, StoreOpaque},
 };
 
 /// Support for `ArrayRefPre` disabled at compile time because the `gc` cargo
@@ -15,13 +14,6 @@ pub enum ArrayRef {}
 impl GcRefImpl for ArrayRef {}
 
 impl ArrayRef {
-    pub(crate) fn from_cloned_gc_ref(
-        _store: &mut AutoAssertNoGc<'_>,
-        _gc_ref: VMGcRef,
-    ) -> Rooted<Self> {
-        unreachable!()
-    }
-
     pub fn ty(&self, _store: impl AsContext) -> Result<ArrayType> {
         match *self {}
     }
@@ -38,10 +30,10 @@ impl ArrayRef {
         match *self {}
     }
 
-    pub fn elems<'a, T: 'a>(
+    pub fn elems<'a, T: 'static>(
         &self,
         _store: impl Into<StoreContextMut<'a, T>>,
-    ) -> Result<impl ExactSizeIterator<Item = Val> + 'a> {
+    ) -> Result<impl ExactSizeIterator<Item = Val> + 'a + '_> {
         match *self {}
         Ok([].into_iter())
     }

@@ -8,7 +8,6 @@ pub enum CodegenSettings {
     /// Use the host's feature set.
     Native,
     /// Generate a modified flag set for the current host.
-    #[allow(dead_code)]
     Target {
         /// The target triple of the host.
         target: String,
@@ -19,23 +18,33 @@ pub enum CodegenSettings {
 
 impl CodegenSettings {
     /// Configure Wasmtime with these codegen settings.
-    pub fn configure(&self, config: &mut wasmtime::Config) {
+    pub fn configure(&self, config: &mut wasmtime_cli_flags::CommonOptions) {
         match self {
             CodegenSettings::Native => {}
             CodegenSettings::Target { target, flags } => {
-                config.target(target).unwrap();
+                config.target = Some(target.to_string());
                 for (key, value) in flags {
-                    unsafe {
-                        config.cranelift_flag_set(key, value);
-                    }
+                    config
+                        .codegen
+                        .cranelift
+                        .push((key.clone(), Some(value.clone())));
                 }
             }
+        }
+    }
+
+    /// Returns the flags used for codegen.
+    pub(crate) fn flags(&self) -> &[(String, String)] {
+        if let Self::Target { flags, .. } = self {
+            flags
+        } else {
+            &[]
         }
     }
 }
 
 impl<'a> Arbitrary<'a> for CodegenSettings {
-    #[allow(unused_macros, unused_variables)]
+    #[expect(unused_variables, reason = "macro-generated code")]
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         // Helper macro to enable clif features based on what the native host
         // supports. If the input says to enable a feature and the host doesn't
@@ -98,6 +107,7 @@ impl<'a> Arbitrary<'a> for CodegenSettings {
                 "x86_64" => {
                     test: is_x86_feature_detected,
 
+                    std:"cmpxchg16b" => clif:"has_cmpxchg16b",
                     std:"sse3" => clif:"has_sse3",
                     std:"ssse3" => clif:"has_ssse3",
                     std:"sse4.1" => clif:"has_sse41",
@@ -110,7 +120,7 @@ impl<'a> Arbitrary<'a> for CodegenSettings {
                     std:"bmi2" => clif:"has_bmi2",
                     std:"lzcnt" => clif:"has_lzcnt",
 
-                    // not a lot of of cpus support avx512 so these are weighted
+                    // not a lot of cpus support avx512 so these are weighted
                     // to get enabled much less frequently.
                     std:"avx512bitalg" => clif:"has_avx512bitalg" ratio:1 in 1000,
                     std:"avx512dq" => clif:"has_avx512dq" ratio: 1 in 1000,

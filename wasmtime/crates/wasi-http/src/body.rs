@@ -1,28 +1,26 @@
 //! Implementation of the `wasi:http/types` interface's various body types.
 
 use crate::{bindings::http::types, types::FieldMap};
-use anyhow::anyhow;
 use bytes::Bytes;
 use http_body::{Body, Frame};
-use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
+use http_body_util::combinators::UnsyncBoxBody;
 use std::future::Future;
 use std::mem;
 use std::task::{Context, Poll};
 use std::{pin::Pin, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
-use wasmtime_wasi::{
-    runtime::{poll_noop, AbortOnDropJoinHandle},
-    HostInputStream, HostOutputStream, StreamError, Subscribe,
-};
+use wasmtime::format_err;
+use wasmtime_wasi::p2::{InputStream, OutputStream, Pollable, StreamError};
+use wasmtime_wasi::runtime::{AbortOnDropJoinHandle, poll_noop};
 
 /// Common type for incoming bodies.
-pub type HyperIncomingBody = BoxBody<Bytes, types::ErrorCode>;
+pub type HyperIncomingBody = UnsyncBoxBody<Bytes, types::ErrorCode>;
 
 /// Common type for outgoing bodies.
-pub type HyperOutgoingBody = BoxBody<Bytes, types::ErrorCode>;
+pub type HyperOutgoingBody = UnsyncBoxBody<Bytes, types::ErrorCode>;
 
-/// The concrete type behind a `was:http/types/incoming-body` resource.
+/// The concrete type behind a `was:http/types.incoming-body` resource.
 #[derive(Debug)]
 pub struct HostIncomingBody {
     body: IncomingBodyState,
@@ -160,13 +158,13 @@ enum StreamEnd {
     Trailers(Option<FieldMap>),
 }
 
-/// The concrete type behind the `wasi:io/streams/input-stream` resource returned
-/// by `wasi:http/types/incoming-body`'s `stream` method.
+/// The concrete type behind the `wasi:io/streams.input-stream` resource returned
+/// by `wasi:http/types.incoming-body`'s `stream` method.
 #[derive(Debug)]
 pub struct HostIncomingBodyStream {
     state: IncomingBodyStreamState,
     buffer: Bytes,
-    error: Option<anyhow::Error>,
+    error: Option<wasmtime::Error>,
 }
 
 impl HostIncomingBodyStream {
@@ -234,7 +232,7 @@ enum IncomingBodyStreamState {
 }
 
 #[async_trait::async_trait]
-impl HostInputStream for HostIncomingBodyStream {
+impl InputStream for HostIncomingBodyStream {
     fn read(&mut self, size: usize) -> Result<Bytes, StreamError> {
         loop {
             // Handle buffered data/errors if any
@@ -271,7 +269,7 @@ impl HostInputStream for HostIncomingBodyStream {
 }
 
 #[async_trait::async_trait]
-impl Subscribe for HostIncomingBodyStream {
+impl Pollable for HostIncomingBodyStream {
     async fn ready(&mut self) {
         if !self.buffer.is_empty() || self.error.is_some() {
             return;
@@ -298,7 +296,7 @@ impl Drop for HostIncomingBodyStream {
     }
 }
 
-/// The concrete type behind a `wasi:http/types/future-trailers` resource.
+/// The concrete type behind a `wasi:http/types.future-trailers` resource.
 #[derive(Debug)]
 pub enum HostFutureTrailers {
     /// Trailers aren't here yet.
@@ -327,7 +325,7 @@ pub enum HostFutureTrailers {
 }
 
 #[async_trait::async_trait]
-impl Subscribe for HostFutureTrailers {
+impl Pollable for HostFutureTrailers {
     async fn ready(&mut self) {
         let body = match self {
             HostFutureTrailers::Waiting(body) => body,
@@ -347,12 +345,9 @@ impl Subscribe for HostFutureTrailers {
                 // were reached. It's up to us now to complete the body.
                 Ok(StreamEnd::Remaining(b)) => body.body = IncomingBodyState::Start(b),
 
-                // Technically this shouldn't be possible as the sender
-                // shouldn't get destroyed without receiving a message. Handle
-                // this just in case though.
+                // This means there were no trailers present.
                 Err(_) => {
-                    debug_assert!(false, "should be unreachable");
-                    *self = HostFutureTrailers::Done(Err(types::ErrorCode::ConnectionTerminated));
+                    *self = HostFutureTrailers::Done(Ok(None));
                 }
             }
         }
@@ -415,10 +410,10 @@ impl WrittenState {
     }
 }
 
-/// The concrete type behind a `wasi:http/types/outgoing-body` resource.
+/// The concrete type behind a `wasi:http/types.outgoing-body` resource.
 pub struct HostOutgoingBody {
     /// The output stream that the body is written to.
-    body_output_stream: Option<Box<dyn HostOutputStream>>,
+    body_output_stream: Option<Box<dyn OutputStream>>,
     context: StreamContext,
     written: Option<WrittenState>,
     finish_sender: Option<tokio::sync::oneshot::Sender<FinishMessage>>,
@@ -426,7 +421,14 @@ pub struct HostOutgoingBody {
 
 impl HostOutgoingBody {
     /// Create a new `HostOutgoingBody`
-    pub fn new(context: StreamContext, size: Option<u64>) -> (Self, HyperOutgoingBody) {
+    pub fn new(
+        context: StreamContext,
+        size: Option<u64>,
+        buffer_chunks: usize,
+        chunk_size: usize,
+    ) -> (Self, HyperOutgoingBody) {
+        assert!(buffer_chunks >= 1);
+
         let written = size.map(WrittenState::new);
 
         use tokio::sync::oneshot::error::RecvError;
@@ -472,17 +474,16 @@ impl HostOutgoingBody {
             }
         }
 
-        let (body_sender, body_receiver) = mpsc::channel(2);
+        // always add 1 buffer here because one empty slot is required
+        let (body_sender, body_receiver) = mpsc::channel(buffer_chunks + 1);
         let (finish_sender, finish_receiver) = oneshot::channel();
         let body_impl = BodyImpl {
             body_receiver,
             finish_receiver: Some(finish_receiver),
         }
-        .boxed();
+        .boxed_unsync();
 
-        // TODO: this capacity constant is arbitrary, and should be configurable
-        let output_stream =
-            BodyWriteStream::new(context, 1024 * 1024, body_sender, written.clone());
+        let output_stream = BodyWriteStream::new(context, chunk_size, body_sender, written.clone());
 
         (
             Self {
@@ -496,7 +497,7 @@ impl HostOutgoingBody {
     }
 
     /// Take the output stream, if it's available.
-    pub fn take_output_stream(&mut self) -> Option<Box<dyn HostOutputStream>> {
+    pub fn take_output_stream(&mut self) -> Option<Box<dyn OutputStream>> {
         self.body_output_stream.take()
     }
 
@@ -526,7 +527,7 @@ impl HostOutgoingBody {
         };
 
         // Ignoring failure: receiver died sending body, but we can't report that here.
-        let _ = sender.send(message.into());
+        let _ = sender.send(message);
 
         Ok(())
     }
@@ -602,7 +603,7 @@ impl BodyWriteStream {
 }
 
 #[async_trait::async_trait]
-impl HostOutputStream for BodyWriteStream {
+impl OutputStream for BodyWriteStream {
     fn write(&mut self, bytes: Bytes) -> Result<(), StreamError> {
         let len = bytes.len();
         match self.writer.try_send(bytes) {
@@ -612,9 +613,9 @@ impl HostOutputStream for BodyWriteStream {
                 if let Some(written) = self.written.as_ref() {
                     if !written.update(len) {
                         let total = written.written();
-                        return Err(StreamError::LastOperationFailed(anyhow!(self
-                            .context
-                            .as_body_size_error(total))));
+                        return Err(StreamError::LastOperationFailed(format_err!(
+                            self.context.as_body_size_error(total)
+                        )));
                     }
                 }
 
@@ -625,7 +626,7 @@ impl HostOutputStream for BodyWriteStream {
             // called. The call to `check_write` always guarantees that there's
             // at least one capacity if a write is allowed.
             Err(mpsc::error::TrySendError::Full(_)) => {
-                Err(StreamError::Trap(anyhow!("write exceeded budget")))
+                Err(StreamError::Trap(format_err!("write exceeded budget")))
             }
 
             // Hyper is gone so this stream is now closed.
@@ -662,7 +663,7 @@ impl HostOutputStream for BodyWriteStream {
 }
 
 #[async_trait::async_trait]
-impl Subscribe for BodyWriteStream {
+impl Pollable for BodyWriteStream {
     async fn ready(&mut self) {
         // Attempt to perform a reservation for a send. If there's capacity in
         // the channel or it's already closed then this will return immediately.

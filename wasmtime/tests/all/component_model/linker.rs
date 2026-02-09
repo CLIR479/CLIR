@@ -1,4 +1,4 @@
-use anyhow::Result;
+use wasmtime::Result;
 use wasmtime::component::types::ComponentItem;
 use wasmtime::component::{Component, Linker, ResourceType};
 use wasmtime::{Engine, Store};
@@ -106,6 +106,7 @@ fn missing_import_selects_max() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn linker_substituting_types_issue_8003() -> Result<()> {
     let engine = Engine::default();
     let linker = Linker::<()>::new(&engine);

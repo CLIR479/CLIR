@@ -27,9 +27,17 @@ cfg_if::cfg_if! {
 }
 
 cfg_if::cfg_if! {
-    // Note: VTune support is disabled on windows mingw because the ittapi crate doesn't compile
-    // there; see also https://github.com/bytecodealliance/wasmtime/pull/4003 for rationale.
-    if #[cfg(all(feature = "profiling", target_arch = "x86_64", not(any(target_os = "android", all(target_os = "windows", target_env = "gnu")))))] {
+    // Note that the `#[cfg]` here should be kept in sync with the
+    // corresponding dependency directive on `ittapi` in `Cargo.toml`.
+    if #[cfg(all(
+        feature = "profiling",
+        target_arch = "x86_64",
+        any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux",
+        ),
+    ))] {
         mod vtune;
         pub use vtune::new as new_vtune;
     } else {
@@ -43,9 +51,25 @@ cfg_if::cfg_if! {
     }
 }
 
+cfg_if::cfg_if! {
+    if #[cfg(feature = "profile-pulley")] {
+        mod pulley;
+        pub use pulley::new as new_pulley;
+    } else {
+        pub fn new_pulley() -> Result<Box<dyn ProfilingAgent>> {
+            bail!("pulley profiling support disabled at compile time.");
+        }
+    }
+}
+
 /// Common interface for profiling tools.
 pub trait ProfilingAgent: Send + Sync + 'static {
     fn register_function(&self, name: &str, code: &[u8]);
+
+    #[cfg(all(feature = "runtime", feature = "pulley"))]
+    fn register_interpreter(&self, interp: &crate::vm::Interpreter) {
+        let _ = interp;
+    }
 
     fn register_module(&self, code: &[u8], custom_name: &dyn Fn(usize) -> Option<String>) {
         use object::{File, Object as _, ObjectSection, ObjectSymbol, SectionKind, SymbolKind};
@@ -55,7 +79,10 @@ pub trait ProfilingAgent: Send + Sync + 'static {
             Err(_) => return,
         };
 
-        let text = match image.sections().find(|s| s.kind() == SectionKind::Text) {
+        let text = match image
+            .sections()
+            .find(|s| s.kind() == SectionKind::Text || s.name() == Ok(".text"))
+        {
             Some(section) => match section.data() {
                 Ok(data) => data,
                 Err(_) => return,

@@ -1,16 +1,15 @@
 use super::PREOPENED_DIR_NAME;
 use crate::check::artifacts_dir;
-use anyhow::{anyhow, Result};
 use std::path::Path;
 use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Store};
-use wasmtime_wasi::bindings::sync::Command;
-use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
+use wasmtime::{Config, Engine, Result, Store, format_err};
+use wasmtime_wasi::p2::bindings::sync::Command;
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxView};
 use wasmtime_wasi_nn::wit::WasiNnView;
-use wasmtime_wasi_nn::{wit::WasiNnCtx, Backend, InMemoryRegistry};
+use wasmtime_wasi_nn::{Backend, InMemoryRegistry, wit::WasiNnCtx};
 
 /// Run a wasi-nn test program. This is modeled after
-/// `crates/wasi/tests/all/main.rs` but still uses the older preview1 API for
+/// `crates/wasi/tests/all/main.rs` but still uses the older p1 API for
 /// file reads.
 pub fn run(path: &str, backend: Backend, preload_model: bool) -> Result<()> {
     let path = Path::new(path);
@@ -19,12 +18,12 @@ pub fn run(path: &str, backend: Backend, preload_model: bool) -> Result<()> {
     wasmtime_wasi_nn::wit::add_to_linker(&mut linker, |c: &mut Ctx| {
         WasiNnView::new(&mut c.table, &mut c.wasi_nn)
     })?;
-    wasmtime_wasi::add_to_linker_sync(&mut linker)?;
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     let module = Component::from_file(&engine, path)?;
     let mut store = Store::new(&engine, Ctx::new(&artifacts_dir(), preload_model, backend)?);
     let command = Command::instantiate(&mut store, &module, &linker)?;
     let result = command.wasi_cli_run().call_run(&mut store)?;
-    result.map_err(|_| anyhow!("failed to run command"))
+    result.map_err(|_| format_err!("failed to run command"))
 }
 
 /// The host state for running wasi-nn component tests.
@@ -36,7 +35,7 @@ struct Ctx {
 
 impl Ctx {
     fn new(preopen_dir: &Path, preload_model: bool, mut backend: Backend) -> Result<Self> {
-        let mut builder = WasiCtxBuilder::new();
+        let mut builder = WasiCtx::builder();
         builder.inherit_stdio().preopened_dir(
             preopen_dir,
             PREOPENED_DIR_NAME,
@@ -50,7 +49,7 @@ impl Ctx {
         if preload_model {
             registry.load((backend).as_dir_loadable().unwrap(), &mobilenet_dir)?;
         }
-        let wasi_nn = WasiNnCtx::new([backend.into()], registry.into());
+        let wasi_nn = WasiNnCtx::new([backend], registry.into());
 
         let table = ResourceTable::new();
 
@@ -63,11 +62,10 @@ impl Ctx {
 }
 
 impl wasmtime_wasi::WasiView for Ctx {
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi
-    }
-
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }

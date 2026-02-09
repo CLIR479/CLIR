@@ -8,9 +8,9 @@ use crate::ir::instructions::{CallInfo, InstructionData};
 use crate::ir::pcc::Fact;
 use crate::ir::user_stack_maps::{UserStackMapEntry, UserStackMapEntryVec};
 use crate::ir::{
-    types, Block, BlockCall, ConstantData, ConstantPool, DynamicType, ExtFuncData, FuncRef,
-    Immediate, Inst, JumpTables, RelSourceLoc, SigRef, Signature, Type, Value,
-    ValueLabelAssignments, ValueList, ValueListPool,
+    Block, BlockArg, BlockCall, ConstantData, ConstantPool, DynamicType, ExceptionTables,
+    ExtFuncData, FuncRef, Immediate, Inst, JumpTables, RelSourceLoc, SigRef, Signature, Type,
+    Value, ValueLabelAssignments, ValueList, ValueListPool, types,
 };
 use crate::packed_option::ReservedValue;
 use crate::write::write_operands;
@@ -65,9 +65,23 @@ impl Blocks {
         self.0.len()
     }
 
+    /// Reserves capacity for at least `additional` more elements to be
+    /// inserted.
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
+
     /// Returns `true` if the given block reference is valid.
     pub fn is_valid(&self, block: Block) -> bool {
         self.0.is_valid(block)
+    }
+
+    /// Iterate over all blocks, regardless whether a block is actually inserted
+    /// in the layout or not.
+    ///
+    /// Iterates in creation order, not layout order.
+    pub fn iter(&self) -> impl Iterator<Item = Block> {
+        self.0.keys()
     }
 }
 
@@ -107,13 +121,6 @@ pub struct DataFlowGraph {
     results: SecondaryMap<Inst, ValueList>,
 
     /// User-defined stack maps.
-    ///
-    /// Not to be confused with the stack maps that `regalloc2` produces. These
-    /// are defined by the user in `cranelift-frontend`. These will eventually
-    /// replace the stack maps support in `regalloc2`, but in the name of
-    /// incrementalism and avoiding gigantic PRs that completely overhaul
-    /// Cranelift and Wasmtime at the same time, we are allowing them to live in
-    /// parallel for the time being.
     user_stack_maps: alloc::collections::BTreeMap<Inst, UserStackMapEntryVec>,
 
     /// basic blocks in the function and their parameters.
@@ -158,6 +165,9 @@ pub struct DataFlowGraph {
 
     /// Jump tables used in this function.
     pub jump_tables: JumpTables,
+
+    /// Exception tables used in this function.
+    pub exception_tables: ExceptionTables,
 }
 
 impl DataFlowGraph {
@@ -178,6 +188,7 @@ impl DataFlowGraph {
             constants: ConstantPool::new(),
             immediates: PrimaryMap::new(),
             jump_tables: JumpTables::new(),
+            exception_tables: ExceptionTables::new(),
         }
     }
 
@@ -217,7 +228,6 @@ impl DataFlowGraph {
     ///
     /// This is intended for use with `SecondaryMap::with_capacity`.
     pub fn num_blocks(&self) -> usize {
-        let len = self.blocks.len();
         self.blocks.len()
     }
 
@@ -227,8 +237,12 @@ impl DataFlowGraph {
     }
 
     /// Make a BlockCall, bundling together the block and its arguments.
-    pub fn block_call(&mut self, block: Block, args: &[Value]) -> BlockCall {
-        BlockCall::new(block, args, &mut self.value_lists)
+    pub fn block_call<'a>(
+        &mut self,
+        block: Block,
+        args: impl IntoIterator<Item = &'a BlockArg>,
+    ) -> BlockCall {
+        BlockCall::new(block, args.into_iter().copied(), &mut self.value_lists)
     }
 
     /// Get the total number of values.
@@ -301,7 +315,7 @@ fn valid_valuedata(data: ValueDataPacked) -> bool {
     if let ValueData::Alias {
         ty: types::INVALID,
         original,
-    } = ValueData::from(data)
+    } = data
     {
         if original == Value::reserved_value() {
             return false;
@@ -319,6 +333,16 @@ impl<'a> Iterator for Values<'a> {
             .find(|kv| valid_valuedata(*kv.1))
             .map(|kv| kv.0)
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for Values<'_> {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
 }
 
 /// Handling values.
@@ -330,8 +354,13 @@ impl DataFlowGraph {
         self.values.push(data.into())
     }
 
+    /// The number of values defined in this DFG.
+    pub fn len_values(&self) -> usize {
+        self.values.len()
+    }
+
     /// Get an iterator over all values.
-    pub fn values<'a>(&'a self) -> Values {
+    pub fn values<'a>(&'a self) -> Values<'a> {
         Values {
             inner: self.values.iter(),
         }
@@ -438,13 +467,18 @@ impl DataFlowGraph {
 
         // Rewrite InstructionData in `self.insts`.
         for inst in self.insts.0.values_mut() {
-            inst.map_values(&mut self.value_lists, &mut self.jump_tables, |arg| {
-                if let ValueData::Alias { original, .. } = self.values[arg].into() {
-                    original
-                } else {
-                    arg
-                }
-            });
+            inst.map_values(
+                &mut self.value_lists,
+                &mut self.jump_tables,
+                &mut self.exception_tables,
+                |arg| {
+                    if let ValueData::Alias { original, .. } = self.values[arg].into() {
+                        original
+                    } else {
+                        arg
+                    }
+                },
+            );
         }
 
         // - `results` and block-params in `blocks` are not aliases, by
@@ -587,6 +621,30 @@ impl DataFlowGraph {
         assert!(opcode.is_safepoint());
         self.user_stack_maps.entry(inst).or_default().push(entry);
     }
+
+    /// Append multiple stack map entries for the given call instruction.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the given instruction is not a (non-tail) call instruction.
+    pub fn append_user_stack_map_entries(
+        &mut self,
+        inst: Inst,
+        entries: impl IntoIterator<Item = UserStackMapEntry>,
+    ) {
+        for entry in entries {
+            self.append_user_stack_map_entry(inst, entry);
+        }
+    }
+
+    /// Take the stack map entries for a given instruction, leaving the
+    /// instruction without stack maps.
+    pub(crate) fn take_user_stack_map_entries(
+        &mut self,
+        inst: Inst,
+    ) -> Option<UserStackMapEntryVec> {
+        self.user_stack_maps.remove(&inst)
+    }
 }
 
 /// Where did a value come from?
@@ -691,11 +749,7 @@ fn encode_narrow_field(x: u32, bits: u8) -> u32 {
 /// The inverse of the above `encode_narrow_field`: unpacks 2^n-1 into
 /// 2^32-1.
 fn decode_narrow_field(x: u32, bits: u8) -> u32 {
-    if x == (1 << bits) - 1 {
-        0xffff_ffff
-    } else {
-        x
-    }
+    if x == (1 << bits) - 1 { 0xffff_ffff } else { x }
 }
 
 impl ValueDataPacked {
@@ -846,13 +900,23 @@ impl DataFlowGraph {
     ) -> impl DoubleEndedIterator<Item = Value> + 'dfg {
         self.inst_args(inst)
             .iter()
+            .copied()
             .chain(
                 self.insts[inst]
-                    .branch_destination(&self.jump_tables)
+                    .branch_destination(&self.jump_tables, &self.exception_tables)
                     .into_iter()
-                    .flat_map(|branch| branch.args_slice(&self.value_lists).iter()),
+                    .flat_map(|branch| {
+                        branch
+                            .args(&self.value_lists)
+                            .filter_map(|arg| arg.as_value())
+                    }),
             )
-            .copied()
+            .chain(
+                self.insts[inst]
+                    .exception_table()
+                    .into_iter()
+                    .flat_map(|et| self.exception_tables[et].contexts()),
+            )
     }
 
     /// Map a function over the values of the instruction.
@@ -860,7 +924,12 @@ impl DataFlowGraph {
     where
         F: FnMut(Value) -> Value,
     {
-        self.insts[inst].map_values(&mut self.value_lists, &mut self.jump_tables, body);
+        self.insts[inst].map_values(
+            &mut self.value_lists,
+            &mut self.jump_tables,
+            &mut self.exception_tables,
+            body,
+        );
     }
 
     /// Overwrite the instruction's value references with values from the iterator.
@@ -870,9 +939,12 @@ impl DataFlowGraph {
     where
         I: Iterator<Item = Value>,
     {
-        self.insts[inst].map_values(&mut self.value_lists, &mut self.jump_tables, |_| {
-            values.next().unwrap()
-        });
+        self.insts[inst].map_values(
+            &mut self.value_lists,
+            &mut self.jump_tables,
+            &mut self.exception_tables,
+            |_| values.next().unwrap(),
+        );
     }
 
     /// Get all value arguments on `inst` as a slice.
@@ -975,7 +1047,7 @@ impl DataFlowGraph {
     }
 
     /// Create a `ReplaceBuilder` that will replace `inst` with a new instruction in place.
-    pub fn replace(&mut self, inst: Inst) -> ReplaceBuilder {
+    pub fn replace(&mut self, inst: Inst) -> ReplaceBuilder<'_> {
         ReplaceBuilder::new(self, inst)
     }
 
@@ -1050,7 +1122,7 @@ impl DataFlowGraph {
     pub fn first_result(&self, inst: Inst) -> Value {
         self.results[inst]
             .first(&self.value_lists)
-            .expect("Instruction has no results")
+            .unwrap_or_else(|| panic!("{inst} has no results"))
     }
 
     /// Test if `inst` has any result values currently.
@@ -1079,18 +1151,22 @@ impl DataFlowGraph {
     /// Get the call signature of a direct or indirect call instruction.
     /// Returns `None` if `inst` is not a call instruction.
     pub fn call_signature(&self, inst: Inst) -> Option<SigRef> {
-        match self.insts[inst].analyze_call(&self.value_lists) {
+        match self.insts[inst].analyze_call(&self.value_lists, &self.exception_tables) {
             CallInfo::NotACall => None,
             CallInfo::Direct(f, _) => Some(self.ext_funcs[f].signature),
+            CallInfo::DirectWithSig(_, s, _) => Some(s),
             CallInfo::Indirect(s, _) => Some(s),
         }
     }
 
-    /// Like `call_signature` but returns none for tail call instructions.
-    fn non_tail_call_signature(&self, inst: Inst) -> Option<SigRef> {
+    /// Like `call_signature` but returns none for tail call
+    /// instructions and try-call (exception-handling invoke)
+    /// instructions.
+    fn non_tail_call_or_try_call_signature(&self, inst: Inst) -> Option<SigRef> {
         let sig = self.call_signature(inst)?;
         match self.insts[inst].opcode() {
             ir::Opcode::ReturnCall | ir::Opcode::ReturnCallIndirect => None,
+            ir::Opcode::TryCall | ir::Opcode::TryCallIndirect => None,
             _ => Some(sig),
         }
     }
@@ -1098,7 +1174,7 @@ impl DataFlowGraph {
     // Only for use by the verifier. Everyone else should just use
     // `dfg.inst_results(inst).len()`.
     pub(crate) fn num_expected_results_for_verifier(&self, inst: Inst) -> usize {
-        match self.non_tail_call_signature(inst) {
+        match self.non_tail_call_or_try_call_signature(inst) {
             Some(sig) => self.signatures[sig].returns.len(),
             None => {
                 let constraints = self.insts[inst].opcode().constraints();
@@ -1113,7 +1189,7 @@ impl DataFlowGraph {
         inst: Inst,
         ctrl_typevar: Type,
     ) -> impl iter::ExactSizeIterator<Item = Type> + 'a {
-        return match self.non_tail_call_signature(inst) {
+        return match self.non_tail_call_or_try_call_signature(inst) {
             Some(sig) => InstResultTypes::Signature(self, sig, 0),
             None => {
                 let constraints = self.insts[inst].opcode().constraints();
@@ -1263,11 +1339,7 @@ impl DataFlowGraph {
         {
             // We update the position of the old last arg.
             let mut last_arg_data = ValueData::from(self.values[last_arg_val]);
-            if let ValueData::Param {
-                num: ref mut old_num,
-                ..
-            } = &mut last_arg_data
-            {
+            if let ValueData::Param { num: old_num, .. } = &mut last_arg_data {
                 *old_num = num;
                 self.values[last_arg_val] = last_arg_data.into();
             } else {
@@ -1296,7 +1368,7 @@ impl DataFlowGraph {
                 .unwrap()];
             let mut data = ValueData::from(*packed);
             match &mut data {
-                ValueData::Param { ref mut num, .. } => {
+                ValueData::Param { num, .. } => {
                     *num -= 1;
                     *packed = data.into();
                 }
@@ -1365,6 +1437,15 @@ impl DataFlowGraph {
     /// with `change_to_alias()`.
     pub fn detach_block_params(&mut self, block: Block) -> ValueList {
         self.blocks[block].params.take()
+    }
+
+    /// Detach all of an instruction's result values.
+    ///
+    /// This is a quite low-level operation. A sensible thing to do with the
+    /// detached results is to change them into aliases with
+    /// `change_to_alias()`.
+    pub fn detach_inst_results(&mut self, inst: Inst) {
+        self.results[inst].clear(&mut self.value_lists);
     }
 
     /// Merge the facts for two values. If both values have facts and
@@ -1644,10 +1725,10 @@ mod tests {
 
         let idata = InstructionData::Trap {
             opcode: Opcode::Trap,
-            code: TrapCode::User(0),
+            code: TrapCode::unwrap_user(1),
         };
         let inst = dfg.make_inst(idata);
-        assert_eq!(dfg.display_inst(inst).to_string(), "trap user0");
+        assert_eq!(dfg.display_inst(inst).to_string(), "trap user1");
 
         // Result slice should be empty.
         assert_eq!(dfg.inst_results(inst), &[]);
@@ -1747,8 +1828,8 @@ mod tests {
 
     #[test]
     fn aliases() {
-        use crate::ir::condcodes::IntCC;
         use crate::ir::InstBuilder;
+        use crate::ir::condcodes::IntCC;
 
         let mut func = Function::new();
         let block0 = func.dfg.make_block();

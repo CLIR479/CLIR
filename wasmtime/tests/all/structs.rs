@@ -1,22 +1,13 @@
+use super::gc_store;
 use wasmtime::*;
-
-fn gc_store() -> Result<Store<()>> {
-    let _ = env_logger::try_init();
-
-    let mut config = Config::new();
-    config.wasm_function_references(true);
-    config.wasm_gc(true);
-
-    let engine = Engine::new(&config)?;
-    Ok(Store::new(&engine, ()))
-}
+use wasmtime_test_macros::wasmtime_test;
 
 #[test]
 fn struct_new_empty() -> Result<()> {
     let mut store = gc_store()?;
     let struct_ty = StructType::new(store.engine(), [])?;
     let pre = StructRefPre::new(&mut store, struct_ty);
-    StructRef::new(store, &pre, &[])?;
+    StructRef::new(&mut store, &pre, &[])?;
     Ok(())
 }
 
@@ -33,7 +24,7 @@ fn struct_new_with_fields() -> Result<()> {
     )?;
     let pre = StructRefPre::new(&mut store, struct_ty);
     StructRef::new(
-        store,
+        &mut store,
         &pre,
         &[Val::I32(1), Val::I32(2), Val::null_any_ref()],
     )?;
@@ -57,7 +48,7 @@ fn struct_new_unrooted_field() -> Result<()> {
     };
     assert!(anyref.is_i31(&store).is_err());
     let pre = StructRefPre::new(&mut store, struct_ty);
-    assert!(StructRef::new(store, &pre, &[anyref.into()]).is_err());
+    assert!(StructRef::new(&mut store, &pre, &[anyref.into()]).is_err());
     Ok(())
 }
 
@@ -80,7 +71,7 @@ fn struct_new_cross_store_field() {
     let pre = StructRefPre::new(&mut store, struct_ty);
 
     // This should panic.
-    let _ = StructRef::new(store, &pre, &[anyref.into()]);
+    let _ = StructRef::new(&mut store, &pre, &[anyref.into()]);
 }
 
 #[test]
@@ -704,6 +695,94 @@ fn instantiate_with_struct_global() -> Result<()> {
     let s1 = anyref.unwrap_struct(&store)?;
     assert_eq!(s1.field(&mut store, 0)?.unwrap_i32(), 42);
     assert!(Rooted::ref_eq(&store, &s0, &s1)?);
+
+    Ok(())
+}
+
+#[test]
+fn can_put_funcrefs_in_structs() -> Result<()> {
+    let mut store = gc_store()?;
+
+    let struct_ty = StructType::new(
+        store.engine(),
+        [FieldType::new(Mutability::Var, RefType::FUNCREF.into())],
+    )?;
+
+    let f0 = Func::wrap(&mut store, |_caller: Caller<()>| -> u32 { 0x1234 });
+    let f1 = Func::wrap(&mut store, |_caller: Caller<()>| -> u32 { 0x5678 });
+
+    let pre = StructRefPre::new(&mut store, struct_ty.clone());
+    let s = StructRef::new(&mut store, &pre, &[f0.into()])?;
+
+    let f = s.field(&mut store, 0)?;
+    let f = f.unwrap_funcref().unwrap();
+    let f = f.typed::<(), u32>(&store)?;
+    assert_eq!(f.call(&mut store, ())?, 0x1234);
+
+    s.set_field(&mut store, 0, f1.into())?;
+
+    let f = s.field(&mut store, 0)?;
+    let f = f.unwrap_funcref().unwrap();
+    let f = f.typed::<(), u32>(&store)?;
+    assert_eq!(f.call(&mut store, ())?, 0x5678);
+
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn struct_ref_struct_in_same_rec_group_in_global() -> Result<()> {
+    let mut store = gc_store()?;
+    let module = Module::new(
+        store.engine(),
+        r#"
+            (module
+                (rec
+                    (type $b (struct))
+                    (type $a (struct (field (ref $b))))
+                )
+                (global (ref $a)
+                    struct.new_default $b
+                    struct.new $a
+                )
+            )
+        "#,
+    )?;
+    let _instance = Instance::new(&mut store, &module, &[])?;
+    Ok(())
+}
+
+#[wasmtime_test(wasm_features(function_references, gc))]
+#[cfg_attr(miri, ignore)]
+fn issue_9714(config: &mut Config) -> Result<()> {
+    let engine = Engine::new(config)?;
+
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+              (rec (type $a (struct))
+                   (type $b (struct)))
+              (rec (type $c (struct)))
+
+              (func (export "fa") (result (ref null $a)) unreachable)
+              (func (export "fb") (result (ref null $b)) unreachable)
+              (func (export "fc") (result (ref null $c)) unreachable)
+            )
+        "#,
+    )?;
+
+    let mut store = Store::new(&engine, ());
+
+    for exp in module.exports() {
+        let res_ty = exp.ty().unwrap_func().result(0).unwrap();
+        let struct_ty = res_ty
+            .unwrap_ref()
+            .heap_type()
+            .unwrap_concrete_struct()
+            .clone();
+        let _ = StructRefPre::new(&mut store, struct_ty);
+    }
 
     Ok(())
 }

@@ -1,69 +1,97 @@
 #!/usr/bin/env bash
 
-# Script to re-vendor the WIT files that Wasmtime uses as defined by a
-# particular tag in upstream repositories.
+# Script to re-vendor the WIT files that Wasmtime uses using wkg to fetch
+# packages from the OCI registry.
 #
 # This script is executed on CI to ensure that everything is up-to-date.
 set -ex
 
-# The make_vendor function takes a base path (e.g., "wasi") and a list
-# of packages in the format "name@tag". It constructs the full destination
-# path, downloads the tarballs from GitHub, extracts the relevant files, and
-# removes any unwanted directories.
-make_vendor() {
-  local name=$1
-  local packages=$2
-  local path="crates/$name/wit/deps"
+# Temporary directory for downloads
+cache_dir=$(mktemp -d)
+trap "rm -rf $cache_dir" EXIT
 
-  rm -rf $path
-  mkdir -p $path
+# Helper to download the `WebAssembly/$repo` dir at the `$tag` (or rev)
+# specified. The `wit/*.wit` files are placed in `$path`.
+get_github() {
+  local repo=$1
+  local tag=$2
+  local path=$3
 
-  for package in $packages; do
-    IFS='@' read -r repo tag <<< "$package"
-    mkdir -p $path/$repo
-    cached_extracted_dir="$cache_dir/$repo-$tag"
+  rm -rf "$path"
+  mkdir -p "$path"
 
-    if [[ ! -d $cached_extracted_dir ]]; then
-      mkdir -p $cached_extracted_dir
-      curl -sL https://github.com/WebAssembly/wasi-$repo/archive/$tag.tar.gz | \
-        tar xzf - --strip-components=1 -C $cached_extracted_dir
-      rm -rf $cached_extracted_dir/wit/deps*
-    fi
+  cached_extracted_dir="$cache_dir/$repo-$tag"
 
-    cp -r $cached_extracted_dir/wit/* $path/$repo
-  done
+  if [[ ! -d $cached_extracted_dir ]]; then
+    mkdir -p $cached_extracted_dir
+    curl --retry 5 --retry-all-errors -sLO https://github.com/WebAssembly/$repo/archive/$tag.tar.gz
+    tar xzf $tag.tar.gz --strip-components=1 -C $cached_extracted_dir
+    rm $tag.tar.gz
+    rm -rf $cached_extracted_dir/wit/deps*
+  fi
+
+  cp -r $cached_extracted_dir/wit/* $path
 }
 
-cache_dir=$(mktemp -d)
+p2=0.2.6
+p3=0.3.0-rc-2026-01-06
 
-make_vendor "wasi" "
-  cli@v0.2.1
-  clocks@v0.2.1
-  filesystem@v0.2.1
-  io@v0.2.1
-  random@v0.2.1
-  sockets@v0.2.1
-"
+rm -rf crates/wasi-io/wit/deps
+mkdir -p crates/wasi-io/wit/deps
+wkg get --format wit --overwrite "wasi:io@$p2" -o "crates/wasi-io/wit/deps/io.wit"
 
-make_vendor "wasi-http" "
-  cli@v0.2.1
-  clocks@v0.2.1
-  filesystem@v0.2.1
-  io@v0.2.1
-  random@v0.2.1
-  sockets@v0.2.1
-  http@v0.2.1
-"
+rm -rf crates/wasi/src/p2/wit/deps
+mkdir -p crates/wasi/src/p2/wit/deps
+wkg get --format wit --overwrite "wasi:io@$p2" -o "crates/wasi/src/p2/wit/deps/io.wit"
+wkg get --format wit --overwrite "wasi:clocks@$p2" -o "crates/wasi/src/p2/wit/deps/clocks.wit"
+wkg get --format wit --overwrite "wasi:cli@$p2" -o "crates/wasi/src/p2/wit/deps/cli.wit"
+wkg get --format wit --overwrite "wasi:filesystem@$p2" -o "crates/wasi/src/p2/wit/deps/filesystem.wit"
+wkg get --format wit --overwrite "wasi:random@$p2" -o "crates/wasi/src/p2/wit/deps/random.wit"
+wkg get --format wit --overwrite "wasi:sockets@$p2" -o "crates/wasi/src/p2/wit/deps/sockets.wit"
 
-make_vendor "wasi-runtime-config" "runtime-config@c667fe6"
+rm -rf crates/wasi-http/wit/deps
+mkdir -p crates/wasi-http/wit/deps
+wkg get --format wit --overwrite "wasi:io@$p2" -o "crates/wasi-http/wit/deps/io.wit"
+wkg get --format wit --overwrite "wasi:clocks@$p2" -o "crates/wasi-http/wit/deps/clocks.wit"
+wkg get --format wit --overwrite "wasi:cli@$p2" -o "crates/wasi-http/wit/deps/cli.wit"
+wkg get --format wit --overwrite "wasi:filesystem@$p2" -o "crates/wasi-http/wit/deps/filesystem.wit"
+wkg get --format wit --overwrite "wasi:random@$p2" -o "crates/wasi-http/wit/deps/random.wit"
+wkg get --format wit --overwrite "wasi:sockets@$p2" -o "crates/wasi-http/wit/deps/sockets.wit"
+wkg get --format wit --overwrite "wasi:http@$p2" -o "crates/wasi-http/wit/deps/http.wit"
 
-make_vendor "wasi-keyvalue" "keyvalue@219ea36"
 
-rm -rf $cache_dir
+rm -rf crates/wasi-tls/wit/deps
+mkdir -p crates/wasi-tls/wit/deps
+wkg get --format wit --overwrite "wasi:io@$p2" -o "crates/wasi-tls/wit/deps/io.wit"
+get_github wasi-tls v0.2.0-draft+505fc98 crates/wasi-tls/wit/deps/tls
 
-# Separately (for now), vendor the `wasi-nn` WIT files since their retrieval is
-# slightly different than above.
+rm -rf crates/wasi-config/wit/deps
+mkdir -p crates/wasi-config/wit/deps
+get_github wasi-config v0.2.0-rc.1 crates/wasi-config/wit/deps/config
+
+rm -rf crates/wasi-keyvalue/wit/deps
+mkdir -p crates/wasi-keyvalue/wit/deps
+get_github wasi-keyvalue 219ea36 crates/wasi-keyvalue/wit/deps/keyvalue
+
+rm -rf crates/wasi/src/p3/wit/deps
+mkdir -p crates/wasi/src/p3/wit/deps
+wkg get --format wit --overwrite "wasi:clocks@$p3" -o "crates/wasi/src/p3/wit/deps/clocks.wit"
+wkg get --format wit --overwrite "wasi:cli@$p3" -o "crates/wasi/src/p3/wit/deps/cli.wit"
+wkg get --format wit --overwrite "wasi:filesystem@$p3" -o "crates/wasi/src/p3/wit/deps/filesystem.wit"
+wkg get --format wit --overwrite "wasi:random@$p3" -o "crates/wasi/src/p3/wit/deps/random.wit"
+wkg get --format wit --overwrite "wasi:sockets@$p3" -o "crates/wasi/src/p3/wit/deps/sockets.wit"
+
+rm -rf crates/wasi-http/src/p3/wit/deps
+mkdir -p crates/wasi-http/src/p3/wit/deps
+wkg get --format wit --overwrite "wasi:clocks@$p3" -o "crates/wasi-http/src/p3/wit/deps/clocks.wit"
+wkg get --format wit --overwrite "wasi:cli@$p3" -o "crates/wasi-http/src/p3/wit/deps/cli.wit"
+wkg get --format wit --overwrite "wasi:filesystem@$p3" -o "crates/wasi-http/src/p3/wit/deps/filesystem.wit"
+wkg get --format wit --overwrite "wasi:random@$p3" -o "crates/wasi-http/src/p3/wit/deps/random.wit"
+wkg get --format wit --overwrite "wasi:sockets@$p3" -o "crates/wasi-http/src/p3/wit/deps/sockets.wit"
+wkg get --format wit --overwrite "wasi:http@$p3" -o "crates/wasi-http/src/p3/wit/deps/http.wit"
+
+# wasi-nn is fetched separately since it's not in the standard WASI registry
 repo=https://raw.githubusercontent.com/WebAssembly/wasi-nn
-revision=0.2.0-rc-2024-08-19
-curl -L $repo/$revision/wasi-nn.witx -o crates/wasi-nn/witx/wasi-nn.witx
-curl -L $repo/$revision/wit/wasi-nn.wit -o crates/wasi-nn/wit/wasi-nn.wit
+revision=0.2.0-rc-2024-10-28
+curl --retry 5 --retry-all-errors -L "$repo/$revision/wasi-nn.witx" -o crates/wasi-nn/witx/wasi-nn.witx
+curl --retry 5 --retry-all-errors -L "$repo/$revision/wit/wasi-nn.wit" -o crates/wasi-nn/wit/wasi-nn.wit

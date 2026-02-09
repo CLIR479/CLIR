@@ -43,8 +43,8 @@
 //! virtual filesystem.
 //!
 //! Implementations of the `WasiFile` and `WasiDir` traits are provided
-//! for synchronous embeddings (i.e. Config::async_support(false)) in
-//! `wasi_common::sync` and for Tokio embeddings in `wasi_common::tokio`.
+//! for synchronous embeddings in `wasi_common::sync` and for Tokio embeddings
+//! in `wasi_common::tokio`.
 //!
 //! ## Traits for the rest of WASI's features
 //!
@@ -98,6 +98,8 @@ pub use sched::{Poll, WasiSched};
 pub use string_array::{StringArray, StringArrayError};
 pub use table::Table;
 
+pub(crate) use wasmtime_environ::error::Error as EnvError;
+
 // The only difference between these definitions for sync vs async is whether
 // the wasmtime::Funcs generated are async (& therefore need an async Store and an executor to run)
 // or whether they have an internal "dummy executor" that expects the implementation of all
@@ -109,14 +111,16 @@ macro_rules! define_wasi {
     ($async_mode:tt $($bounds:tt)*) => {
 
     use wasmtime::Linker;
+    use wasmtime_environ::error::Result as EnvResult;
 
     pub fn add_to_linker<T, U>(
         linker: &mut Linker<T>,
         get_cx: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-    ) -> anyhow::Result<()>
+    ) -> EnvResult<()>
         where U: Send
                 + crate::snapshots::preview_0::wasi_unstable::WasiUnstable
                 + crate::snapshots::preview_1::wasi_snapshot_preview1::WasiSnapshotPreview1,
+              T: 'static,
             $($bounds)*
     {
         snapshots::preview_1::add_wasi_snapshot_preview1_to_linker(linker, get_cx)?;
@@ -129,7 +133,7 @@ macro_rules! define_wasi {
             wiggle::wasmtime_integration!({
                 // The wiggle code to integrate with lives here:
                 target: crate::snapshots::preview_1,
-                witx: ["$CARGO_MANIFEST_DIR/witx/preview1/wasi_snapshot_preview1.witx"],
+                witx: ["witx/preview1/wasi_snapshot_preview1.witx"],
                 errors: { errno => trappable Error },
                 $async_mode: *
             });
@@ -138,7 +142,7 @@ macro_rules! define_wasi {
             wiggle::wasmtime_integration!({
                 // The wiggle code to integrate with lives here:
                 target: crate::snapshots::preview_0,
-                witx: ["$CARGO_MANIFEST_DIR/witx/preview0/wasi_unstable.witx"],
+                witx: ["witx/preview0/wasi_unstable.witx"],
                 errors: { errno => trappable Error },
                 $async_mode: *
             });
@@ -155,22 +159,15 @@ macro_rules! define_wasi {
 /// CLI; this would not be suitable for use in multi-tenant embeddings.
 #[cfg_attr(docsrs, doc(cfg(feature = "exit")))]
 #[cfg(feature = "exit")]
-pub fn maybe_exit_on_error(e: anyhow::Error) -> anyhow::Error {
+pub fn maybe_exit_on_error(e: EnvError) -> EnvError {
     use std::process;
     use wasmtime::Trap;
 
     // If a specific WASI error code was requested then that's
     // forwarded through to the process here without printing any
     // extra error information.
-    let code = e.downcast_ref::<crate::I32Exit>().map(|e| e.0);
-    if let Some(exit) = code {
-        // Print the error message in the usual way.
-        // On Windows, exit status 3 indicates an abort (see below),
-        // so return 1 indicating a non-zero status to avoid ambiguity.
-        if cfg!(windows) && exit >= 3 {
-            process::exit(1);
-        }
-        process::exit(exit);
+    if let Some(exit) = e.downcast_ref::<crate::I32Exit>() {
+        process::exit(exit.0);
     }
 
     // If the program exited because of a trap, return an error code

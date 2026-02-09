@@ -1,12 +1,13 @@
 //! Decoding support for pulley bytecode.
 
-use alloc::vec::Vec;
-use cranelift_bitset::scalar::ScalarBitSetStorage;
-use cranelift_bitset::ScalarBitSet;
-
 use crate::imms::*;
 use crate::opcode::*;
 use crate::regs::*;
+use alloc::vec::Vec;
+use core::convert::Infallible;
+use core::ptr::NonNull;
+use cranelift_bitset::ScalarBitSet;
+use cranelift_bitset::scalar::ScalarBitSetStorage;
 
 /// Either an `Ok(T)` or an `Err(DecodingError)`.
 pub type Result<T, E = DecodingError> = core::result::Result<T, E>;
@@ -147,13 +148,13 @@ impl<'a> SafeBytecodeStream<'a> {
 
 impl BytecodeStream for SafeBytecodeStream<'_> {
     fn read<const N: usize>(&mut self) -> Result<[u8; N], Self::Error> {
-        let bytes = *self
+        let (bytes, rest) = self
             .bytecode
-            .first_chunk::<N>()
+            .split_first_chunk()
             .ok_or_else(|| self.unexpected_eof())?;
-        self.bytecode = &self.bytecode[N..];
+        self.bytecode = rest;
         self.position += N;
-        Ok(bytes)
+        Ok(*bytes)
     }
 
     type Error = DecodingError;
@@ -186,15 +187,11 @@ impl BytecodeStream for SafeBytecodeStream<'_> {
     }
 }
 
-/// An uninhabited type that cannot be constructed at runtime.
-#[derive(Debug)]
-pub enum Uninhabited {}
-
 /// An unsafe bytecode stream.
 ///
 /// This is a wrapper over a raw pointer to bytecode somewhere in memory.
 #[derive(Clone, Copy, Debug)]
-pub struct UnsafeBytecodeStream(*mut u8);
+pub struct UnsafeBytecodeStream(NonNull<u8>);
 
 impl UnsafeBytecodeStream {
     /// Construct a new `UnsafeBytecodeStream` pointing at the given PC.
@@ -208,8 +205,7 @@ impl UnsafeBytecodeStream {
     /// new PC, this stream must not be used to read just after the
     /// unconditional jump instruction because there is no guarantee that that
     /// memory is part of the bytecode stream or not.
-    pub unsafe fn new(pc: *mut u8) -> Self {
-        assert!(!pc.is_null());
+    pub unsafe fn new(pc: NonNull<u8>) -> Self {
         UnsafeBytecodeStream(pc)
     }
 
@@ -222,24 +218,23 @@ impl UnsafeBytecodeStream {
     /// that the address at `self._as_ptr() + offset` contains valid Pulley
     /// bytecode.
     pub unsafe fn offset(&self, offset: isize) -> Self {
-        UnsafeBytecodeStream(self.0.offset(offset))
+        UnsafeBytecodeStream(unsafe { NonNull::new_unchecked(self.0.as_ptr().offset(offset)) })
     }
 
     /// Get this stream's underlying raw pointer.
-    pub fn as_ptr(&self) -> *mut u8 {
+    pub fn as_ptr(&self) -> NonNull<u8> {
         self.0
     }
 }
 
 impl BytecodeStream for UnsafeBytecodeStream {
     fn read<const N: usize>(&mut self) -> Result<[u8; N], Self::Error> {
-        debug_assert!(!self.0.is_null());
-        let bytes = unsafe { self.0.cast::<[u8; N]>().read() };
-        self.0 = unsafe { self.0.add(N) };
+        let bytes = unsafe { self.0.cast::<[u8; N]>().as_ptr().read() };
+        self.0 = unsafe { NonNull::new_unchecked(self.0.as_ptr().add(N)) };
         Ok(bytes)
     }
 
-    type Error = Uninhabited;
+    type Error = Infallible;
 
     fn unexpected_eof(&self) -> Self::Error {
         unsafe { crate::unreachable_unchecked() }
@@ -260,7 +255,8 @@ impl BytecodeStream for UnsafeBytecodeStream {
 
 /// Anything that can be decoded from a bytecode stream, e.g. opcodes,
 /// immediates, registers, etc...
-trait Decode: Sized {
+pub trait Decode: Sized {
+    /// Decode this type from the given bytecode stream.
     fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
     where
         T: BytecodeStream;
@@ -302,6 +298,15 @@ impl Decode for u64 {
     }
 }
 
+impl Decode for u128 {
+    fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
+    where
+        T: BytecodeStream,
+    {
+        Ok(u128::from_le_bytes(bytecode.read()?))
+    }
+}
+
 impl Decode for i8 {
     fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
     where
@@ -335,6 +340,15 @@ impl Decode for i64 {
         T: BytecodeStream,
     {
         Ok(i64::from_le_bytes(bytecode.read()?))
+    }
+}
+
+impl Decode for i128 {
+    fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
+    where
+        T: BytecodeStream,
+    {
+        Ok(i128::from_le_bytes(bytecode.read()?))
     }
 }
 
@@ -377,7 +391,42 @@ impl Decode for PcRelOffset {
     }
 }
 
-impl<R: Reg> Decode for BinaryOperands<R> {
+impl Decode for Opcode {
+    fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
+    where
+        T: BytecodeStream,
+    {
+        let byte = u8::decode(bytecode)?;
+        match Opcode::new(byte) {
+            Some(v) => Ok(v),
+            None => Err(bytecode.invalid_opcode(byte)),
+        }
+    }
+}
+
+impl Decode for ExtendedOpcode {
+    fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
+    where
+        T: BytecodeStream,
+    {
+        let word = u16::decode(bytecode)?;
+        match ExtendedOpcode::new(word) {
+            Some(v) => Ok(v),
+            None => Err(bytecode.invalid_extended_opcode(word)),
+        }
+    }
+}
+
+impl<D: Reg, S1: Reg, S2: Reg> Decode for BinaryOperands<D, S1, S2> {
+    fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
+    where
+        T: BytecodeStream,
+    {
+        u16::decode(bytecode).map(|bits| Self::from_bits(bits))
+    }
+}
+
+impl<D: Reg, S1: Reg> Decode for BinaryOperands<D, S1, U6> {
     fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
     where
         T: BytecodeStream,
@@ -395,12 +444,54 @@ impl<S: Decode + ScalarBitSetStorage> Decode for ScalarBitSet<S> {
     }
 }
 
-impl<R: Reg + Decode> Decode for RegSet<R> {
+impl<R: Reg + Decode> Decode for UpperRegSet<R> {
     fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
     where
         T: BytecodeStream,
     {
         ScalarBitSet::decode(bytecode).map(Self::from)
+    }
+}
+
+impl Decode for AddrO32 {
+    fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
+    where
+        T: BytecodeStream,
+    {
+        Ok(AddrO32 {
+            addr: XReg::decode(bytecode)?,
+            offset: i32::decode(bytecode)?,
+        })
+    }
+}
+
+impl Decode for AddrZ {
+    fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
+    where
+        T: BytecodeStream,
+    {
+        Ok(AddrZ {
+            addr: XReg::decode(bytecode)?,
+            offset: i32::decode(bytecode)?,
+        })
+    }
+}
+
+impl Decode for AddrG32 {
+    fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
+    where
+        T: BytecodeStream,
+    {
+        Ok(AddrG32::from_bits(u32::decode(bytecode)?))
+    }
+}
+
+impl Decode for AddrG32Bne {
+    fn decode<T>(bytecode: &mut T) -> Result<Self, T::Error>
+    where
+        T: BytecodeStream,
+    {
+        Ok(AddrG32Bne::from_bits(u32::decode(bytecode)?))
     }
 }
 
@@ -655,3 +746,41 @@ macro_rules! define_extended_decoder {
     };
 }
 for_each_extended_op!(define_extended_decoder);
+
+/// Functions for decoding the operands of an instruction, assuming the opcode
+/// has already been decoded.
+pub mod operands {
+    use super::*;
+
+    macro_rules! define_operands_decoder {
+        (
+            $(
+                $( #[$attr:meta] )*
+                    $snake_name:ident = $name:ident $( {
+                    $(
+                        $( #[$field_attr:meta] )*
+                        $field:ident : $field_ty:ty
+                    ),*
+                } )? ;
+            )*
+        ) => {
+            $(
+                #[allow(unused_variables, reason = "macro-generated")]
+                #[expect(missing_docs, reason = "macro-generated")]
+                pub fn $snake_name<T: BytecodeStream>(pc: &mut T) -> Result<($($($field_ty,)*)?), T::Error> {
+                    Ok((($($((<$field_ty>::decode(pc))?,)*)?)))
+                }
+            )*
+        };
+    }
+
+    for_each_op!(define_operands_decoder);
+
+    /// Decode an extended opcode from `pc` to match the payload of the
+    /// "extended" opcode.
+    pub fn extended<T: BytecodeStream>(pc: &mut T) -> Result<(ExtendedOpcode,), T::Error> {
+        Ok((ExtendedOpcode::decode(pc)?,))
+    }
+
+    for_each_extended_op!(define_operands_decoder);
+}

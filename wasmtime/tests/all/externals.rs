@@ -29,7 +29,8 @@ fn bad_tables() {
     let ty = TableType::new(RefType::FUNCREF, 0, Some(1));
     let t = Table::new(&mut store, ty.clone(), Ref::Func(None)).unwrap();
     assert!(t.get(&mut store, 0).is_none());
-    assert!(t.get(&mut store, u32::max_value()).is_none());
+    assert!(t.get(&mut store, u64::from(u32::MAX)).is_none());
+    assert!(t.get(&mut store, u64::MAX).is_none());
 
     // set out of bounds or wrong type
     let ty = TableType::new(RefType::FUNCREF, 1, Some(1));
@@ -54,7 +55,7 @@ fn bad_tables() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn cross_store() -> anyhow::Result<()> {
+fn cross_store() -> wasmtime::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
     let engine = Engine::new(&cfg)?;
@@ -113,24 +114,30 @@ fn cross_store() -> anyhow::Result<()> {
     let s1_f = s1_inst.get_func(&mut store1, "f").unwrap();
     let s2_f = s2_inst.get_func(&mut store2, "f").unwrap();
 
-    assert!(s1_f
-        .call(&mut store1, &[Val::FuncRef(None)], &mut [])
-        .is_ok());
-    assert!(s2_f
-        .call(&mut store2, &[Val::FuncRef(None)], &mut [])
-        .is_ok());
-    assert!(s1_f
-        .call(&mut store1, &[Some(s1_f).into()], &mut [])
-        .is_ok());
-    assert!(s1_f
-        .call(&mut store1, &[Some(s2_f).into()], &mut [])
-        .is_err());
-    assert!(s2_f
-        .call(&mut store2, &[Some(s1_f).into()], &mut [])
-        .is_err());
-    assert!(s2_f
-        .call(&mut store2, &[Some(s2_f).into()], &mut [])
-        .is_ok());
+    assert!(
+        s1_f.call(&mut store1, &[Val::FuncRef(None)], &mut [])
+            .is_ok()
+    );
+    assert!(
+        s2_f.call(&mut store2, &[Val::FuncRef(None)], &mut [])
+            .is_ok()
+    );
+    assert!(
+        s1_f.call(&mut store1, &[Some(s1_f).into()], &mut [])
+            .is_ok()
+    );
+    assert!(
+        s1_f.call(&mut store1, &[Some(s2_f).into()], &mut [])
+            .is_err()
+    );
+    assert!(
+        s2_f.call(&mut store2, &[Some(s1_f).into()], &mut [])
+            .is_err()
+    );
+    assert!(
+        s2_f.call(&mut store2, &[Some(s2_f).into()], &mut [])
+            .is_ok()
+    );
 
     let s1_f_t = s1_f.typed::<Option<Func>, ()>(&store1)?;
     let s2_f_t = s2_f.typed::<Option<Func>, ()>(&store2)?;
@@ -146,7 +153,7 @@ fn cross_store() -> anyhow::Result<()> {
 }
 
 #[test]
-fn get_set_externref_globals_via_api() -> anyhow::Result<()> {
+fn get_set_externref_globals_via_api() -> wasmtime::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
     let engine = Engine::new(&cfg)?;
@@ -164,8 +171,18 @@ fn get_set_externref_globals_via_api() -> anyhow::Result<()> {
     let hello = ExternRef::new(&mut store, "hello".to_string())?;
     global.set(&mut store, hello.into())?;
     let r = global.get(&mut store).unwrap_externref().cloned().unwrap();
-    assert!(r.data(&store)?.is::<String>());
-    assert_eq!(r.data(&store)?.downcast_ref::<String>().unwrap(), "hello");
+    assert!(
+        r.data(&store)?
+            .expect("should have host data")
+            .is::<String>()
+    );
+    assert_eq!(
+        r.data(&store)?
+            .expect("should have host data")
+            .downcast_ref::<String>()
+            .unwrap(),
+        "hello"
+    );
 
     // Initialize with a non-null externref.
 
@@ -176,14 +193,21 @@ fn get_set_externref_globals_via_api() -> anyhow::Result<()> {
         externref.into(),
     )?;
     let r = global.get(&mut store).unwrap_externref().cloned().unwrap();
-    assert!(r.data(&store)?.is::<i32>());
-    assert_eq!(r.data(&store)?.downcast_ref::<i32>().copied().unwrap(), 42);
+    assert!(r.data(&store)?.expect("should have host data").is::<i32>());
+    assert_eq!(
+        r.data(&store)?
+            .expect("should have host data")
+            .downcast_ref::<i32>()
+            .copied()
+            .unwrap(),
+        42
+    );
 
     Ok(())
 }
 
 #[test]
-fn get_set_funcref_globals_via_api() -> anyhow::Result<()> {
+fn get_set_funcref_globals_via_api() -> wasmtime::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
     let engine = Engine::new(&cfg)?;
@@ -218,7 +242,7 @@ fn get_set_funcref_globals_via_api() -> anyhow::Result<()> {
 }
 
 #[test]
-fn create_get_set_funcref_tables_via_api() -> anyhow::Result<()> {
+fn create_get_set_funcref_tables_via_api() -> wasmtime::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
     let engine = Engine::new(&cfg)?;
@@ -236,7 +260,7 @@ fn create_get_set_funcref_tables_via_api() -> anyhow::Result<()> {
 }
 
 #[test]
-fn fill_funcref_tables_via_api() -> anyhow::Result<()> {
+fn fill_funcref_tables_via_api() -> wasmtime::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
     let engine = Engine::new(&cfg)?;
@@ -263,7 +287,7 @@ fn fill_funcref_tables_via_api() -> anyhow::Result<()> {
 }
 
 #[test]
-fn grow_funcref_tables_via_api() -> anyhow::Result<()> {
+fn grow_funcref_tables_via_api() -> wasmtime::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
     let engine = Engine::new(&cfg)?;
@@ -280,7 +304,7 @@ fn grow_funcref_tables_via_api() -> anyhow::Result<()> {
 }
 
 #[test]
-fn create_get_set_externref_tables_via_api() -> anyhow::Result<()> {
+fn create_get_set_externref_tables_via_api() -> wasmtime::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
     let engine = Engine::new(&cfg)?;
@@ -297,6 +321,7 @@ fn create_get_set_externref_tables_via_api() -> anyhow::Result<()> {
             .unwrap_extern()
             .unwrap()
             .data(&store)?
+            .expect("should have host data")
             .downcast_ref::<usize>()
             .unwrap(),
         42
@@ -308,7 +333,7 @@ fn create_get_set_externref_tables_via_api() -> anyhow::Result<()> {
 }
 
 #[test]
-fn fill_externref_tables_via_api() -> anyhow::Result<()> {
+fn fill_externref_tables_via_api() -> wasmtime::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
     let engine = Engine::new(&cfg)?;
@@ -335,6 +360,7 @@ fn fill_externref_tables_via_api() -> anyhow::Result<()> {
                 .unwrap_extern()
                 .unwrap()
                 .data(&store)?
+                .expect("should have host data")
                 .downcast_ref::<usize>()
                 .unwrap(),
             42
@@ -345,7 +371,7 @@ fn fill_externref_tables_via_api() -> anyhow::Result<()> {
 }
 
 #[test]
-fn grow_externref_tables_via_api() -> anyhow::Result<()> {
+fn grow_externref_tables_via_api() -> wasmtime::Result<()> {
     let mut cfg = Config::new();
     cfg.wasm_reference_types(true);
     let engine = Engine::new(&cfg)?;
@@ -407,7 +433,7 @@ fn read_write_memory_via_api() {
     assert!(res.is_err());
 
     // Write offset overflow.
-    let res = mem.write(&mut store, usize::MAX, &mut buffer);
+    let res = mem.write(&mut store, usize::MAX, &buffer);
     assert!(res.is_err());
 }
 
@@ -768,10 +794,12 @@ fn table_copy_func_subtyping() {
 
             if expected {
                 for i in 2..7 {
-                    assert!(dest_table
-                        .get(&mut store, i)
-                        .expect("in bounds")
-                        .is_non_null());
+                    assert!(
+                        dest_table
+                            .get(&mut store, i)
+                            .expect("in bounds")
+                            .is_non_null()
+                    );
                 }
             }
         }

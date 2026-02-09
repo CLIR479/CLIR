@@ -1,29 +1,49 @@
-use anyhow::{bail, Context, Result};
+use crate::WastContext;
+use json_from_wast::{CoreConst, FloatConst, V128};
 use std::fmt::{Display, LowerHex};
-use wasmtime::{ExternRef, Store, Val};
-use wast::core::{AbstractHeapType, HeapType, NanPattern, V128Pattern, WastArgCore, WastRetCore};
-use wast::token::{F32, F64};
+use wasmtime::{Result, Store, Val, bail, error::Context as _, format_err};
 
 /// Translate from a `script::Value` to a `RuntimeValue`.
-pub fn val<T>(store: &mut Store<T>, v: &WastArgCore<'_>) -> Result<Val> {
-    use wast::core::WastArgCore::*;
+pub fn val(ctx: &mut WastContext, v: &CoreConst) -> Result<Val> {
+    use CoreConst::*;
 
     Ok(match v {
-        I32(x) => Val::I32(*x),
-        I64(x) => Val::I64(*x),
-        F32(x) => Val::F32(x.bits),
-        F64(x) => Val::F64(x.bits),
-        V128(x) => Val::V128(u128::from_le_bytes(x.to_le_bytes()).into()),
-        RefNull(HeapType::Abstract {
-            ty: AbstractHeapType::Extern,
-            shared: false,
-        }) => Val::ExternRef(None),
-        RefNull(HeapType::Abstract {
-            ty: AbstractHeapType::Func,
-            shared: false,
-        }) => Val::FuncRef(None),
-        RefExtern(x) => Val::ExternRef(Some(ExternRef::new(store, *x)?)),
-        other => bail!("couldn't convert {:?} to a runtime value", other),
+        I32 { value } => Val::I32(value.0),
+        I64 { value } => Val::I64(value.0),
+        F32 { value } => Val::F32(value.to_bits()),
+        F64 { value } => Val::F64(value.to_bits()),
+        V128(value) => Val::V128(value.to_u128().into()),
+        FuncRef {
+            value: None | Some(json_from_wast::FuncRef::Null),
+        } => Val::FuncRef(None),
+
+        ExternRef {
+            value: None | Some(json_from_wast::ExternRef::Null),
+        } => Val::ExternRef(None),
+        ExternRef {
+            value: Some(json_from_wast::ExternRef::Host(x)),
+        } => Val::ExternRef(if let Some(rt) = ctx.async_runtime.as_ref() {
+            Some(rt.block_on(wasmtime::ExternRef::new_async(&mut ctx.core_store, x.0))?)
+        } else {
+            Some(wasmtime::ExternRef::new(&mut ctx.core_store, x.0)?)
+        }),
+
+        AnyRef {
+            value: None | Some(json_from_wast::AnyRef::Null),
+        } => Val::AnyRef(None),
+        AnyRef {
+            value: Some(json_from_wast::AnyRef::Host(x)),
+        } => {
+            let x = if let Some(rt) = ctx.async_runtime.as_ref() {
+                rt.block_on(wasmtime::ExternRef::new_async(&mut ctx.core_store, x.0))?
+            } else {
+                wasmtime::ExternRef::new(&mut ctx.core_store, x.0)?
+            };
+            let x = wasmtime::AnyRef::convert_extern(&mut ctx.core_store, x)?;
+            Val::AnyRef(Some(x))
+        }
+        NullRef => Val::AnyRef(None),
+        other => bail!("couldn't convert {other:?} to a runtime value"),
     })
 }
 
@@ -43,81 +63,148 @@ fn extract_lane_as_i64(bytes: u128, lane: usize) -> i64 {
     (bytes >> (lane * 64)) as i64
 }
 
-pub fn match_val<T>(store: &Store<T>, actual: &Val, expected: &WastRetCore) -> Result<()> {
+pub fn match_val(store: &mut Store<()>, actual: &Val, expected: &CoreConst) -> Result<()> {
     match (actual, expected) {
-        (_, WastRetCore::Either(expected)) => {
-            for expected in expected {
+        (_, CoreConst::Either { values }) => {
+            for expected in values {
                 if match_val(store, actual, expected).is_ok() {
                     return Ok(());
                 }
             }
-            match_val(store, actual, &expected[0])
+            match_val(store, actual, &values[0])
         }
 
-        (Val::I32(a), WastRetCore::I32(b)) => match_int(a, b),
-        (Val::I64(a), WastRetCore::I64(b)) => match_int(a, b),
+        (Val::I32(a), CoreConst::I32 { value }) => match_int(a, &value.0),
+        (Val::I64(a), CoreConst::I64 { value }) => match_int(a, &value.0),
 
         // Note that these float comparisons are comparing bits, not float
         // values, so we're testing for bit-for-bit equivalence
-        (Val::F32(a), WastRetCore::F32(b)) => match_f32(*a, b),
-        (Val::F64(a), WastRetCore::F64(b)) => match_f64(*a, b),
-        (Val::V128(a), WastRetCore::V128(b)) => match_v128(a.as_u128(), b),
+        (Val::F32(a), CoreConst::F32 { value }) => match_f32(*a, value),
+        (Val::F64(a), CoreConst::F64 { value }) => match_f64(*a, value),
+        (Val::V128(a), CoreConst::V128(value)) => match_v128(a.as_u128(), value),
 
-        // Null references.
+        // Null references, or blanket "any reference" assertions
         (
-            Val::FuncRef(None) | Val::ExternRef(None) | Val::AnyRef(None),
-            WastRetCore::RefNull(_),
+            Val::FuncRef(None) | Val::ExternRef(None) | Val::AnyRef(None) | Val::ExnRef(None),
+            CoreConst::RefNull,
         )
-        | (Val::ExternRef(None), WastRetCore::RefExtern(None)) => Ok(()),
+        | (Val::FuncRef(_), CoreConst::FuncRef { value: None })
+        | (Val::AnyRef(_), CoreConst::AnyRef { value: None })
+        | (Val::ExternRef(_), CoreConst::ExternRef { value: None })
+        | (Val::AnyRef(None), CoreConst::NullRef)
+        | (Val::FuncRef(None), CoreConst::NullFuncRef)
+        | (Val::ExternRef(None), CoreConst::NullExternRef)
+        | (Val::ExnRef(None), CoreConst::NullExnRef)
+        | (
+            Val::FuncRef(None),
+            CoreConst::FuncRef {
+                value: Some(json_from_wast::FuncRef::Null),
+            },
+        )
+        | (
+            Val::AnyRef(None),
+            CoreConst::AnyRef {
+                value: Some(json_from_wast::AnyRef::Null),
+            },
+        )
+        | (
+            Val::ExternRef(None),
+            CoreConst::ExternRef {
+                value: Some(json_from_wast::ExternRef::Null),
+            },
+        )
+        | (
+            Val::ExnRef(None),
+            CoreConst::ExnRef {
+                value: Some(json_from_wast::ExnRef::Null),
+            },
+        ) => Ok(()),
 
-        // Null and non-null mismatches.
-        (Val::ExternRef(None), WastRetCore::RefExtern(Some(_))) => {
-            bail!("expected non-null reference, found null")
-        }
+        // Ideally we'd compare the actual index, but Wasmtime doesn't expose
+        // the raw index a function in the embedder API.
+        (
+            Val::FuncRef(Some(_)),
+            CoreConst::FuncRef {
+                value: Some(json_from_wast::FuncRef::Index(_)),
+            },
+        ) => Ok(()),
+
         (
             Val::ExternRef(Some(x)),
-            WastRetCore::RefNull(Some(HeapType::Abstract {
-                ty: AbstractHeapType::Extern,
-                shared: false,
-            })),
+            CoreConst::ExternRef {
+                value: Some(json_from_wast::ExternRef::Host(y)),
+            },
         ) => {
             let x = x
                 .data(store)?
+                .ok_or_else(|| {
+                    format_err!("expected an externref of a u32, found externref without host data")
+                })?
                 .downcast_ref::<u32>()
                 .expect("only u32 externrefs created in wast test suites");
-            bail!("expected null externref, found non-null externref of {x}");
-        }
-        (Val::ExternRef(Some(_)) | Val::FuncRef(Some(_)), WastRetCore::RefNull(_)) => {
-            bail!("expected null, found non-null reference: {actual:?}")
-        }
-
-        // Non-null references.
-        (Val::FuncRef(Some(_)), WastRetCore::RefFunc(_)) => Ok(()),
-        (Val::ExternRef(Some(x)), WastRetCore::RefExtern(Some(y))) => {
-            let x = x
-                .data(store)?
-                .downcast_ref::<u32>()
-                .expect("only u32 externrefs created in wast test suites");
-            if x == y {
+            if *x == y.0 {
                 Ok(())
             } else {
-                bail!("expected {} found {}", y, x);
+                bail!("expected {} found {x}", y.0);
             }
         }
 
-        (Val::AnyRef(Some(x)), WastRetCore::RefI31) => {
+        (Val::AnyRef(Some(x)), CoreConst::EqRef) => {
+            if x.is_eqref(store)? {
+                Ok(())
+            } else {
+                bail!("expected an eqref, found {x:?}");
+            }
+        }
+        (Val::AnyRef(Some(x)), CoreConst::I31Ref) => {
             if x.is_i31(store)? {
                 Ok(())
             } else {
                 bail!("expected a `(ref i31)`, found {x:?}");
             }
         }
+        (Val::AnyRef(Some(x)), CoreConst::StructRef) => {
+            if x.is_struct(store)? {
+                Ok(())
+            } else {
+                bail!("expected a struct reference, found {x:?}")
+            }
+        }
+        (Val::AnyRef(Some(x)), CoreConst::ArrayRef) => {
+            if x.is_array(store)? {
+                Ok(())
+            } else {
+                bail!("expected a array reference, found {x:?}")
+            }
+        }
+        (
+            Val::AnyRef(Some(x)),
+            CoreConst::AnyRef {
+                value: Some(json_from_wast::AnyRef::Host(y)),
+            },
+        ) => {
+            let x = wasmtime::ExternRef::convert_any(&mut *store, *x)?;
+            let x = x
+                .data(&mut *store)?
+                .ok_or_else(|| {
+                    format_err!(
+                        "expected anyref of externref of u32, found anyref that is \
+                         not a converted externref"
+                    )
+                })?
+                .downcast_ref::<u32>()
+                .expect("only u32 externrefs created in wast test suites");
+            if *x == y.0 {
+                Ok(())
+            } else {
+                bail!(
+                    "expected anyref of externref of {}, found anyref of externref of {x}",
+                    y.0
+                )
+            }
+        }
 
-        _ => bail!(
-            "don't know how to compare {:?} and {:?} yet",
-            actual,
-            expected
-        ),
+        _ => bail!("expected {expected:?} got {actual:?}"),
     }
 }
 
@@ -129,15 +216,13 @@ where
         Ok(())
     } else {
         bail!(
-            "expected {:18} / {0:#018x}\n\
-             actual   {:18} / {1:#018x}",
-            expected,
-            actual
+            "expected {expected:18} / {expected:#018x}\n\
+             actual   {actual:18} / {actual:#018x}"
         )
     }
 }
 
-pub fn match_f32(actual: u32, expected: &NanPattern<F32>) -> Result<()> {
+pub fn match_f32(actual: u32, expected: &FloatConst<f32>) -> Result<()> {
     match expected {
         // Check if an f32 (as u32 bits to avoid possible quieting when moving values in registers, e.g.
         // https://developer.arm.com/documentation/ddi0344/i/neon-and-vfp-programmers-model/modes-of-operation/default-nan-mode?lang=en)
@@ -146,7 +231,7 @@ pub fn match_f32(actual: u32, expected: &NanPattern<F32>) -> Result<()> {
         //  - the 8-bit exponent is set to all 1s
         //  - the MSB of the payload is set to 1 (a quieted NaN) and all others to 0.
         // See https://webassembly.github.io/spec/core/syntax/values.html#floating-point.
-        NanPattern::CanonicalNan => {
+        FloatConst::CanonicalNan => {
             let canon_nan = 0x7fc0_0000;
             if (actual & 0x7fff_ffff) == canon_nan {
                 Ok(())
@@ -167,7 +252,7 @@ pub fn match_f32(actual: u32, expected: &NanPattern<F32>) -> Result<()> {
         // set to 1, but one or more of the remaining payload bits MAY BE set to
         // 1 (a canonical NaN specifies all 0s). See
         // https://webassembly.github.io/spec/core/syntax/values.html#floating-point.
-        NanPattern::ArithmeticNan => {
+        FloatConst::ArithmeticNan => {
             const AF32_NAN: u32 = 0x7f80_0000;
             let is_nan = actual & AF32_NAN == AF32_NAN;
             const AF32_PAYLOAD_MSB: u32 = 0x0040_0000;
@@ -185,15 +270,15 @@ pub fn match_f32(actual: u32, expected: &NanPattern<F32>) -> Result<()> {
                 )
             }
         }
-        NanPattern::Value(expected_value) => {
-            if actual == expected_value.bits {
+        FloatConst::Value(expected_value) => {
+            if actual == expected_value.to_bits() {
                 Ok(())
             } else {
                 bail!(
                     "expected {:10} / {:#010x}\n\
                      actual   {:10} / {:#010x}",
-                    f32::from_bits(expected_value.bits),
-                    expected_value.bits,
+                    expected_value,
+                    expected_value.to_bits(),
                     f32::from_bits(actual),
                     actual,
                 )
@@ -202,7 +287,7 @@ pub fn match_f32(actual: u32, expected: &NanPattern<F32>) -> Result<()> {
     }
 }
 
-pub fn match_f64(actual: u64, expected: &NanPattern<F64>) -> Result<()> {
+pub fn match_f64(actual: u64, expected: &FloatConst<f64>) -> Result<()> {
     match expected {
         // Check if an f64 (as u64 bits to avoid possible quieting when moving values in registers, e.g.
         // https://developer.arm.com/documentation/ddi0344/i/neon-and-vfp-programmers-model/modes-of-operation/default-nan-mode?lang=en)
@@ -211,7 +296,7 @@ pub fn match_f64(actual: u64, expected: &NanPattern<F64>) -> Result<()> {
         //  - the 11-bit exponent is set to all 1s
         //  - the MSB of the payload is set to 1 (a quieted NaN) and all others to 0.
         // See https://webassembly.github.io/spec/core/syntax/values.html#floating-point.
-        NanPattern::CanonicalNan => {
+        FloatConst::CanonicalNan => {
             let canon_nan = 0x7ff8_0000_0000_0000;
             if (actual & 0x7fff_ffff_ffff_ffff) == canon_nan {
                 Ok(())
@@ -231,7 +316,7 @@ pub fn match_f64(actual: u64, expected: &NanPattern<F64>) -> Result<()> {
         // canonical NaN including that the payload MSB is set to 1, but one or more of the remaining
         // payload bits MAY BE set to 1 (a canonical NaN specifies all 0s). See
         // https://webassembly.github.io/spec/core/syntax/values.html#floating-point.
-        NanPattern::ArithmeticNan => {
+        FloatConst::ArithmeticNan => {
             const AF64_NAN: u64 = 0x7ff0_0000_0000_0000;
             let is_nan = actual & AF64_NAN == AF64_NAN;
             const AF64_PAYLOAD_MSB: u64 = 0x0008_0000_0000_0000;
@@ -249,15 +334,15 @@ pub fn match_f64(actual: u64, expected: &NanPattern<F64>) -> Result<()> {
                 )
             }
         }
-        NanPattern::Value(expected_value) => {
-            if actual == expected_value.bits {
+        FloatConst::Value(expected_value) => {
+            if actual == expected_value.to_bits() {
                 Ok(())
             } else {
                 bail!(
                     "expected {:18} / {:#018x}\n\
                      actual   {:18} / {:#018x}",
-                    f64::from_bits(expected_value.bits),
-                    expected_value.bits,
+                    expected_value,
+                    expected_value.to_bits(),
                     f64::from_bits(actual),
                     actual,
                 )
@@ -266,9 +351,9 @@ pub fn match_f64(actual: u64, expected: &NanPattern<F64>) -> Result<()> {
     }
 }
 
-fn match_v128(actual: u128, expected: &V128Pattern) -> Result<()> {
+fn match_v128(actual: u128, expected: &V128) -> Result<()> {
     match expected {
-        V128Pattern::I8x16(expected) => {
+        V128::I8 { value } => {
             let actual = [
                 extract_lane_as_i8(actual, 0),
                 extract_lane_as_i8(actual, 1),
@@ -287,20 +372,18 @@ fn match_v128(actual: u128, expected: &V128Pattern) -> Result<()> {
                 extract_lane_as_i8(actual, 14),
                 extract_lane_as_i8(actual, 15),
             ];
-            if actual == *expected {
+            if actual == value.map(|i| i.0) {
                 return Ok(());
             }
             bail!(
-                "expected {:4?}\n\
-                 actual   {:4?}\n\
+                "expected {expected:4?}\n\
+                 actual   {actual:4?}\n\
                  \n\
-                 expected (hex) {0:02x?}\n\
-                 actual (hex)   {1:02x?}",
-                expected,
-                actual,
+                 expected (hex) {expected:02x?}\n\
+                 actual (hex)   {actual:02x?}",
             )
         }
-        V128Pattern::I16x8(expected) => {
+        V128::I16 { value } => {
             let actual = [
                 extract_lane_as_i16(actual, 0),
                 extract_lane_as_i16(actual, 1),
@@ -311,66 +394,60 @@ fn match_v128(actual: u128, expected: &V128Pattern) -> Result<()> {
                 extract_lane_as_i16(actual, 6),
                 extract_lane_as_i16(actual, 7),
             ];
-            if actual == *expected {
+            if actual == value.map(|i| i.0) {
                 return Ok(());
             }
             bail!(
-                "expected {:6?}\n\
-                 actual   {:6?}\n\
+                "expected {expected:6?}\n\
+                 actual   {actual:6?}\n\
                  \n\
-                 expected (hex) {0:04x?}\n\
-                 actual (hex)   {1:04x?}",
-                expected,
-                actual,
+                 expected (hex) {expected:04x?}\n\
+                 actual (hex)   {actual:04x?}",
             )
         }
-        V128Pattern::I32x4(expected) => {
+        V128::I32 { value } => {
             let actual = [
                 extract_lane_as_i32(actual, 0),
                 extract_lane_as_i32(actual, 1),
                 extract_lane_as_i32(actual, 2),
                 extract_lane_as_i32(actual, 3),
             ];
-            if actual == *expected {
+            if actual == value.map(|i| i.0) {
                 return Ok(());
             }
             bail!(
-                "expected {:11?}\n\
-                 actual   {:11?}\n\
+                "expected {expected:11?}\n\
+                 actual   {actual:11?}\n\
                  \n\
-                 expected (hex) {0:08x?}\n\
-                 actual (hex)   {1:08x?}",
-                expected,
-                actual,
+                 expected (hex) {expected:08x?}\n\
+                 actual (hex)   {actual:08x?}",
             )
         }
-        V128Pattern::I64x2(expected) => {
+        V128::I64 { value } => {
             let actual = [
                 extract_lane_as_i64(actual, 0),
                 extract_lane_as_i64(actual, 1),
             ];
-            if actual == *expected {
+            if actual == value.map(|i| i.0) {
                 return Ok(());
             }
             bail!(
-                "expected {:20?}\n\
-                 actual   {:20?}\n\
+                "expected {expected:20?}\n\
+                 actual   {actual:20?}\n\
                  \n\
-                 expected (hex) {0:016x?}\n\
-                 actual (hex)   {1:016x?}",
-                expected,
-                actual,
+                 expected (hex) {expected:016x?}\n\
+                 actual (hex)   {actual:016x?}",
             )
         }
-        V128Pattern::F32x4(expected) => {
-            for (i, expected) in expected.iter().enumerate() {
+        V128::F32 { value } => {
+            for (i, expected) in value.iter().enumerate() {
                 let a = extract_lane_as_i32(actual, i) as u32;
                 match_f32(a, expected).with_context(|| format!("difference in lane {i}"))?;
             }
             Ok(())
         }
-        V128Pattern::F64x2(expected) => {
-            for (i, expected) in expected.iter().enumerate() {
+        V128::F64 { value } => {
+            for (i, expected) in value.iter().enumerate() {
                 let a = extract_lane_as_i64(actual, i) as u64;
                 match_f64(a, expected).with_context(|| format!("difference in lane {i}"))?;
             }

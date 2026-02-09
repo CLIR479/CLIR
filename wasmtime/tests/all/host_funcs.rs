@@ -1,19 +1,6 @@
-use anyhow::bail;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use wasmtime::bail;
 use wasmtime::*;
-
-#[test]
-#[should_panic = "cannot use `func_new_async` without enabling async support"]
-fn async_required() {
-    let engine = Engine::default();
-    let mut linker = Linker::<()>::new(&engine);
-    drop(linker.func_new_async(
-        "",
-        "",
-        FuncType::new(&engine, None, None),
-        move |_caller, _params, _results| Box::new(async { Ok(()) }),
-    ));
-}
 
 #[test]
 fn wrap_func() -> Result<()> {
@@ -32,15 +19,27 @@ fn wrap_func() -> Result<()> {
     linker.func_wrap("m3", "", || -> Option<Rooted<ExternRef>> { None })?;
     linker.func_wrap("m3", "f", || -> Option<Func> { None })?;
 
-    linker.func_wrap("", "f1", || -> Result<()> { loop {} })?;
-    linker.func_wrap("", "f2", || -> Result<i32> { loop {} })?;
-    linker.func_wrap("", "f3", || -> Result<i64> { loop {} })?;
-    linker.func_wrap("", "f4", || -> Result<f32> { loop {} })?;
-    linker.func_wrap("", "f5", || -> Result<f64> { loop {} })?;
+    linker.func_wrap("", "f1", || -> Result<()> {
+        loop {}
+    })?;
+    linker.func_wrap("", "f2", || -> Result<i32> {
+        loop {}
+    })?;
+    linker.func_wrap("", "f3", || -> Result<i64> {
+        loop {}
+    })?;
+    linker.func_wrap("", "f4", || -> Result<f32> {
+        loop {}
+    })?;
+    linker.func_wrap("", "f5", || -> Result<f64> {
+        loop {}
+    })?;
     linker.func_wrap("", "f6", || -> Result<Option<Rooted<ExternRef>>> {
         loop {}
     })?;
-    linker.func_wrap("", "f7", || -> Result<Option<Func>> { loop {} })?;
+    linker.func_wrap("", "f7", || -> Result<Option<Func>> {
+        loop {}
+    })?;
     Ok(())
 }
 
@@ -83,6 +82,7 @@ fn drop_func() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn drop_delayed() -> Result<()> {
     static HITS: AtomicUsize = AtomicUsize::new(0);
 
@@ -135,10 +135,18 @@ fn signatures_match() -> Result<()> {
     let mut linker = Linker::<()>::new(&engine);
 
     linker.func_wrap("", "f1", || {})?;
-    linker.func_wrap("", "f2", || -> i32 { loop {} })?;
-    linker.func_wrap("", "f3", || -> i64 { loop {} })?;
-    linker.func_wrap("", "f4", || -> f32 { loop {} })?;
-    linker.func_wrap("", "f5", || -> f64 { loop {} })?;
+    linker.func_wrap("", "f2", || -> i32 {
+        loop {}
+    })?;
+    linker.func_wrap("", "f3", || -> i64 {
+        loop {}
+    })?;
+    linker.func_wrap("", "f4", || -> f32 {
+        loop {}
+    })?;
+    linker.func_wrap("", "f5", || -> f64 {
+        loop {}
+    })?;
     linker.func_wrap(
         "",
         "f6",
@@ -291,6 +299,7 @@ fn import_works() -> Result<()> {
                 f.as_ref()
                     .unwrap()
                     .data(&caller)
+                    .unwrap()
                     .unwrap()
                     .downcast_ref::<String>()
                     .unwrap(),
@@ -617,9 +626,10 @@ fn func_return_nothing() -> Result<()> {
     let mut store = Store::new(&engine, ());
     let f = linker.get(&mut store, "", "").unwrap().into_func().unwrap();
     let err = f.call(&mut store, &[], &mut [Val::I32(0)]).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("function attempted to return an incompatible value"));
+    assert!(
+        err.to_string()
+            .contains("function attempted to return an incompatible value")
+    );
     Ok(())
 }
 
@@ -716,7 +726,7 @@ fn store_with_context() -> Result<()> {
 fn wasi_imports() -> Result<()> {
     let engine = Engine::default();
     let mut linker = Linker::new(&engine);
-    wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |t| t)?;
+    wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |t| t)?;
 
     let wasm = wat::parse_str(
         r#"

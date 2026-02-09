@@ -1,10 +1,10 @@
 use crate::compiler::Compiler;
-use anyhow::{bail, Result};
 use std::sync::Arc;
 use target_lexicon::Triple;
 use wasmtime_cranelift::isa_builder::IsaBuilder;
+use wasmtime_environ::error::{Result, bail};
 use wasmtime_environ::{CompilerBuilder, Setting, Tunables};
-use winch_codegen::{isa, TargetIsa};
+use winch_codegen::{TargetIsa, isa};
 
 /// Compiler builder.
 struct Builder {
@@ -14,9 +14,7 @@ struct Builder {
 }
 
 pub fn builder(triple: Option<Triple>) -> Result<Box<dyn CompilerBuilder>> {
-    let inner = IsaBuilder::new(triple.clone(), |triple| {
-        isa::lookup(triple).map_err(|e| e.into())
-    })?;
+    let inner = IsaBuilder::new(triple.clone(), |triple| isa::lookup(triple))?;
     let cranelift = wasmtime_cranelift::builder(triple)?;
     Ok(Box::new(Builder {
         inner,
@@ -53,10 +51,33 @@ impl CompilerBuilder for Builder {
     }
 
     fn set_tunables(&mut self, tunables: Tunables) -> Result<()> {
-        assert!(tunables.winch_callable);
+        if !tunables.winch_callable {
+            bail!("Winch requires the winch calling convention");
+        }
+
+        if !tunables.table_lazy_init {
+            bail!("Winch requires the table-lazy-init option to be enabled");
+        }
+
+        if !tunables.signals_based_traps {
+            bail!("Winch requires the signals-based-traps option to be enabled");
+        }
+
+        if tunables.debug_native {
+            bail!("Winch does not currently support generating native debug information");
+        }
+
+        if tunables.debug_guest {
+            bail!("Winch does not currently support guest-level debugging");
+        }
+
         self.tunables = Some(tunables.clone());
         self.cranelift.set_tunables(tunables)?;
         Ok(())
+    }
+
+    fn tunables(&self) -> Option<&Tunables> {
+        self.cranelift.tunables()
     }
 
     fn build(&self) -> Result<Box<dyn wasmtime_environ::Compiler>> {

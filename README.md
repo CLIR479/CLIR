@@ -18,8 +18,8 @@ The **architecture-aware profiles** mentioned in the paper refer to the TOML con
 CLIR should run well on a server with Ubuntu 22.04.
 Please download [Docker](https://docs.docker.com/get-docker/) first.
 ```bash
-sudo docker build -t CLIR .
-sudo docker run -it CLIR # run a docker container
+sudo docker build -t clir .
+sudo docker run -it clir # run a docker container
 ```
 
 2. Start generating cranelift ir files

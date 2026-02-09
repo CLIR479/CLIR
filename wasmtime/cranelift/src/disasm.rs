@@ -1,7 +1,7 @@
 use anyhow::Result;
 use cfg_if::cfg_if;
-use cranelift_codegen::ir::function::FunctionParameters;
 use cranelift_codegen::ir::Function;
+use cranelift_codegen::ir::function::FunctionParameters;
 use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::{FinalizedMachReloc, MachTrap};
 use std::fmt::Write;
@@ -39,9 +39,22 @@ pub fn print_traps(traps: &[MachTrap]) -> String {
 cfg_if! {
     if #[cfg(feature = "disas")] {
         pub fn print_disassembly(func: &Function, isa: &dyn TargetIsa, mem: &[u8]) -> Result<()> {
-            let cs = isa.to_capstone().map_err(|e| anyhow::format_err!("{}", e))?;
-
+            #[cfg(feature = "pulley")]
+            let is_pulley = match isa.triple().architecture {
+                target_lexicon::Architecture::Pulley32 | target_lexicon::Architecture::Pulley64 => true,
+                _ => false,
+            };
             println!("\nDisassembly of {} bytes <{}>:", mem.len(), func.name);
+
+            #[cfg(feature = "pulley")]
+            if is_pulley {
+                let mut disas = pulley_interpreter::disas::Disassembler::new(mem);
+                pulley_interpreter::decode::Decoder::decode_all(&mut disas)?;
+                println!("{}", disas.disas());
+                return Ok(());
+            }
+            let cs = isa.to_capstone().map_err(|e| anyhow::format_err!("{e}"))?;
+
             let insns = cs.disasm_all(&mem, 0x0).unwrap();
             for i in insns.iter() {
                 let mut line = String::new();

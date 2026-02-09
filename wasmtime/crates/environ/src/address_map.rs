@@ -30,10 +30,22 @@ impl FilePos {
         FilePos(pos)
     }
 
+    /// Get the null file position.
+    pub fn none() -> FilePos {
+        FilePos(u32::MAX)
+    }
+
+    /// Is this the null file position?
+    #[inline]
+    pub fn is_none(&self) -> bool {
+        *self == FilePos::none()
+    }
+
     /// Returns the offset that this offset was created with.
     ///
-    /// Note that the `Default` implementation will return `None` here, whereas
-    /// positions created with `FilePos::new` will return `Some`.
+    /// Note that positions created with `FilePos::none` and the `Default`
+    /// implementation will return `None` here, whereas positions created with
+    /// `FilePos::new` will return `Some`.
     pub fn file_offset(self) -> Option<u32> {
         if self.0 == u32::MAX {
             None
@@ -45,7 +57,7 @@ impl FilePos {
 
 impl Default for FilePos {
     fn default() -> FilePos {
-        FilePos(u32::MAX)
+        FilePos::none()
     }
 }
 
@@ -55,7 +67,8 @@ fn parse_address_map(
     section: &[u8],
 ) -> Option<(&[U32Bytes<LittleEndian>], &[U32Bytes<LittleEndian>])> {
     let mut section = Bytes(section);
-    // NB: this matches the encoding written by `append_to` above.
+    // NB: this matches the encoding written by `append_to` in the
+    // `compile::address_map` module.
     let count = section.read::<U32Bytes<LittleEndian>>().ok()?;
     let count = usize::try_from(count.get(LittleEndian)).ok()?;
     let (offsets, section) =

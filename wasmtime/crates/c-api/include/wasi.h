@@ -146,6 +146,21 @@ WASI_API_EXTERN bool wasi_config_set_stdout_file(wasi_config_t *config,
 WASI_API_EXTERN void wasi_config_inherit_stdout(wasi_config_t *config);
 
 /**
+ * \brief Configures standard output to be directed to \p callback
+ *
+ * \param config The config to operate on
+ * \param callback A non-null callback must be provided, that will get called
+ * for each write with the buffer. A positive return value indicates the amount
+ * of bytes written. Negative return values are treated as OS error codes.
+ * \param data An optional user provided data that will be passed to \p callback
+ * \param finalizer An optional callback to be called to destroy \p data
+ */
+WASI_API_EXTERN void wasi_config_set_stdout_custom(
+    wasi_config_t *config,
+    ptrdiff_t (*callback)(void *, const unsigned char *, size_t), void *data,
+    void (*finalizer)(void *));
+
+/**
  * \brief Configures standard output to be written to the specified file.
  *
  * By default WASI programs have no stderr, but this configures the specified
@@ -164,6 +179,64 @@ WASI_API_EXTERN bool wasi_config_set_stderr_file(wasi_config_t *config,
 WASI_API_EXTERN void wasi_config_inherit_stderr(wasi_config_t *config);
 
 /**
+ * \brief Configures standard error output to be directed to \p callback
+ *
+ * \param config The config to operate on
+ * \param callback A non-null callback must be provided, that will get called
+ * for each write with the buffer. A positive return value indicates the amount
+ * of bytes written. Negative return values are treated as OS error codes.
+ * \param data An optional user provided data that will be passed to \p callback
+ * \param finalizer An optional callback to be called to destroy \p data
+ */
+WASI_API_EXTERN void wasi_config_set_stderr_custom(
+    wasi_config_t *config,
+    ptrdiff_t (*callback)(void *, const unsigned char *, size_t), void *data,
+    void (*finalizer)(void *));
+
+/**
+ * \brief The permissions granted for a directory when preopening it.
+ */
+enum wasi_dir_perms_flags {
+  /**
+   * \brief This directory can be read, for example its entries can be iterated
+   */
+  WASMTIME_WASI_DIR_PERMS_READ = 1,
+
+  /**
+   * \brief This directory can be written to, for example new files can be
+   * created within it.
+   */
+  WASMTIME_WASI_DIR_PERMS_WRITE = 2,
+};
+
+/**
+ * \brief The permissions granted for directories when preopening them,
+ * which is a bitmask with flag values from wasi_dir_perms_flags.
+ */
+typedef size_t wasi_dir_perms;
+
+/**
+ * \brief The permissions granted for files when preopening a directory.
+ */
+enum wasi_file_perms_flags {
+  /**
+   * \brief Files can be read.
+   */
+  WASMTIME_WASI_FILE_PERMS_READ = 1,
+
+  /**
+   * \brief Files can be written to.
+   */
+  WASMTIME_WASI_FILE_PERMS_WRITE = 2,
+};
+
+/**
+ * \brief The max permissions granted a file within a preopened directory,
+ * which is a bitmask with flag values from wasi_file_perms_flags.
+ */
+typedef size_t wasi_file_perms;
+
+/**
  * \brief Configures a "preopened directory" to be available to WASI APIs.
  *
  * By default WASI programs do not have access to anything on the filesystem.
@@ -171,12 +244,26 @@ WASI_API_EXTERN void wasi_config_inherit_stderr(wasi_config_t *config);
  * filesystem, but only that directory (its whole contents but nothing above
  * it).
  *
- * The `path` argument here is a path name on the host filesystem, and
+ * The `host_path` argument here is a path name on the host filesystem, and
  * `guest_path` is the name by which it will be known in wasm.
+ *
+ * The `dir_perms` argument is the permissions that wasm will have to operate on
+ * `guest_path`. This can be used, for example, to provide readonly access to a
+ * directory. This argument is a bitmask with the following flag values:
+ * - WASMTIME_WASI_DIR_PERMS_READ
+ * - WASMTIME_WASI_DIR_PERMS_WRITE
+ *
+ * The `file_perms` argument is similar to `dir_perms` but corresponds to the
+ * maximum set of permissions that can be used for any file in this directory.
+ * This argument is a bitmask with the following flag values:
+ * - WASMTIME_WASI_FILE_PERMS_READ
+ * - WASMTIME_WASI_FILE_PERMS_WRITE
  */
 WASI_API_EXTERN bool wasi_config_preopen_dir(wasi_config_t *config,
-                                             const char *path,
-                                             const char *guest_path);
+                                             const char *host_path,
+                                             const char *guest_path,
+                                             wasi_dir_perms dir_perms,
+                                             wasi_file_perms file_perms);
 
 #undef own
 

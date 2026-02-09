@@ -10,6 +10,7 @@ use core::fmt::{self, Display, Formatter};
 use core::ops::{Add, BitAnd, BitOr, BitXor, Div, Mul, Neg, Not, Sub};
 use core::str::FromStr;
 use core::{i32, u32};
+use libm::Libm;
 #[cfg(feature = "enable-serde")]
 use serde_derive::{Deserialize, Serialize};
 
@@ -92,7 +93,7 @@ impl Imm64 {
     /// Sign extend this immediate as if it were a signed integer of the given
     /// power-of-two width.
     #[must_use]
-    pub(crate) fn sign_extend_from_width(&self, bit_width: u32) -> Self {
+    pub fn sign_extend_from_width(&self, bit_width: u32) -> Self {
         debug_assert!(
             bit_width.is_power_of_two(),
             "{bit_width} is not a power of two"
@@ -106,6 +107,25 @@ impl Imm64 {
         let delta = 64 - bit_width;
         let sign_extended = (self.0 << delta) >> delta;
         Imm64(sign_extended)
+    }
+
+    /// Zero extend this immediate as if it were an unsigned integer of the
+    /// given power-of-two width.
+    #[must_use]
+    pub fn zero_extend_from_width(&self, bit_width: u32) -> Self {
+        debug_assert!(
+            bit_width.is_power_of_two(),
+            "{bit_width} is not a power of two"
+        );
+
+        if bit_width >= 64 {
+            return *self;
+        }
+
+        let bit_width = u64::from(bit_width);
+        let delta = 64 - bit_width;
+        let zero_extended = (self.0.cast_unsigned() << delta) >> delta;
+        Imm64(zero_extended.cast_signed())
     }
 }
 
@@ -663,28 +683,28 @@ macro_rules! ieee_float {
             $(
                 /// Returns the square root of `self`.
                 pub fn sqrt(self) -> Self {
-                    Self::with_float(self.$as_float().sqrt())
+                    Self::with_float(Libm::<$float_ty>::sqrt(self.$as_float()))
                 }
 
                 /// Returns the smallest integer greater than or equal to `self`.
                 pub fn ceil(self) -> Self {
-                    Self::with_float(self.$as_float().ceil())
+                    Self::with_float(Libm::<$float_ty>::ceil(self.$as_float()))
                 }
 
                 /// Returns the largest integer less than or equal to `self`.
                 pub fn floor(self) -> Self {
-                    Self::with_float(self.$as_float().floor())
+                    Self::with_float(Libm::<$float_ty>::floor(self.$as_float()))
                 }
 
                 /// Returns the integer part of `self`. This means that non-integer numbers are always truncated towards zero.
                 pub fn trunc(self) -> Self {
-                    Self::with_float(self.$as_float().trunc())
+                    Self::with_float(Libm::<$float_ty>::trunc(self.$as_float()))
                 }
 
                 /// Returns the nearest integer to `self`. Rounds half-way cases to the number
                 /// with an even least significant digit.
                 pub fn round_ties_even(self) -> Self {
-                    Self::with_float(self.$as_float().round_ties_even())
+                    Self::with_float(Libm::<$float_ty>::roundeven(self.$as_float()))
                 }
             )?
         }

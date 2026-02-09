@@ -22,15 +22,15 @@ impl ResourceLimiter for MemoryGrowFailureDetector {
         self.desired = desired;
         Ok(true)
     }
-    fn memory_grow_failed(&mut self, err: anyhow::Error) -> Result<()> {
+    fn memory_grow_failed(&mut self, err: wasmtime::Error) -> Result<()> {
         self.error = Some(err.to_string());
         Ok(())
     }
     fn table_growing(
         &mut self,
-        _current: u32,
-        _desired: u32,
-        _maximum: Option<u32>,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
     ) -> Result<bool> {
         Ok(true)
     }
@@ -38,8 +38,19 @@ impl ResourceLimiter for MemoryGrowFailureDetector {
 
 #[test]
 #[cfg_attr(miri, ignore)]
+#[cfg_attr(asan, ignore)]
 fn custom_limiter_detect_os_oom_failure() -> Result<()> {
     if std::env::var("WASMTIME_TEST_NO_HOG_MEMORY").is_ok() {
+        return Ok(());
+    }
+
+    // Skip this test if it looks like we're in a cross-compiled situation,
+    // and we're emulating this test for a different platform. In that
+    // scenario QEMU ignores the data rlimit, which this test relies on. See
+    // QEMU commits 5dfa88f7162f ("linux-user: do setrlimit selectively") and
+    // 055d92f8673c ("linux-user: do prlimit selectively") for more
+    // information.
+    if wasmtime_test_util::cargo_test_runner().is_some() {
         return Ok(());
     }
 
@@ -57,7 +68,7 @@ fn custom_limiter_detect_os_oom_failure() -> Result<()> {
         // limit process to 256MiB memory
         let rlimit = libc::rlimit {
             rlim_cur: 0,
-            rlim_max: process_max_memory as u64,
+            rlim_max: process_max_memory as libc::rlim_t,
         };
         let res = libc::setrlimit(libc::RLIMIT_DATA, &rlimit);
         assert_eq!(res, 0, "setrlimit failed: {res}");

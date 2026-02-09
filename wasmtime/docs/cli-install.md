@@ -7,8 +7,8 @@ you'll want to consult the [embedding documentation](lang.md).
 The easiest way to install the `wasmtime` CLI tool is through our installation
 script. Linux and macOS users can execute the following:
 
-```sh
-$ curl https://wasmtime.dev/install.sh -sSf | bash
+```console
+curl https://wasmtime.dev/install.sh -sSf | bash
 ```
 
 This will download a precompiled version of `wasmtime`, place it in
@@ -19,13 +19,13 @@ Windows users will want to visit our [releases page][releases] and can download
 the MSI installer (`wasmtime-dev-x86_64-windows.msi` for example) and use that
 to install.
 
-[releases]: https://github.com/bytecodealliance/wasmtime/releases
+[releases]: https://github.com/bytecodealliance/wasmtime/releases/latest
 
 You can confirm your installation works by executing:
 
-```sh
+```shell-session
 $ wasmtime -V
-wasmtime 0.12.0
+wasmtime 30.0.0 (ede663c2a 2025-02-19)
 ```
 
 And now you're off to the races! Be sure to check out the [various CLI
@@ -50,15 +50,35 @@ When downloading binaries you'll likely want one of the following archives (for
 the `dev` release)
 
 * Linux users - [`wasmtime-dev-x86_64-linux.tar.xz`]
-* macOS users - [`wasmtime-dev-x86_64-macos.tar.xz`]
+* macOS users - [`wasmtime-dev-aarch64-macos.tar.xz`]
 * Windows users - [`wasmtime-dev-x86_64-windows.zip`]
 
 Each of these archives has a `wasmtime` binary placed inside which can be
 executed normally as the CLI would.
 
-[wasmtime-dev-x86_64-linux.tar.xz`]: https://github.com/bytecodealliance/wasmtime/releases/download/dev/wasmtime-dev-x86_64-linux.tar.xz
-[wasmtime-dev-x86_64-macos.tar.xz`]: https://github.com/bytecodealliance/wasmtime/releases/download/dev/wasmtime-dev-x86_64-macos.tar.xz
-[wasmtime-dev-x86_64-windows.zip`]: https://github.com/bytecodealliance/wasmtime/releases/download/dev/wasmtime-dev-x86_64-windows.zip
+[`wasmtime-dev-x86_64-linux.tar.xz`]: https://github.com/bytecodealliance/wasmtime/releases/download/dev/wasmtime-dev-x86_64-linux.tar.xz
+[`wasmtime-dev-aarch64-macos.tar.xz`]: https://github.com/bytecodealliance/wasmtime/releases/download/dev/wasmtime-dev-aarch64-macos.tar.xz
+[`wasmtime-dev-x86_64-windows.zip`]: https://github.com/bytecodealliance/wasmtime/releases/download/dev/wasmtime-dev-x86_64-windows.zip
+
+## Install via Cargo
+
+If you have [Rust and Cargo](https://www.rust-lang.org/tools/install) available in your system, you can build and install an official `wasmtime` release from its [crates.io](https://crates.io/crates/wasmtime-cli) source:
+
+```console
+cargo install wasmtime-cli
+```
+
+This compiles and installs `wasmtime` into your Cargo bin directory (typically `$HOME/.cargo/bin`). Make sure that directory is in your `PATH` before running `wasmtime`. For example, add the following line to `~/.bashrc` or `~/.zshrc`:
+
+```console
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+You can also use [`binstall`](https://github.com/cargo-bins/cargo-binstall) to automatically find and install the correct `wasmtime` binary for your system, matching a candidate from [GitHub Releases](https://github.com/bytecodealliance/wasmtime/releases):  
+
+```console
+cargo binstall wasmtime-cli
+```
 
 ## Compiling from Source
 

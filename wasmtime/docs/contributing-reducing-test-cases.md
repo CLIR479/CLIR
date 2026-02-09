@@ -7,7 +7,7 @@ need to wade through megabytes of unrelated Wasm that isn't necessary to
 showcase the bug. The process of taking a large test case and stripping out the
 unnecessary bits is called *test case reduction*.
 
-[The `wasm-tools shrink` tool](github.com/bytecodealliance/wasm-tools) can
+[The `wasm-tools shrink` tool](https://github.com/bytecodealliance/wasm-tools) can
 automatically reduce Wasm test cases when given
 
 1. the original, unreduced test case, and
@@ -19,6 +19,20 @@ check its exit code. If the test case produces a different result in Wasmtime vs
 another Wasm engine, the script can run both engines and compare their
 results. It is also often useful to `grep` through the candidate's WAT
 disassembly to make sure that relevant features and instructions are present.
+
+Note that there are also a few other test-case reducers that can operate on
+Wasm. All of them, including `wasm-shrink`, work fairly similarly at a high
+level, but often if one reducer gets stuck in a local minimum, another reducer
+can pick up from there and reduce the test case further due to differences in
+the details of their implementations. Therefore, if you find that `wasm-shrink`
+isn't very effective on a particular test case, you can try continuing reduction
+with one of the following:
+
+* [Binaryen's `wasm-reduce`
+  tool](https://github.com/WebAssembly/binaryen?tab=readme-ov-file#tools)
+* [`creduce`, which can be effective at reducing Wasm test cases when
+  disassembled into their `.wat` text
+  format](https://github.com/csmith-project/creduce)
 
 ## Case Study: [Issue #7779](https://github.com/bytecodealliance/wasmtime/issues/7779)
 

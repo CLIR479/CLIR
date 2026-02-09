@@ -7,7 +7,7 @@ use wiggle_test::WasiCtx;
 // witx is exposed with the type signatures that we expect.
 
 wiggle::from_witx!({
-    witx: ["$CARGO_MANIFEST_DIR/tests/wasi.witx"],
+    witx: ["tests/wasi.witx"],
 });
 
 // The only test in this file is to verify that the witx document provided by the
@@ -385,7 +385,7 @@ impl<'a> crate::wasi_snapshot_preview1::WasiSnapshotPreview1 for WasiCtx<'a> {
         &mut self,
         _memory: &mut GuestMemory<'_>,
         _rval: types::Exitcode,
-    ) -> anyhow::Error {
+    ) -> wiggle::error::Error {
         unimplemented!("proc_exit")
     }
 

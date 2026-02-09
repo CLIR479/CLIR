@@ -233,9 +233,9 @@ impl Cond {
 #[derive(Clone, Copy, Debug)]
 pub enum CondBrKind {
     /// Condition: given register is zero.
-    Zero(Reg),
+    Zero(Reg, OperandSize),
     /// Condition: given register is nonzero.
-    NotZero(Reg),
+    NotZero(Reg, OperandSize),
     /// Condition: the given condition-code test is true.
     Cond(Cond),
 }
@@ -244,8 +244,8 @@ impl CondBrKind {
     /// Return the inverted branch condition.
     pub fn invert(self) -> CondBrKind {
         match self {
-            CondBrKind::Zero(reg) => CondBrKind::NotZero(reg),
-            CondBrKind::NotZero(reg) => CondBrKind::Zero(reg),
+            CondBrKind::Zero(reg, size) => CondBrKind::NotZero(reg, size),
+            CondBrKind::NotZero(reg, size) => CondBrKind::Zero(reg, size),
             CondBrKind::Cond(c) => CondBrKind::Cond(c.invert()),
         }
     }
@@ -315,7 +315,7 @@ impl PrettyPrint for MemLabel {
     fn pretty_print(&self, _: u8) -> String {
         match self {
             MemLabel::PCRel(off) => format!("pc+{off}"),
-            MemLabel::Mach(off) => format!("label({})", off.get()),
+            MemLabel::Mach(off) => format!("label({})", off.as_u32()),
         }
     }
 }
@@ -443,7 +443,7 @@ impl PrettyPrint for Cond {
 impl PrettyPrint for BranchTarget {
     fn pretty_print(&self, _: u8) -> String {
         match self {
-            &BranchTarget::Label(label) => format!("label{:?}", label.get()),
+            &BranchTarget::Label(label) => format!("label{:?}", label.as_u32()),
             &BranchTarget::ResolvedOffset(off) => format!("{off}"),
         }
     }
@@ -613,6 +613,21 @@ pub enum VectorSize {
 }
 
 impl VectorSize {
+    /// Get the vector operand of the same size but with 8-bit lane size.
+    pub fn as_scalar8_vector(&self) -> VectorSize {
+        match self {
+            // 64-bit vector
+            VectorSize::Size8x8 | VectorSize::Size16x4 | VectorSize::Size32x2 => {
+                VectorSize::Size8x8
+            }
+            // 128-bit vector
+            VectorSize::Size8x16
+            | VectorSize::Size16x8
+            | VectorSize::Size32x4
+            | VectorSize::Size64x2 => VectorSize::Size8x16,
+        }
+    }
+
     /// Get the vector operand size with the given scalar size as lane size.
     pub fn from_lane_size(size: ScalarSize, is_128bit: bool) -> VectorSize {
         match (size, is_128bit) {

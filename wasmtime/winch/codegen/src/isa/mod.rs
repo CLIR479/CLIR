@@ -1,5 +1,4 @@
-use crate::BuiltinFunctions;
-use anyhow::{anyhow, Result};
+use crate::{BuiltinFunctions, Result, format_err};
 use core::fmt::Formatter;
 use cranelift_codegen::isa::unwind::{UnwindInfo, UnwindInfoKind};
 use cranelift_codegen::isa::{CallConv, IsaBuilder};
@@ -12,7 +11,7 @@ use std::{
 use target_lexicon::{Architecture, Triple};
 use wasmparser::{FuncValidator, FunctionBody, ValidatorResources};
 use wasmtime_cranelift::CompiledFunction;
-use wasmtime_environ::{ModuleTranslation, ModuleTypesBuilder, WasmFuncType};
+use wasmtime_environ::{ModuleTranslation, ModuleTypesBuilder, Tunables, WasmFuncType};
 
 #[cfg(feature = "x64")]
 pub(crate) mod x64;
@@ -30,7 +29,7 @@ macro_rules! isa_builder {
         }
         #[cfg(not $cfg_terms)]
         {
-            Err(anyhow!(LookupError::SupportDisabled))
+            Err(format_err!(LookupError::SupportDisabled))
         }
     }};
 }
@@ -47,7 +46,7 @@ pub fn lookup(triple: Triple) -> Result<Builder> {
             isa_builder!(aarch64, (feature = "arm64"), triple)
         }
 
-        _ => Err(anyhow!(LookupError::Unsupported)),
+        _ => Err(format_err!(LookupError::Unsupported)),
     }
 }
 
@@ -68,7 +67,7 @@ pub(crate) enum LookupError {
     // enables the `all-arch` feature; in such case, this variant
     // will never be used. This is most likely going to change
     // in the future; this is one of the simplest options for now.
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "see comment")]
     SupportDisabled,
 }
 
@@ -88,7 +87,7 @@ pub(crate) enum LookupError {
 /// convention and the rest, if any, via a return pointer.
 #[derive(Copy, Clone, Debug)]
 pub enum CallingConvention {
-    /// See [cranelift_codegen::isa::CallConv::WasmtimeSystemV]
+    /// See [cranelift_codegen::isa::CallConv::SystemV]
     SystemV,
     /// See [cranelift_codegen::isa::CallConv::WindowsFastcall]
     WindowsFastcall,
@@ -101,7 +100,7 @@ pub enum CallingConvention {
 }
 
 impl CallingConvention {
-    /// Returns true if the current calling convention is `WasmtimeFastcall`.
+    /// Returns true if the current calling convention is `WindowsFastcall`.
     fn is_fastcall(&self) -> bool {
         match &self {
             CallingConvention::WindowsFastcall => true,
@@ -109,7 +108,7 @@ impl CallingConvention {
         }
     }
 
-    /// Returns true if the current calling convention is `WasmtimeSystemV`.
+    /// Returns true if the current calling convention is `SystemV`.
     fn is_systemv(&self) -> bool {
         match &self {
             CallingConvention::SystemV => true,
@@ -117,7 +116,7 @@ impl CallingConvention {
         }
     }
 
-    /// Returns true if the current calling convention is `WasmtimeAppleAarch64`.
+    /// Returns true if the current calling convention is `AppleAarch64`.
     fn is_apple_aarch64(&self) -> bool {
         match &self {
             CallingConvention::AppleAarch64 => true,
@@ -130,6 +129,17 @@ impl CallingConvention {
         match &self {
             CallingConvention::Default => true,
             _ => false,
+        }
+    }
+}
+
+impl From<CallingConvention> for CallConv {
+    fn from(value: CallingConvention) -> Self {
+        match value {
+            CallingConvention::SystemV => Self::SystemV,
+            CallingConvention::AppleAarch64 => Self::AppleAarch64,
+            CallingConvention::Default => Self::Winch,
+            CallingConvention::WindowsFastcall => Self::WindowsFastcall,
         }
     }
 }
@@ -163,6 +173,7 @@ pub trait TargetIsa: Send + Sync {
         types: &ModuleTypesBuilder,
         builtins: &mut BuiltinFunctions,
         validator: &mut FuncValidator<ValidatorResources>,
+        tunables: &Tunables,
     ) -> Result<CompiledFunction>;
 
     /// Get the default calling convention of the underlying target triple.
@@ -209,6 +220,12 @@ pub trait TargetIsa: Send + Sync {
         let width = self.triple().pointer_width().unwrap();
         width.bytes()
     }
+
+    /// The log2 of the target's page size and alignment.
+    ///
+    /// Note that this may be an upper-bound that is larger than necessary for
+    /// some platforms since it may depend on runtime configuration.
+    fn page_size_align_log2(&self) -> u8;
 }
 
 impl Debug for &dyn TargetIsa {

@@ -7,7 +7,7 @@ use wasmtime::HeapType;
 /// A value passed to and from evaluation. Note that reference types are not
 /// (yet) supported.
 #[derive(Clone, Debug)]
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "self-describing fields")]
 pub enum DiffValue {
     I32(i32),
     I64(i64),
@@ -17,6 +17,8 @@ pub enum DiffValue {
     FuncRef { null: bool },
     ExternRef { null: bool },
     AnyRef { null: bool },
+    ExnRef { null: bool },
+    ContRef { null: bool },
 }
 
 impl DiffValue {
@@ -30,6 +32,8 @@ impl DiffValue {
             DiffValue::FuncRef { .. } => DiffValueType::FuncRef,
             DiffValue::ExternRef { .. } => DiffValueType::ExternRef,
             DiffValue::AnyRef { .. } => DiffValueType::AnyRef,
+            DiffValue::ExnRef { .. } => DiffValueType::ExnRef,
+            DiffValue::ContRef { .. } => DiffValueType::ContRef,
         }
     }
 
@@ -186,6 +190,8 @@ impl DiffValue {
             FuncRef => DiffValue::FuncRef { null: true },
             ExternRef => DiffValue::ExternRef { null: true },
             AnyRef => DiffValue::AnyRef { null: true },
+            ExnRef => DiffValue::ExnRef { null: true },
+            ContRef => DiffValue::ContRef { null: true },
         };
         arbitrary::Result::Ok(val)
     }
@@ -232,6 +238,8 @@ impl Hash for DiffValue {
             DiffValue::ExternRef { null } => null.hash(state),
             DiffValue::FuncRef { null } => null.hash(state),
             DiffValue::AnyRef { null } => null.hash(state),
+            DiffValue::ExnRef { null } => null.hash(state),
+            DiffValue::ContRef { null } => null.hash(state),
         }
     }
 }
@@ -267,6 +275,9 @@ impl PartialEq for DiffValue {
             }
             (Self::FuncRef { null: a }, Self::FuncRef { null: b }) => a == b,
             (Self::ExternRef { null: a }, Self::ExternRef { null: b }) => a == b,
+            (Self::AnyRef { null: a }, Self::AnyRef { null: b }) => a == b,
+            (Self::ExnRef { null: a }, Self::ExnRef { null: b }) => a == b,
+            (Self::ContRef { null: a }, Self::ContRef { null: b }) => a == b,
             _ => false,
         }
     }
@@ -274,7 +285,7 @@ impl PartialEq for DiffValue {
 
 /// Enumerate the supported value types.
 #[derive(Copy, Clone, Debug, Arbitrary, Hash)]
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "self-describing variants")]
 pub enum DiffValueType {
     I32,
     I64,
@@ -284,6 +295,8 @@ pub enum DiffValueType {
     FuncRef,
     ExternRef,
     AnyRef,
+    ExnRef,
+    ContRef,
 }
 
 impl TryFrom<wasmtime::ValType> for DiffValueType {
@@ -302,7 +315,9 @@ impl TryFrom<wasmtime::ValType> for DiffValueType {
                 (true, HeapType::Any) => Ok(Self::AnyRef),
                 (true, HeapType::I31) => Ok(Self::AnyRef),
                 (true, HeapType::None) => Ok(Self::AnyRef),
-                _ => Err("non-funcref and non-externref reference types are not supported yet"),
+                (true, HeapType::Exn) => Ok(Self::ExnRef),
+                (true, HeapType::Cont) => Ok(Self::ContRef),
+                _ => Err("non-null reference types are not supported yet"),
             },
         }
     }
@@ -310,7 +325,6 @@ impl TryFrom<wasmtime::ValType> for DiffValueType {
 
 /// Enumerate the types of v128.
 #[derive(Copy, Clone, Debug, Arbitrary, Hash)]
-#[allow(missing_docs)]
 pub enum DiffSimdTy {
     I8x16,
     I16x8,

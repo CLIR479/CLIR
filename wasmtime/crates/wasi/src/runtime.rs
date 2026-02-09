@@ -4,7 +4,7 @@
 //! wasmtime-wasi requires a tokio executor in a way that is [deeply tied to
 //! its
 //! design](https://github.com/bytecodealliance/wasmtime/issues/7973#issuecomment-1960513214).
-//! When used from a sychrnonous wasmtime context, this module provides the
+//! When used from a synchronous wasmtime context, this module provides the
 //! wrapper function [`in_tokio`] used throughout the shim implementations of
 //! synchronous component binding `Host` traits in terms of the async ones.
 //!
@@ -21,16 +21,16 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::sync::LazyLock;
+use std::task::{Context, Poll, Waker};
 
-pub(crate) static RUNTIME: once_cell::sync::Lazy<tokio::runtime::Runtime> =
-    once_cell::sync::Lazy::new(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_time()
-            .enable_io()
-            .build()
-            .unwrap()
-    });
+pub(crate) static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_time()
+        .enable_io()
+        .build()
+        .unwrap()
+});
 
 /// Exactly like a [`tokio::task::JoinHandle`], except that it aborts the task when
 /// the handle is dropped.
@@ -42,8 +42,9 @@ pub struct AbortOnDropJoinHandle<T>(tokio::task::JoinHandle<T>);
 impl<T> AbortOnDropJoinHandle<T> {
     /// Abort the task and wait for it to finish. Optionally returns the result
     /// of the task if it ran to completion prior to being aborted.
-    pub(crate) async fn abort_wait(mut self) -> Option<T> {
+    pub async fn cancel(mut self) -> Option<T> {
         self.0.abort();
+
         match (&mut self.0).await {
             Ok(value) => Some(value),
             Err(err) if err.is_cancelled() => None,
@@ -180,7 +181,7 @@ pub fn poll_noop<F>(future: Pin<&mut F>) -> Option<F::Output>
 where
     F: Future,
 {
-    let mut task = Context::from_waker(futures::task::noop_waker_ref());
+    let mut task = Context::from_waker(Waker::noop());
     match future.poll(&mut task) {
         Poll::Ready(result) => Some(result),
         Poll::Pending => None,

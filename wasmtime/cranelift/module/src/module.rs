@@ -9,12 +9,12 @@ use super::HashMap;
 use crate::data_context::DataDescription;
 use core::fmt::Display;
 use cranelift_codegen::binemit::{CodeOffset, Reloc};
-use cranelift_codegen::entity::{entity_impl, PrimaryMap};
-use cranelift_codegen::ir::function::{Function, VersionMarker};
+use cranelift_codegen::entity::{PrimaryMap, entity_impl};
 use cranelift_codegen::ir::ExternalName;
+use cranelift_codegen::ir::function::{Function, VersionMarker};
 use cranelift_codegen::settings::SetError;
 use cranelift_codegen::{
-    ir, isa, CodegenError, CompileError, Context, FinalizedMachReloc, FinalizedRelocTarget,
+    CodegenError, CompileError, Context, FinalizedMachReloc, FinalizedRelocTarget, ir, isa,
 };
 use cranelift_control::ControlPlane;
 use std::borrow::{Cow, ToOwned};
@@ -182,6 +182,14 @@ impl Linkage {
         }
     }
 
+    /// Test whether this linkage must have a definition.
+    pub fn requires_definition(self) -> bool {
+        match self {
+            Self::Import | Self::Preemptible => false,
+            Self::Local | Self::Hidden | Self::Export => true,
+        }
+    }
+
     /// Test whether this linkage will have a definition that cannot be preempted.
     pub fn is_final(self) -> bool {
         match self {
@@ -220,12 +228,10 @@ impl From<FuncOrDataId> for ModuleRelocTarget {
     feature = "enable-serde",
     derive(serde_derive::Serialize, serde_derive::Deserialize)
 )]
+#[expect(missing_docs, reason = "self-describing fields")]
 pub struct FunctionDeclaration {
-    #[allow(missing_docs)]
     pub name: Option<String>,
-    #[allow(missing_docs)]
     pub linkage: Linkage,
-    #[allow(missing_docs)]
     pub signature: ir::Signature,
 }
 
@@ -285,8 +291,6 @@ pub enum ModuleError {
 
     /// Memory allocation failure from a backend
     Allocation {
-        /// Tell where the allocation came from
-        message: &'static str,
         /// Io error the allocation failed with
         err: std::io::Error,
     },
@@ -315,7 +319,7 @@ impl std::error::Error for ModuleError {
             | Self::DuplicateDefinition { .. }
             | Self::InvalidImportDefinition { .. } => None,
             Self::Compilation(source) => Some(source),
-            Self::Allocation { err: source, .. } => Some(source),
+            Self::Allocation { err: source } => Some(source),
             Self::Backend(source) => Some(&**source),
             Self::Flag(source) => Some(source),
         }
@@ -349,8 +353,8 @@ impl std::fmt::Display for ModuleError {
             Self::Compilation(err) => {
                 write!(f, "Compilation error: {err}")
             }
-            Self::Allocation { message, err } => {
-                write!(f, "Allocation error: {message}: {err}")
+            Self::Allocation { err } => {
+                write!(f, "Allocation error: {err}")
             }
             Self::Backend(err) => write!(f, "Backend error: {err}"),
             Self::Flag(err) => write!(f, "Flag error: {err}"),
@@ -379,14 +383,11 @@ pub type ModuleResult<T> = Result<T, ModuleError>;
     feature = "enable-serde",
     derive(serde_derive::Serialize, serde_derive::Deserialize)
 )]
+#[expect(missing_docs, reason = "self-describing fields")]
 pub struct DataDeclaration {
-    #[allow(missing_docs)]
     pub name: Option<String>,
-    #[allow(missing_docs)]
     pub linkage: Linkage,
-    #[allow(missing_docs)]
     pub writable: bool,
-    #[allow(missing_docs)]
     pub tls: bool,
 }
 
@@ -912,6 +913,7 @@ pub trait Module {
             name: ir::ExternalName::user(user_name_ref),
             signature,
             colocated,
+            patchable: false,
         })
     }
 
@@ -979,13 +981,12 @@ pub trait Module {
     fn define_function_bytes(
         &mut self,
         func_id: FuncId,
-        func: &ir::Function,
         alignment: u64,
         bytes: &[u8],
-        relocs: &[FinalizedMachReloc],
+        relocs: &[ModuleReloc],
     ) -> ModuleResult<()>;
 
-    /// Define a data object, producing the data contents from the given `DataContext`.
+    /// Define a data object, producing the data contents from the given `DataDescription`.
     fn define_data(&mut self, data_id: DataId, data: &DataDescription) -> ModuleResult<()>;
 }
 
@@ -1081,12 +1082,11 @@ impl<M: Module + ?Sized> Module for &mut M {
     fn define_function_bytes(
         &mut self,
         func_id: FuncId,
-        func: &ir::Function,
         alignment: u64,
         bytes: &[u8],
-        relocs: &[FinalizedMachReloc],
+        relocs: &[ModuleReloc],
     ) -> ModuleResult<()> {
-        (**self).define_function_bytes(func_id, func, alignment, bytes, relocs)
+        (**self).define_function_bytes(func_id, alignment, bytes, relocs)
     }
 
     fn define_data(&mut self, data_id: DataId, data: &DataDescription) -> ModuleResult<()> {
@@ -1186,12 +1186,11 @@ impl<M: Module + ?Sized> Module for Box<M> {
     fn define_function_bytes(
         &mut self,
         func_id: FuncId,
-        func: &ir::Function,
         alignment: u64,
         bytes: &[u8],
-        relocs: &[FinalizedMachReloc],
+        relocs: &[ModuleReloc],
     ) -> ModuleResult<()> {
-        (**self).define_function_bytes(func_id, func, alignment, bytes, relocs)
+        (**self).define_function_bytes(func_id, alignment, bytes, relocs)
     }
 
     fn define_data(&mut self, data_id: DataId, data: &DataDescription) -> ModuleResult<()> {

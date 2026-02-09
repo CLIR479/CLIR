@@ -3,8 +3,8 @@
 use anyhow::anyhow;
 use cranelift_codegen::binemit::{Addend, CodeOffset, Reloc};
 use cranelift_codegen::entity::SecondaryMap;
+use cranelift_codegen::ir;
 use cranelift_codegen::isa::{OwnedTargetIsa, TargetIsa};
-use cranelift_codegen::{ir, FinalizedMachReloc};
 use cranelift_control::ControlPlane;
 use cranelift_module::{
     DataDescription, DataId, FuncId, Init, Linkage, Module, ModuleDeclarations, ModuleError,
@@ -15,11 +15,11 @@ use object::write::{
     Object, Relocation, SectionId, StandardSection, Symbol, SymbolId, SymbolSection,
 };
 use object::{
-    RelocationEncoding, RelocationFlags, RelocationKind, SectionKind, SymbolFlags, SymbolKind,
-    SymbolScope,
+    RelocationEncoding, RelocationFlags, RelocationKind, SectionFlags, SectionKind, SymbolFlags,
+    SymbolKind, SymbolScope, elf,
 };
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::mem;
 use target_lexicon::PointerWidth;
 
@@ -33,6 +33,7 @@ pub struct ObjectBuilder {
     name: Vec<u8>,
     libcall_names: Box<dyn Fn(ir::LibCall) -> String + Send + Sync>,
     per_function_section: bool,
+    per_data_object_section: bool,
 }
 
 impl ObjectBuilder {
@@ -56,16 +57,15 @@ impl ObjectBuilder {
             target_lexicon::BinaryFormat::Wasm => {
                 return Err(ModuleError::Backend(anyhow!(
                     "binary format wasm is unsupported",
-                )))
+                )));
             }
             target_lexicon::BinaryFormat::Unknown => {
-                return Err(ModuleError::Backend(anyhow!("binary format is unknown")))
+                return Err(ModuleError::Backend(anyhow!("binary format is unknown")));
             }
             other => {
                 return Err(ModuleError::Backend(anyhow!(
-                    "binary format {} not recognized",
-                    other
-                )))
+                    "binary format {other} not recognized"
+                )));
             }
         };
         let architecture = match isa.triple().architecture {
@@ -76,8 +76,7 @@ impl ObjectBuilder {
             target_lexicon::Architecture::Riscv64(_) => {
                 if binary_format != object::BinaryFormat::Elf {
                     return Err(ModuleError::Backend(anyhow!(
-                        "binary format {:?} is not supported for riscv64",
-                        binary_format,
+                        "binary format {binary_format:?} is not supported for riscv64",
                     )));
                 }
 
@@ -104,9 +103,8 @@ impl ObjectBuilder {
             target_lexicon::Architecture::S390x => object::Architecture::S390x,
             architecture => {
                 return Err(ModuleError::Backend(anyhow!(
-                    "target architecture {:?} is unsupported",
-                    architecture,
-                )))
+                    "target architecture {architecture:?} is unsupported",
+                )));
             }
         };
         let endian = match isa.triple().endianness().unwrap() {
@@ -122,12 +120,19 @@ impl ObjectBuilder {
             name: name.into(),
             libcall_names,
             per_function_section: false,
+            per_data_object_section: false,
         })
     }
 
     /// Set if every function should end up in their own section.
     pub fn per_function_section(&mut self, per_function_section: bool) -> &mut Self {
         self.per_function_section = per_function_section;
+        self
+    }
+
+    /// Set if every data object should end up in their own section.
+    pub fn per_data_object_section(&mut self, per_data_object_section: bool) -> &mut Self {
+        self.per_data_object_section = per_data_object_section;
         self
     }
 }
@@ -147,6 +152,7 @@ pub struct ObjectModule {
     known_symbols: HashMap<ir::KnownSymbol, SymbolId>,
     known_labels: HashMap<(FuncId, CodeOffset), SymbolId>,
     per_function_section: bool,
+    per_data_object_section: bool,
 }
 
 impl ObjectModule {
@@ -168,6 +174,7 @@ impl ObjectModule {
             known_symbols: HashMap::new(),
             known_labels: HashMap::new(),
             per_function_section: builder.per_function_section,
+            per_data_object_section: builder.per_data_object_section,
         }
     }
 }
@@ -177,8 +184,7 @@ fn validate_symbol(name: &str) -> ModuleResult<()> {
     // crate to panic. Let's return a clean error instead.
     if name.contains("\0") {
         return Err(ModuleError::Backend(anyhow::anyhow!(
-            "Symbol {:?} has a null byte, which is disallowed",
-            name
+            "Symbol {name:?} has a null byte, which is disallowed"
         )));
     }
     Ok(())
@@ -331,68 +337,33 @@ impl Module for ObjectModule {
         ctrl_plane: &mut ControlPlane,
     ) -> ModuleResult<()> {
         info!("defining function {}: {}", func_id, ctx.func.display());
-        let mut code: Vec<u8> = Vec::new();
 
-        let res = ctx.compile_and_emit(self.isa(), &mut code, ctrl_plane)?;
+        let res = ctx.compile(self.isa(), ctrl_plane)?;
         let alignment = res.buffer.alignment as u64;
 
-        self.define_function_bytes(
-            func_id,
-            &ctx.func,
-            alignment,
-            &code,
-            ctx.compiled_code().unwrap().buffer.relocs(),
-        )
+        let buffer = &ctx.compiled_code().unwrap().buffer;
+        let relocs = buffer
+            .relocs()
+            .iter()
+            .map(|reloc| {
+                self.process_reloc(&ModuleReloc::from_mach_reloc(&reloc, &ctx.func, func_id))
+            })
+            .collect::<Vec<_>>();
+        self.define_function_inner(func_id, alignment, buffer.data(), relocs)
     }
 
     fn define_function_bytes(
         &mut self,
         func_id: FuncId,
-        func: &ir::Function,
         alignment: u64,
         bytes: &[u8],
-        relocs: &[FinalizedMachReloc],
+        relocs: &[ModuleReloc],
     ) -> ModuleResult<()> {
-        info!("defining function {} with bytes", func_id);
-        let decl = self.declarations.get_function_decl(func_id);
-        let decl_name = decl.linkage_name(func_id);
-        if !decl.linkage.is_definable() {
-            return Err(ModuleError::InvalidImportDefinition(decl_name.into_owned()));
-        }
-
-        let &mut (symbol, ref mut defined) = self.functions[func_id].as_mut().unwrap();
-        if *defined {
-            return Err(ModuleError::DuplicateDefinition(decl_name.into_owned()));
-        }
-        *defined = true;
-
-        let align = alignment
-            .max(self.isa.function_alignment().minimum.into())
-            .max(self.isa.symbol_alignment());
-        let section = if self.per_function_section {
-            let symbol_name = self.object.symbol(symbol).name.clone();
-            self.object
-                .add_subsection(StandardSection::Text, &symbol_name)
-        } else {
-            self.object.section_id(StandardSection::Text)
-        };
-        let offset = self.object.add_symbol_data(symbol, section, bytes, align);
-
-        if !relocs.is_empty() {
-            let relocs = relocs
-                .iter()
-                .map(|record| {
-                    self.process_reloc(&ModuleReloc::from_mach_reloc(&record, func, func_id))
-                })
-                .collect();
-            self.relocs.push(SymbolRelocs {
-                section,
-                offset,
-                relocs,
-            });
-        }
-
-        Ok(())
+        let relocs = relocs
+            .iter()
+            .map(|reloc| self.process_reloc(reloc))
+            .collect();
+        self.define_function_inner(func_id, alignment, bytes, relocs)
     }
 
     fn define_data(&mut self, data_id: DataId, data: &DataDescription) -> ModuleResult<()> {
@@ -419,6 +390,7 @@ impl Module for ObjectModule {
             data_relocs: _,
             ref custom_segment_section,
             align,
+            used,
         } = data;
 
         let pointer_reloc = match self.isa.triple().pointer_width().unwrap() {
@@ -447,7 +419,15 @@ impl Module for ObjectModule {
             } else {
                 StandardSection::ReadOnlyDataWithRel
             };
-            self.object.section_id(section_kind)
+            if self.per_data_object_section || used {
+                // FIXME pass empty symbol name once add_subsection produces `.text` as section name
+                // instead of `.text.` when passed an empty symbol name. (object#748) Until then
+                // pass `subsection` to produce `.text.subsection` as section name to reduce
+                // confusion.
+                self.object.add_subsection(section_kind, b"subsection")
+            } else {
+                self.object.section_id(section_kind)
+            }
         } else {
             if decl.tls {
                 return Err(cranelift_module::ModuleError::Backend(anyhow::anyhow!(
@@ -467,6 +447,21 @@ impl Module for ObjectModule {
                 },
             )
         };
+
+        if used {
+            match self.object.format() {
+                object::BinaryFormat::Elf => match self.object.section_flags_mut(section) {
+                    SectionFlags::Elf { sh_flags } => *sh_flags |= u64::from(elf::SHF_GNU_RETAIN),
+                    _ => unreachable!(),
+                },
+                object::BinaryFormat::Coff => {}
+                object::BinaryFormat::MachO => match self.object.symbol_flags_mut(symbol) {
+                    SymbolFlags::MachO { n_desc } => *n_desc |= object::macho::N_NO_DEAD_STRIP,
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            }
+        }
 
         let align = std::cmp::max(align.unwrap_or(1), self.isa.symbol_alignment());
         let offset = match *init {
@@ -492,8 +487,79 @@ impl Module for ObjectModule {
 }
 
 impl ObjectModule {
+    fn define_function_inner(
+        &mut self,
+        func_id: FuncId,
+        alignment: u64,
+        bytes: &[u8],
+        relocs: Vec<ObjectRelocRecord>,
+    ) -> Result<(), ModuleError> {
+        info!("defining function {func_id} with bytes");
+        let decl = self.declarations.get_function_decl(func_id);
+        let decl_name = decl.linkage_name(func_id);
+        if !decl.linkage.is_definable() {
+            return Err(ModuleError::InvalidImportDefinition(decl_name.into_owned()));
+        }
+
+        let &mut (symbol, ref mut defined) = self.functions[func_id].as_mut().unwrap();
+        if *defined {
+            return Err(ModuleError::DuplicateDefinition(decl_name.into_owned()));
+        }
+        *defined = true;
+
+        let align = alignment.max(self.isa.symbol_alignment());
+        let section = if self.per_function_section {
+            // FIXME pass empty symbol name once add_subsection produces `.text` as section name
+            // instead of `.text.` when passed an empty symbol name. (object#748) Until then pass
+            // `subsection` to produce `.text.subsection` as section name to reduce confusion.
+            self.object
+                .add_subsection(StandardSection::Text, b"subsection")
+        } else {
+            self.object.section_id(StandardSection::Text)
+        };
+        let offset = self.object.add_symbol_data(symbol, section, bytes, align);
+
+        if !relocs.is_empty() {
+            self.relocs.push(SymbolRelocs {
+                section,
+                offset,
+                relocs,
+            });
+        }
+
+        Ok(())
+    }
+
     /// Finalize all relocations and output an object.
     pub fn finish(mut self) -> ObjectProduct {
+        if cfg!(debug_assertions) {
+            for (func_id, decl) in self.declarations.get_functions() {
+                if !decl.linkage.requires_definition() {
+                    continue;
+                }
+
+                assert!(
+                    self.functions[func_id].unwrap().1,
+                    "function \"{}\" with linkage {:?} must be defined but is not",
+                    decl.linkage_name(func_id),
+                    decl.linkage,
+                );
+            }
+
+            for (data_id, decl) in self.declarations.get_data_objects() {
+                if !decl.linkage.requires_definition() {
+                    continue;
+                }
+
+                assert!(
+                    self.data_objects[data_id].unwrap().1,
+                    "data object \"{}\" with linkage {:?} must be defined but is not",
+                    decl.linkage_name(data_id),
+                    decl.linkage,
+                );
+            }
+        }
+
         let symbol_relocs = mem::take(&mut self.relocs);
         for symbol in symbol_relocs {
             for &ObjectRelocRecord {

@@ -15,8 +15,16 @@ const FEATURES: &[&str] = &[
     "DEMANGLE",
     "THREADS",
     "GC",
+    "GC_DRC",
+    "GC_NULL",
     "CRANELIFT",
     "WINCH",
+    "DEBUG_BUILTINS",
+    "WAT",
+    "POOLING_ALLOCATOR",
+    "COMPONENT_MODEL",
+    "PULLEY",
+    "ALL_ARCH",
 ];
 // ... if you add a line above this be sure to change the other locations
 // marked WASMTIME_FEATURE_LIST

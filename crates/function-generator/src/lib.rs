@@ -14,13 +14,15 @@ use cranelift_codegen::cursor::{Cursor, CursorPosition, FuncCursor};
 use cranelift_codegen::entity::EntityRef;
 use cranelift_codegen::flowgraph::{BlockPredecessor, ControlFlowGraph};
 use cranelift_codegen::ir;
-use cranelift_codegen::ir::immediates::{Ieee128, Offset32, V128Imm};
+use cranelift_codegen::ir::immediates::{Ieee128, Imm64, Offset32, V128Imm};
 use cranelift_codegen::ir::types::*;
 use cranelift_codegen::ir::{
-    types, ArgumentPurpose, Block, BlockCall, ConstantData, Endianness, ExtFuncData, ExternalName,
-    FuncRef, Function, GlobalValueData, Inst, InstBuilder, InstructionData, JumpTableData,
-    JumpTables, Opcode, StackSlotData, StackSlotKind, Type, UserExternalName, Value, ValueList,
+    types, ArgumentPurpose, Block, BlockArg, BlockCall, ConstantData, Endianness, ExtFuncData,
+    ExternalName, FuncRef, Function, GlobalValueData, Inst, InstBuilder, InstructionData,
+    JumpTableData, JumpTables, Opcode, StackSlotData, StackSlotKind, Type, UserExternalName, Value,
+    ValueList,
 };
+use half::f16;
 use mongodb::bson::{doc, from_bson, Bson};
 use mongodb::{
     bson,
@@ -89,6 +91,125 @@ fn dfs(
     }
 }
 
+fn gen_scalar_constant<R: Rng + ?Sized>(
+    func_cursor: &mut FuncCursor,
+    value_type: Type,
+    rng: &mut R,
+    edge_prob: f64,
+    min_vs_max_prob: f64,
+) -> Value {
+    let pick_edge = rng.gen_bool(edge_prob);
+    match value_type {
+        I8 => {
+            let v = if pick_edge {
+                if rng.gen_bool(min_vs_max_prob) {
+                    i8::MIN as i64
+                } else {
+                    i8::MAX as i64
+                }
+            } else {
+                rng.gen_range((i8::MIN / 4) as i64..=(i8::MAX / 4) as i64)
+            };
+            func_cursor.ins().iconst(I8, v)
+        }
+        I16 => {
+            let v = if pick_edge {
+                if rng.gen_bool(min_vs_max_prob) {
+                    i16::MIN as i64
+                } else {
+                    i16::MAX as i64
+                }
+            } else {
+                rng.gen_range((i16::MIN / 4) as i64..=(i16::MAX / 4) as i64)
+            };
+            func_cursor.ins().iconst(I16, v)
+        }
+        I32 => {
+            let v = if pick_edge {
+                if rng.gen_bool(min_vs_max_prob) {
+                    i32::MIN as i64
+                } else {
+                    i32::MAX as i64
+                }
+            } else {
+                rng.gen_range((i32::MIN / 4) as i64..=(i32::MAX / 4) as i64)
+            };
+            func_cursor.ins().iconst(I32, v)
+        }
+        I64 => {
+            let v = if pick_edge {
+                if rng.gen_bool(min_vs_max_prob) {
+                    i64::MIN
+                } else {
+                    i64::MAX
+                }
+            } else {
+                rng.gen_range(i64::MIN / 4..=i64::MAX / 4)
+            };
+            func_cursor.ins().iconst(I64, v)
+        }
+        I128 => {
+            let small = if pick_edge {
+                if rng.gen_bool(min_vs_max_prob) {
+                    i64::MIN
+                } else {
+                    i64::MAX
+                }
+            } else {
+                rng.gen_range(i64::MIN / 4..=i64::MAX / 4)
+            };
+            let v64 = func_cursor.ins().iconst(I64, small);
+            func_cursor.ins().uextend(I128, v64)
+        }
+        F16 => {
+            let f = if pick_edge {
+                if rng.gen_bool(min_vs_max_prob) {
+                    -65504.0f32
+                } else {
+                    65504.0f32
+                }
+            } else {
+                rng.gen_range(-65504.0f32..65504.0f32)
+            };
+            let h = f16::from_f32(f);
+            func_cursor
+                .ins()
+                .f16const(ir::immediates::Ieee16::with_bits(h.to_bits()))
+        }
+        F32 => {
+            if pick_edge {
+                let f = if rng.gen_bool(min_vs_max_prob) {
+                    f32::MIN
+                } else {
+                    f32::MAX
+                };
+                func_cursor.ins().f32const(f)
+            } else {
+                let f = rng.gen_range(-1e30f32..1e30f32);
+                func_cursor.ins().f32const(f)
+            }
+        }
+        F64 => {
+            if pick_edge {
+                let f = if rng.gen_bool(min_vs_max_prob) {
+                    f64::MIN
+                } else {
+                    f64::MAX
+                };
+                func_cursor.ins().f64const(f)
+            } else {
+                let f = rng.gen_range(-1e300f64..1e300f64);
+                func_cursor.ins().f64const(f)
+            }
+        }
+
+        _ => panic!(
+            "Unsupported scalar type in gen_scalar_constant: {:?}",
+            value_type
+        ),
+    }
+}
+
 pub fn function_generator(
     func: &mut Function,
     is_root_func: bool,
@@ -101,22 +222,17 @@ pub fn function_generator(
     fn get_instr_snippet(all_documents: &Vec<Document>, num: usize) -> Vec<Vec<InstructionData>> {
         let mut instr_snippet_list: Vec<Vec<InstructionData>> = vec![];
 
-        for document in all_documents {
-            if let Some(instrs) = document.get_array("instrs").ok() {
-                if instrs.len() < num {
-                    let mut instr_snippet = vec![];
-                    for instr in instrs {
-                        match serde_json::from_str(&instr.to_string()) {
-                            Ok(instr_data) => instr_snippet.push(instr_data),
-                            Err(e) => {
-                                eprintln!("Error parsing instr: {:?}", e);
-                                continue;
-                            }
-                        }
-                    }
-                    instr_snippet_list.push(instr_snippet);
-                }
+        for i in 0..5 {
+            let mut instr_snippet = vec![];
+            for j in 0..20 {
+                let temp_instr = InstructionData::UnaryImm {
+                    opcode: Opcode::Iconst,
+                    imm: Imm64::new(i as i64 + j as i64),
+                };
+
+                instr_snippet.push(temp_instr);
             }
+            instr_snippet_list.push(instr_snippet);
         }
 
         instr_snippet_list
@@ -154,6 +270,8 @@ pub fn function_generator(
         let mut ref_values: HashSet<TypedValue> = HashSet::new();
 
         if i == 0 {
+            let mut operand_types = config.operand_types.clone();
+
             if sig.params.len() != 0 {
                 for param_type in &sig.params {
                     let param_value = func_cursor
@@ -161,6 +279,10 @@ pub fn function_generator(
                         .dfg
                         .append_block_param(*node, param_type.value_type);
                     def_values.insert(TypedValue::new(param_value, param_type.value_type));
+
+                    operand_types.retain(|operand_type| {
+                        operand_type.to_cranelift_type() != param_type.value_type
+                    });
                 }
             }
 
@@ -175,70 +297,154 @@ pub fn function_generator(
                 0,
             ));
 
-            let operand_types = &config.operand_types;
-
             operand_types.iter().for_each(|operand_type| {
                 let value_type = operand_type.to_cranelift_type();
 
                 let random_value = match value_type {
-                    I8 => func_cursor.ins().iconst(value_type, rng.gen::<i64>()),
-                    I16 => func_cursor.ins().iconst(value_type, rng.gen::<i64>()),
-                    I32 => func_cursor.ins().iconst(value_type, rng.gen::<i64>()),
-                    I64 => func_cursor.ins().iconst(value_type, rng.gen::<i64>()),
-                    I128 => {
-                        let random_i64_value =
-                            func_cursor.ins().iconst(value_type, rng.gen::<i64>());
-                        func_cursor.ins().uextend(I128, random_i64_value)
-                    }
-                    F16 => func_cursor
-                        .ins()
-                        .f16const(ir::immediates::Ieee16::with_bits(rng.random())),
-                    F32 => {
-                        let random_f32: f32 = rng.random();
-                        func_cursor.ins().f32const(random_f32)
-                    }
-                    F64 => {
-                        let random_f64: f64 = rng.random();
-                        func_cursor.ins().f64const(random_f64)
+                    I8 | I16 | I32 | I64 | I128 | F16 | F32 | F64 => {
+                        gen_scalar_constant(&mut func_cursor, value_type, &mut rng, 0.2, 0.5)
                     }
                     I8X16 | I16X8 | I32X4 | I64X2 => {
-                        let byte_slice: Vec<u8> = (0..16).map(|_| rng.gen()).collect();
+                        let edge_prob = 0.2;
+                        let mut bytes: Vec<u8> = Vec::with_capacity(16);
+
+                        match value_type {
+                            I8X16 => {
+                                for _ in 0..16 {
+                                    let v: i8 = if rng.gen_bool(edge_prob) {
+                                        if rng.gen_bool(0.5) {
+                                            i8::MIN
+                                        } else {
+                                            i8::MAX
+                                        }
+                                    } else {
+                                        rng.gen_range((i8::MIN / 4)..=(i8::MAX / 4))
+                                    };
+                                    bytes.push(v as u8);
+                                }
+                            }
+                            I16X8 => {
+                                for _ in 0..8 {
+                                    let v: i16 = if rng.gen_bool(edge_prob) {
+                                        if rng.gen_bool(0.5) {
+                                            i16::MIN
+                                        } else {
+                                            i16::MAX
+                                        }
+                                    } else {
+                                        rng.gen_range((i16::MIN / 4)..=(i16::MAX / 4))
+                                    };
+                                    bytes.extend_from_slice(&v.to_le_bytes());
+                                }
+                            }
+                            I32X4 => {
+                                for _ in 0..4 {
+                                    let v: i32 = if rng.gen_bool(edge_prob) {
+                                        if rng.gen_bool(0.5) {
+                                            i32::MIN
+                                        } else {
+                                            i32::MAX
+                                        }
+                                    } else {
+                                        rng.gen_range((i32::MIN / 4)..=(i32::MAX / 4))
+                                    };
+                                    bytes.extend_from_slice(&v.to_le_bytes());
+                                }
+                            }
+                            I64X2 => {
+                                for _ in 0..2 {
+                                    let v: i64 = if rng.gen_bool(edge_prob) {
+                                        if rng.gen_bool(0.5) {
+                                            i64::MIN
+                                        } else {
+                                            i64::MAX
+                                        }
+                                    } else {
+                                        rng.gen_range((i64::MIN / 4)..=(i64::MAX / 4))
+                                    };
+                                    bytes.extend_from_slice(&v.to_le_bytes());
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+
                         let constant = func_cursor
                             .func
                             .dfg
                             .constants
-                            .insert(ConstantData::from(byte_slice));
+                            .insert(ConstantData::from(bytes));
                         func_cursor.ins().vconst(value_type, constant)
                     }
                     F16X8 => {
-                        let byte_slice: Vec<u8> = (0..16).map(|_| rng.gen()).collect();
+                        let edge_prob = 0.2;
+                        let mut bytes: Vec<u8> = Vec::with_capacity(16);
+                        for _ in 0..8 {
+                            let v_f32: f32 = if rng.gen_bool(edge_prob) {
+                                if rng.gen_bool(0.5) {
+                                    -65504.0f32
+                                } else {
+                                    65504.0f32
+                                }
+                            } else {
+                                rng.gen_range(-65504.0f32..65504.0f32)
+                            };
+                            let h = f16::from_f32(v_f32);
+                            let bits: u16 = h.to_bits();
+
+                            bytes.push((bits & 0xFF) as u8);
+                            bytes.push((bits >> 8) as u8);
+                        }
                         let constant = func_cursor
                             .func
                             .dfg
                             .constants
-                            .insert(ConstantData::from(byte_slice));
+                            .insert(ConstantData::from(bytes));
                         func_cursor.ins().vconst(F16X8, constant)
                     }
                     F32X4 => {
-                        let val: f32 = rng.random();
-                        let vec = f32x4::new([val; 4]);
-                        let raw_bytes = cast_ref::<f32x4, [u8; 16]>(&vec);
+                        let edge_prob = 0.2;
+                        let mut bytes: Vec<u8> = Vec::with_capacity(16);
+                        for _ in 0..4 {
+                            let v_f32: f32 = if rng.gen_bool(edge_prob) {
+                                if rng.gen_bool(0.5) {
+                                    f32::MIN
+                                } else {
+                                    f32::MAX
+                                }
+                            } else {
+                                rng.gen_range(-65504.0f32..65504.0f32)
+                            };
+                            let bits = v_f32.to_bits();
+                            bytes.extend_from_slice(&bits.to_le_bytes());
+                        }
                         let constant = func_cursor
                             .func
                             .dfg
                             .constants
-                            .insert(ConstantData::from(raw_bytes.to_vec()));
+                            .insert(ConstantData::from(bytes));
                         func_cursor.ins().vconst(F32X4, constant)
                     }
                     F64X2 => {
-                        let val: f64 = rng.random();
-                        let vec = f64x2::new([val; 2]);
-                        let raw_bytes = cast_ref::<f64x2, [u8; 16]>(&vec);
+                        let edge_prob = 0.2;
+                        let mut bytes: Vec<u8> = Vec::with_capacity(16);
+                        for _ in 0..2 {
+                            let v_f64: f64 = if rng.gen_bool(edge_prob) {
+                                if rng.gen_bool(0.5) {
+                                    f64::MIN
+                                } else {
+                                    f64::MAX
+                                }
+                            } else {
+                                rng.gen_range(-1e300f64..1e300f64)
+                            };
+                            let bits: u64 = v_f64.to_bits();
+                            bytes.extend_from_slice(&bits.to_le_bytes());
+                        }
                         let constant = func_cursor
                             .func
                             .dfg
                             .constants
-                            .insert(ConstantData::from(raw_bytes.to_vec()));
+                            .insert(ConstantData::from(bytes));
                         func_cursor.ins().vconst(F64X2, constant)
                     }
                     _ => panic!("Unsupported operand type"),
@@ -372,7 +578,7 @@ pub fn function_generator(
                     set.retain(|t| pre_block_def_types.contains(t));
                     Some(set.clone())
                 }
-                None => panic!("intersection 这里不可能为None"),
+                None => panic!("The intersection point here cannot be zero."),
             };
         }
 
@@ -392,7 +598,7 @@ pub fn function_generator(
             );
 
             let mut rng = thread_rng();
-            let range = rng.gen_range(1..4);
+            let range = value_type_intersection.len();
             let block_params_type: Vec<Type> = value_type_intersection
                 .choose_multiple(&mut rng, range)
                 .cloned()
@@ -428,7 +634,7 @@ pub fn function_generator(
                         opcode,
                         destination,
                     } => {
-                        let mut block_args: Vec<Value> = vec![];
+                        let mut block_args: Vec<BlockArg> = vec![];
 
                         for (i, param_type) in block_params_type.iter().enumerate() {
                             let values_with_same_type = get_dominator_values_with_type(
@@ -437,12 +643,12 @@ pub fn function_generator(
                                 *param_type,
                             );
                             let random_value =
-                                *select_random_value(&values_with_same_type, 0.4).unwrap();
-                            block_args.push(random_value);
+                                *select_random_value(&values_with_same_type, 0.1).unwrap();
+                            block_args.push(BlockArg::Value(random_value));
                         }
                         let new_block_call = BlockCall::new(
                             destination.block(&value_lists),
-                            block_args.as_slice(),
+                            block_args,
                             &mut value_lists,
                         );
                         destination.clone_from(&new_block_call);
@@ -452,7 +658,7 @@ pub fn function_generator(
                         arg,
                         blocks,
                     } => {
-                        let mut block_args: Vec<Value> = vec![];
+                        let mut block_args: Vec<BlockArg> = vec![];
 
                         let false_block = blocks[1].block(&value_lists);
                         let mut dest_block_call = &mut blocks[0];
@@ -467,19 +673,19 @@ pub fn function_generator(
                                 *param_type,
                             );
                             let random_value =
-                                *select_random_value(&values_with_same_type, 0.4).unwrap();
-                            block_args.push(random_value);
+                                *select_random_value(&values_with_same_type, 0.1).unwrap();
+                            block_args.push(BlockArg::Value(random_value));
                         }
 
                         let new_block_call = BlockCall::new(
                             dest_block_call.block(&value_lists),
-                            block_args.as_slice(),
+                            block_args,
                             &mut value_lists,
                         );
                         dest_block_call.clone_from(&new_block_call);
                     }
                     InstructionData::BranchTable { opcode, arg, table } => {
-                        let mut block_args: Vec<Value> = vec![];
+                        let mut block_args: Vec<BlockArg> = vec![];
 
                         let jump_table_data =
                             func_cursor.func.dfg.jump_tables.get_mut(*table).unwrap();
@@ -493,12 +699,12 @@ pub fn function_generator(
                                         *param_type,
                                     );
                                     let random_value =
-                                        *select_random_value(&values_with_same_type, 0.4).unwrap();
-                                    block_args.push(random_value);
+                                        *select_random_value(&values_with_same_type, 0.1).unwrap();
+                                    block_args.push(BlockArg::Value(random_value));
                                 }
                                 let new_block_call = BlockCall::new(
                                     block_call.block(&value_lists),
-                                    block_args.as_slice(),
+                                    block_args.clone(),
                                     &mut value_lists,
                                 );
                                 block_call.clone_from(&new_block_call);
@@ -506,7 +712,7 @@ pub fn function_generator(
                         }
                     }
                     _ => {
-                        panic!("某个block其含有后驱，但是最后一个指令不是跳转指令")
+                        panic!("A block has successors, but the last instruction is not a branch instruction")
                     }
                 }
                 func_cursor.func.dfg.insts[last_instr_id].clone_from(&last_instr_data);
@@ -589,7 +795,7 @@ pub fn function_generator(
         let mut rng = thread_rng();
 
         let main_func_sig =
-            generate_random_signature(selected_types.clone(), rng.gen_range(3..6), true);
+            generate_random_signature(selected_types.clone(), rng.gen_range(8..10), true);
         func_cursor.func.signature.clone_from(&main_func_sig);
 
         func_cursor
@@ -615,7 +821,7 @@ pub fn function_generator(
                 &block_def_values,
                 return_type.value_type,
             );
-            let random_value = *select_random_value(&values_with_same_type, 0.4).unwrap();
+            let random_value = *select_random_value(&values_with_same_type, 0.1).unwrap();
             return_values.push(random_value);
         }
         func_cursor.goto_bottom(last_block);
@@ -666,6 +872,7 @@ pub fn insert_function_invocation(
             name: ExternalName::User(external_name_ref),
             signature: sig_ref,
             colocated: false,
+            patchable: false,
         });
 
         let mut func_cursor = FuncCursor::new(func);
@@ -701,7 +908,7 @@ pub fn insert_function_invocation(
                         param.value_type,
                     );
 
-                    let random_value = *select_random_value(&values_with_same_type, 0.4).unwrap();
+                    let random_value = *select_random_value(&values_with_same_type, 0.1).unwrap();
                     call_params.push(random_value);
                 }
                 let call_inst = func_cursor

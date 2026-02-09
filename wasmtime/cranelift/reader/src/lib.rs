@@ -6,8 +6,8 @@
 #![deny(missing_docs)]
 
 pub use crate::error::{Location, ParseError, ParseResult};
-pub use crate::isaspec::{parse_option, parse_options, IsaSpec, ParseOptionError};
-pub use crate::parser::{parse_functions, parse_run_command, parse_test, ParseOptions};
+pub use crate::isaspec::{IsaSpec, ParseOptionError, parse_option, parse_options};
+pub use crate::parser::{ParseOptions, parse_functions, parse_run_command, parse_test};
 pub use crate::run_command::{Comparison, Invocation, RunCommand};
 pub use crate::sourcemap::SourceMap;
 pub use crate::testcommand::{TestCommand, TestOption};
@@ -29,7 +29,7 @@ use std::str::FromStr;
 use target_lexicon::Triple;
 
 /// Like `FlagsOrIsa`, but holds ownership.
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "self-describing variants")]
 pub enum OwnedFlagsOrIsa {
     Flags(settings::Flags),
     Isa(OwnedTargetIsa),
@@ -37,7 +37,7 @@ pub enum OwnedFlagsOrIsa {
 
 impl OwnedFlagsOrIsa {
     /// Produce a FlagsOrIsa reference.
-    pub fn as_fisa(&self) -> FlagsOrIsa {
+    pub fn as_fisa(&self) -> FlagsOrIsa<'_> {
         match *self {
             Self::Flags(ref flags) => FlagsOrIsa::from(flags),
             Self::Isa(ref isa) => FlagsOrIsa::from(&**isa),
@@ -75,12 +75,11 @@ pub fn parse_sets_and_triple(flag_set: &[String], flag_triple: &str) -> Result<O
 
         let mut isa_builder = isa::lookup(triple).map_err(|err| match err {
             isa::LookupError::SupportDisabled => {
-                anyhow::anyhow!("support for triple '{}' is disabled", triple_name)
+                anyhow::anyhow!("support for triple '{triple_name}' is disabled")
             }
-            isa::LookupError::Unsupported => anyhow::anyhow!(
-                "support for triple '{}' is not implemented yet",
-                triple_name
-            ),
+            isa::LookupError::Unsupported => {
+                anyhow::anyhow!("support for triple '{triple_name}' is not implemented yet")
+            }
         })?;
 
         // Try to parse system-wide unknown settings as target-specific settings.

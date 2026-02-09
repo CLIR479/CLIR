@@ -7,21 +7,21 @@ the same time:
 1. Compile your WebAssembly with debug info enabled, usually `-g`; for
    example:
 
-    ```sh
+    ```console
     clang foo.c -g -o foo.wasm
     ```
 
 2. Run Wasmtime with the debug info enabled; this is `-D debug-info` from the
    CLI and `Config::debug_info(true)` in an embedding (e.g. see [debugging in a
-   Rust embedding](./examples-rust-debugging.md)). It's also recommended to use
+   Rust embedding](./examples-debugging.md)). It's also recommended to use
    `-O opt-level=0` for better inspection of local variables if desired.
 
 3. Use a supported debugger:
 
-    ```sh
+    ```console
     lldb -- wasmtime run -D debug-info foo.wasm
     ```
-    ```sh
+    ```console
     gdb --args wasmtime run -D debug-info -O opt-level=0 foo.wasm
     ```
 
@@ -34,7 +34,7 @@ If you run into trouble, the following discussions might help:
 - With LLDB, call `__vmctx.set()` to set the current context before calling any
   dereference operators
   ([#1482](https://github.com/bytecodealliance/wasmtime/issues/1482)):
-  ```sh
+  ```text
   (lldb) p __vmctx->set()
   (lldb) p *foo
   ```

@@ -3,13 +3,16 @@
 #![cfg_attr(not(feature = "cache"), allow(unused_imports))]
 
 use crate::{handle_result, wasm_memorytype_t, wasmtime_error_t};
-use std::ops::Range;
 use std::os::raw::c_char;
 use std::ptr;
 use std::{ffi::CStr, sync::Arc};
 use wasmtime::{
-    Config, LinearMemory, MemoryCreator, OptLevel, ProfilingStrategy, Result, Strategy,
+    Config, InstanceAllocationStrategy, LinearMemory, MemoryCreator, OptLevel, ProfilingStrategy,
+    Result, Strategy,
 };
+
+#[cfg(feature = "pooling-allocator")]
+use wasmtime::PoolingAllocationConfig;
 
 #[repr(C)]
 #[derive(Clone)]
@@ -43,50 +46,55 @@ pub enum wasmtime_profiling_strategy_t {
     WASMTIME_PROFILING_STRATEGY_PERFMAP,
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_config_new() -> Box<wasm_config_t> {
     Box::new(wasm_config_t {
         config: Config::default(),
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_debug_info_set(c: &mut wasm_config_t, enable: bool) {
     c.config.debug_info(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_consume_fuel_set(c: &mut wasm_config_t, enable: bool) {
     c.config.consume_fuel(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_epoch_interruption_set(c: &mut wasm_config_t, enable: bool) {
     c.config.epoch_interruption(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_max_wasm_stack_set(c: &mut wasm_config_t, size: usize) {
     c.config.max_wasm_stack(size);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[cfg(feature = "threads")]
 pub extern "C" fn wasmtime_config_wasm_threads_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_threads(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_config_shared_memory_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.shared_memory(enable);
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_tail_call_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_tail_call(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_reference_types_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_reference_types(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_function_references_set(
     c: &mut wasm_config_t,
     enable: bool,
@@ -94,22 +102,22 @@ pub extern "C" fn wasmtime_config_wasm_function_references_set(
     c.config.wasm_function_references(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_gc_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_gc(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_simd_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_simd(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_relaxed_simd_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_relaxed_simd(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_relaxed_simd_deterministic_set(
     c: &mut wasm_config_t,
     enable: bool,
@@ -117,27 +125,32 @@ pub extern "C" fn wasmtime_config_wasm_relaxed_simd_deterministic_set(
     c.config.relaxed_simd_deterministic(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_bulk_memory_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_bulk_memory(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_multi_value_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_multi_value(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_multi_memory_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_multi_memory(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_wasm_memory64_set(c: &mut wasm_config_t, enable: bool) {
     c.config.wasm_memory64(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_config_wasm_stack_switching_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.wasm_stack_switching(enable);
+}
+
+#[unsafe(no_mangle)]
 #[cfg(any(feature = "cranelift", feature = "winch"))]
 pub extern "C" fn wasmtime_config_strategy_set(
     c: &mut wasm_config_t,
@@ -150,13 +163,13 @@ pub extern "C" fn wasmtime_config_strategy_set(
     });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[cfg(feature = "parallel-compilation")]
 pub extern "C" fn wasmtime_config_parallel_compilation_set(c: &mut wasm_config_t, enable: bool) {
     c.config.parallel_compilation(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[cfg(any(feature = "cranelift", feature = "winch"))]
 pub extern "C" fn wasmtime_config_cranelift_debug_verifier_set(
     c: &mut wasm_config_t,
@@ -165,7 +178,7 @@ pub extern "C" fn wasmtime_config_cranelift_debug_verifier_set(
     c.config.cranelift_debug_verifier(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[cfg(any(feature = "cranelift", feature = "winch"))]
 pub extern "C" fn wasmtime_config_cranelift_nan_canonicalization_set(
     c: &mut wasm_config_t,
@@ -174,7 +187,7 @@ pub extern "C" fn wasmtime_config_cranelift_nan_canonicalization_set(
     c.config.cranelift_nan_canonicalization(enable);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[cfg(any(feature = "cranelift", feature = "winch"))]
 pub extern "C" fn wasmtime_config_cranelift_opt_level_set(
     c: &mut wasm_config_t,
@@ -188,7 +201,7 @@ pub extern "C" fn wasmtime_config_cranelift_opt_level_set(
     });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_profiler_set(
     c: &mut wasm_config_t,
     strategy: wasmtime_profiling_strategy_t,
@@ -202,18 +215,24 @@ pub extern "C" fn wasmtime_config_profiler_set(
     });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[cfg(feature = "cache")]
 pub unsafe extern "C" fn wasmtime_config_cache_config_load(
     c: &mut wasm_config_t,
     filename: *const c_char,
 ) -> Option<Box<wasmtime_error_t>> {
+    use std::path::Path;
+
+    use wasmtime::Cache;
+
     handle_result(
         if filename.is_null() {
-            c.config.cache_config_load_default()
+            Cache::from_file(None).map(|cache| c.config.cache(Some(cache)))
         } else {
             match CStr::from_ptr(filename).to_str() {
-                Ok(s) => c.config.cache_config_load(s),
+                Ok(s) => {
+                    Cache::from_file(Some(&Path::new(s))).map(|cache| c.config.cache(Some(cache)))
+                }
                 Err(e) => Err(e.into()),
             }
         },
@@ -221,41 +240,35 @@ pub unsafe extern "C" fn wasmtime_config_cache_config_load(
     )
 }
 
-#[no_mangle]
-pub extern "C" fn wasmtime_config_static_memory_forced_set(c: &mut wasm_config_t, enable: bool) {
-    c.config.static_memory_forced(enable);
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_config_memory_may_move_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.memory_may_move(enable);
 }
 
-#[no_mangle]
-pub extern "C" fn wasmtime_config_static_memory_maximum_size_set(c: &mut wasm_config_t, size: u64) {
-    c.config.static_memory_maximum_size(size);
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_config_memory_reservation_set(c: &mut wasm_config_t, size: u64) {
+    c.config.memory_reservation(size);
 }
 
-#[no_mangle]
-pub extern "C" fn wasmtime_config_static_memory_guard_size_set(c: &mut wasm_config_t, size: u64) {
-    c.config.static_memory_guard_size(size);
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_config_memory_guard_size_set(c: &mut wasm_config_t, size: u64) {
+    c.config.memory_guard_size(size);
 }
 
-#[no_mangle]
-pub extern "C" fn wasmtime_config_dynamic_memory_guard_size_set(c: &mut wasm_config_t, size: u64) {
-    c.config.dynamic_memory_guard_size(size);
-}
-
-#[no_mangle]
-pub extern "C" fn wasmtime_config_dynamic_memory_reserved_for_growth_set(
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_config_memory_reservation_for_growth_set(
     c: &mut wasm_config_t,
     size: u64,
 ) {
-    c.config.dynamic_memory_reserved_for_growth(size);
+    c.config.memory_reservation_for_growth(size);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_native_unwind_info_set(c: &mut wasm_config_t, enabled: bool) {
     c.config.native_unwind_info(enabled);
 }
 
-#[no_mangle]
-#[cfg(any(feature = "cranelift", feature = "winch"))]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_config_target_set(
     c: &mut wasm_config_t,
     target: *const c_char,
@@ -264,12 +277,17 @@ pub unsafe extern "C" fn wasmtime_config_target_set(
     handle_result(c.config.target(target), |_cfg| {})
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_macos_use_mach_ports_set(c: &mut wasm_config_t, enabled: bool) {
     c.config.macos_use_mach_ports(enabled);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_config_signals_based_traps_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.signals_based_traps(enable);
+}
+
+#[unsafe(no_mangle)]
 #[cfg(any(feature = "cranelift", feature = "winch"))]
 pub unsafe extern "C" fn wasmtime_config_cranelift_flag_enable(
     c: &mut wasm_config_t,
@@ -279,7 +297,7 @@ pub unsafe extern "C" fn wasmtime_config_cranelift_flag_enable(
     c.config.cranelift_flag_enable(flag);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 #[cfg(any(feature = "cranelift", feature = "winch"))]
 pub unsafe extern "C" fn wasmtime_config_cranelift_flag_set(
     c: &mut wasm_config_t,
@@ -327,37 +345,23 @@ struct CHostLinearMemory {
 unsafe impl LinearMemory for CHostLinearMemory {
     fn byte_size(&self) -> usize {
         let mut byte_size = 0;
-        let mut maximum_byte_size = 0;
+        let mut byte_capacity = 0;
         let cb = self.get_memory;
-        cb(self.foreign.data, &mut byte_size, &mut maximum_byte_size);
+        cb(self.foreign.data, &mut byte_size, &mut byte_capacity);
         return byte_size;
     }
-    fn maximum_byte_size(&self) -> Option<usize> {
+    fn byte_capacity(&self) -> usize {
         let mut byte_size = 0;
-        let mut maximum_byte_size = 0;
+        let mut byte_capacity = 0;
         let cb = self.get_memory;
-        cb(self.foreign.data, &mut byte_size, &mut maximum_byte_size);
-        if maximum_byte_size == 0 {
-            None
-        } else {
-            Some(maximum_byte_size)
-        }
+        cb(self.foreign.data, &mut byte_size, &mut byte_capacity);
+        byte_capacity
     }
     fn as_ptr(&self) -> *mut u8 {
         let mut byte_size = 0;
-        let mut maximum_byte_size = 0;
+        let mut byte_capacity = 0;
         let cb = self.get_memory;
-        cb(self.foreign.data, &mut byte_size, &mut maximum_byte_size)
-    }
-    fn wasm_accessible(&self) -> Range<usize> {
-        let mut byte_size = 0;
-        let mut maximum_byte_size = 0;
-        let cb = self.get_memory;
-        let ptr = cb(self.foreign.data, &mut byte_size, &mut maximum_byte_size);
-        Range {
-            start: ptr as usize,
-            end: ptr as usize + byte_size,
-        }
+        cb(self.foreign.data, &mut byte_size, &mut byte_capacity)
     }
     fn grow_to(&mut self, new_size: usize) -> Result<()> {
         let cb = self.grow_memory;
@@ -435,14 +439,14 @@ unsafe impl MemoryCreator for CHostMemoryCreator {
                 }))
             }
             Some(err) => {
-                let err: anyhow::Error = (*err).into();
+                let err: wasmtime::Error = (*err).into();
                 Err(format!("{err}"))
             }
         }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_config_host_memory_creator_set(
     c: &mut wasm_config_t,
     creator: &wasmtime_memory_creator_t,
@@ -456,7 +460,235 @@ pub unsafe extern "C" fn wasmtime_config_host_memory_creator_set(
     }));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_config_memory_init_cow_set(c: &mut wasm_config_t, enable: bool) {
     c.config.memory_init_cow(enable);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_config_wasm_wide_arithmetic_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.wasm_wide_arithmetic(enable);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_config_wasm_exceptions_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.wasm_exceptions(enable);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_config_wasm_custom_page_sizes_set(c: &mut wasm_config_t, enable: bool) {
+    c.config.wasm_custom_page_sizes(enable);
+}
+
+#[repr(C)]
+#[derive(Clone)]
+#[cfg(feature = "pooling-allocator")]
+pub struct wasmtime_pooling_allocation_config_t {
+    pub(crate) config: PoolingAllocationConfig,
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_new()
+-> Box<wasmtime_pooling_allocation_config_t> {
+    Box::new(wasmtime_pooling_allocation_config_t {
+        config: PoolingAllocationConfig::default(),
+    })
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_delete(
+    _: Box<wasmtime_pooling_allocation_config_t>,
+) {
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_max_unused_warm_slots_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    max: u32,
+) {
+    c.config.max_unused_warm_slots(max);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_decommit_batch_size_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    batch_size: usize,
+) {
+    c.config.decommit_batch_size(batch_size);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(all(feature = "pooling-allocator", feature = "async"))]
+pub extern "C" fn wasmtime_pooling_allocation_config_async_stack_keep_resident_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    size: usize,
+) {
+    c.config.async_stack_keep_resident(size);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_linear_memory_keep_resident_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    size: usize,
+) {
+    c.config.linear_memory_keep_resident(size);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_table_keep_resident_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    size: usize,
+) {
+    c.config.table_keep_resident(size);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_total_component_instances_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    count: u32,
+) {
+    c.config.total_component_instances(count);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_max_component_instance_size_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    size: usize,
+) {
+    c.config.max_component_instance_size(size);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_max_core_instances_per_component_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    count: u32,
+) {
+    c.config.max_core_instances_per_component(count);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_max_memories_per_component_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    count: u32,
+) {
+    c.config.max_memories_per_component(count);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_max_tables_per_component_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    count: u32,
+) {
+    c.config.max_tables_per_component(count);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_total_memories_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    count: u32,
+) {
+    c.config.total_memories(count);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_total_tables_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    count: u32,
+) {
+    c.config.total_tables(count);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(all(feature = "pooling-allocator", feature = "async"))]
+pub extern "C" fn wasmtime_pooling_allocation_config_total_stacks_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    count: u32,
+) {
+    c.config.total_stacks(count);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_total_core_instances_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    count: u32,
+) {
+    c.config.total_core_instances(count);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_max_core_instance_size_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    size: usize,
+) {
+    c.config.max_core_instance_size(size);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_max_tables_per_module_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    tables: u32,
+) {
+    c.config.max_tables_per_module(tables);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_table_elements_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    elements: usize,
+) {
+    c.config.table_elements(elements);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_max_memories_per_module_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    memories: u32,
+) {
+    c.config.max_memories_per_module(memories);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_max_memory_size_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    bytes: usize,
+) {
+    c.config.max_memory_size(bytes);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(all(feature = "pooling-allocator", feature = "gc"))]
+pub extern "C" fn wasmtime_pooling_allocation_config_total_gc_heaps_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    count: u32,
+) {
+    c.config.total_gc_heaps(count);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_strategy_set(
+    c: &mut wasm_config_t,
+    pc: &wasmtime_pooling_allocation_config_t,
+) {
+    c.config
+        .allocation_strategy(InstanceAllocationStrategy::Pooling(pc.config.clone()));
 }

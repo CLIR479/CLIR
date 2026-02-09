@@ -1,3 +1,5 @@
+use wasmtime_environ::error::format_err;
+
 pub use super::types::{Errno, Error};
 
 pub trait ErrorExt {
@@ -124,9 +126,9 @@ fn from_raw_os_error(err: Option<i32>) -> Option<Error> {
         RustixErrno::TIMEDOUT => Errno::Timedout.into(),
 
         // On some platforms.into(), these have the same value as other errno values.
-        #[allow(unreachable_patterns)]
+        #[allow(unreachable_patterns, reason = "see comment")]
         RustixErrno::WOULDBLOCK => Errno::Again.into(),
-        #[allow(unreachable_patterns)]
+        #[allow(unreachable_patterns, reason = "see comment")]
         RustixErrno::OPNOTSUPP => Errno::Notsup.into(),
 
         _ => return None,
@@ -217,7 +219,7 @@ impl From<std::io::Error> for Error {
                 std::io::ErrorKind::AlreadyExists => Errno::Exist.into(),
                 std::io::ErrorKind::InvalidInput => Errno::Inval.into(),
                 std::io::ErrorKind::WouldBlock => Errno::Again.into(),
-                _ => Error::trap(anyhow::anyhow!(err).context("Unknown OS error")),
+                _ => Error::trap(format_err!(err).context("Unknown OS error")),
             },
         }
     }
@@ -249,11 +251,9 @@ impl From<wiggle::GuestError> for Error {
             PtrOverflow { .. } | PtrOutOfBounds { .. } | PtrNotAligned { .. } => {
                 Error::trap(err.into())
             }
-            PtrBorrowed { .. } => Errno::Fault.into(),
             InvalidUtf8 { .. } => Errno::Ilseq.into(),
             TryFromIntError { .. } => Errno::Overflow.into(),
             SliceLengthsDiffer { .. } => Errno::Fault.into(),
-            BorrowCheckerOutOfHandles { .. } => Errno::Fault.into(),
             InFunc { err, .. } => Error::from(*err),
         }
     }

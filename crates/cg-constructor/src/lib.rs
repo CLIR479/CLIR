@@ -3,6 +3,7 @@ use cranelift_codegen::ir;
 use cranelift_codegen::ir::{
     AbiParam, Block, ExternalName, FuncRef, Function, Signature, Type, UserFuncName,
 };
+use cranelift_codegen::ir::types::*;
 use cranelift_codegen::isa::CallConv;
 use rand::prelude::IndexedRandom;
 use rand::{thread_rng, Rng};
@@ -69,14 +70,11 @@ fn generate_function_tree(
             let mut child_func_sig = Signature::new(CallConv::Fast);
 
             let candidate_types = vec![
-                ir::types::I32,
-                ir::types::I64,
-                ir::types::F32,
-                ir::types::F64,
+                I8, I16, I32, I64, F32, F64, I16X8, I32X4, F32X4, I64X2, F64X2,
             ];
             child_func_sig.clone_from(&generate_random_signature(
                 candidate_types,
-                rng.gen_range(1..=2),
+                rng.gen_range(8..10),
                 false,
             ));
             *func_id += 1;

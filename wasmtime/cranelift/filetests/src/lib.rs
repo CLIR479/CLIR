@@ -21,6 +21,7 @@ mod test_alias_analysis;
 mod test_cat;
 mod test_compile;
 mod test_domtree;
+mod test_inline;
 mod test_interpret;
 mod test_legalizer;
 mod test_optimize;
@@ -89,10 +90,11 @@ fn new_subtest(parsed: &TestCommand) -> anyhow::Result<Box<dyn subtest::SubTest>
         "cat" => test_cat::subtest(parsed),
         "compile" => test_compile::subtest(parsed),
         "domtree" => test_domtree::subtest(parsed),
+        "inline" => test_inline::subtest(parsed),
         "interpret" => test_interpret::subtest(parsed),
         "legalizer" => test_legalizer::subtest(parsed),
         "optimize" => test_optimize::subtest(parsed),
-        "print-cf-constructor" => test_print_cfg::subtest(parsed),
+        "print-cfg" => test_print_cfg::subtest(parsed),
         "run" => test_run::subtest(parsed),
         "safepoint" => test_safepoint::subtest(parsed),
         "unwind" => test_unwind::subtest(parsed),
@@ -106,5 +108,5 @@ fn pretty_anyhow_error(
     err: cranelift_codegen::CodegenError,
 ) -> anyhow::Error {
     let s = cranelift_codegen::print_errors::pretty_error(func, err);
-    anyhow::anyhow!("{}", s)
+    anyhow::anyhow!("{s}")
 }

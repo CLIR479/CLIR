@@ -1,4 +1,82 @@
-use cap_rand::RngCore;
+use cap_rand::{Rng as _, RngCore, SeedableRng as _};
+use wasmtime::component::HasData;
+
+/// A helper struct which implements [`HasData`] for the `wasi:random` APIs.
+///
+/// This can be useful when directly calling `add_to_linker` functions directly,
+/// such as [`wasmtime_wasi::p2::bindings::random::random::add_to_linker`] as
+/// the `D` type parameter. See [`HasData`] for more information about the type
+/// parameter's purpose.
+///
+/// When using this type you can skip the [`WasiRandomView`] trait, for
+/// example.
+///
+/// [`wasmtime_wasi::p2::bindings::random::random::add_to_linker`]: crate::p2::bindings::random::random::add_to_linker
+///
+/// # Examples
+///
+/// ```
+/// use wasmtime::component::Linker;
+/// use wasmtime::{Engine, Result};
+/// use wasmtime_wasi::random::*;
+///
+/// struct MyStoreState {
+///     random: WasiRandomCtx,
+/// }
+///
+/// fn main() -> Result<()> {
+///     let engine = Engine::default();
+///     let mut linker = Linker::new(&engine);
+///
+///     wasmtime_wasi::p2::bindings::random::random::add_to_linker::<MyStoreState, WasiRandom>(
+///         &mut linker,
+///         |state| &mut state.random,
+///     )?;
+///     Ok(())
+/// }
+/// ```
+pub struct WasiRandom;
+
+impl HasData for WasiRandom {
+    type Data<'a> = &'a mut WasiRandomCtx;
+}
+
+pub struct WasiRandomCtx {
+    pub(crate) random: Box<dyn RngCore + Send>,
+    pub(crate) insecure_random: Box<dyn RngCore + Send>,
+    pub(crate) insecure_random_seed: u128,
+}
+
+impl Default for WasiRandomCtx {
+    fn default() -> Self {
+        // For the insecure random API, use `SmallRng`, which is fast. It's
+        // also insecure, but that's the deal here.
+        let insecure_random = Box::new(
+            cap_rand::rngs::SmallRng::from_rng(cap_rand::thread_rng(cap_rand::ambient_authority()))
+                .unwrap(),
+        );
+        // For the insecure random seed, use a `u128` generated from
+        // `thread_rng()`, so that it's not guessable from the insecure_random
+        // API.
+        let insecure_random_seed =
+            cap_rand::thread_rng(cap_rand::ambient_authority()).r#gen::<u128>();
+        Self {
+            random: thread_rng(),
+            insecure_random,
+            insecure_random_seed,
+        }
+    }
+}
+
+pub trait WasiRandomView: Send {
+    fn random(&mut self) -> &mut WasiRandomCtx;
+}
+
+impl WasiRandomView for WasiRandomCtx {
+    fn random(&mut self) -> &mut WasiRandomCtx {
+        self
+    }
+}
 
 /// Implement `insecure-random` using a deterministic cycle of bytes.
 pub struct Deterministic {
@@ -54,5 +132,5 @@ mod test {
 pub fn thread_rng() -> Box<dyn RngCore + Send> {
     use cap_rand::{Rng, SeedableRng};
     let mut rng = cap_rand::thread_rng(cap_rand::ambient_authority());
-    Box::new(cap_rand::rngs::StdRng::from_seed(rng.gen()))
+    Box::new(cap_rand::rngs::StdRng::from_seed(rng.r#gen()))
 }

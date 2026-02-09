@@ -8,7 +8,7 @@ use crate::machinst::{Reg, RegClass, Writable};
 use regalloc2::PReg;
 use regalloc2::VReg;
 
-use std::string::{String, ToString};
+use alloc::string::{String, ToString};
 
 //=============================================================================
 // Registers, the Universe thereof, and printing
@@ -20,8 +20,8 @@ pub const PINNED_REG: u8 = 21;
 
 /// Get a reference to an X-register (integer register). Do not use
 /// this for xsp / xzr; we have two special registers for those.
-pub fn xreg(num: u8) -> Reg {
-    Reg::from(xreg_preg(num))
+pub const fn xreg(num: u8) -> Reg {
+    Reg::from_real_reg(xreg_preg(num))
 }
 
 /// Get the given X-register as a PReg.
@@ -177,6 +177,18 @@ fn show_reg(reg: Reg) -> String {
 
 pub fn pretty_print_reg(reg: Reg) -> String {
     show_reg(reg)
+}
+
+fn show_reg_sized(reg: Reg, size: OperandSize) -> String {
+    match reg.class() {
+        RegClass::Int => show_ireg_sized(reg, size),
+        RegClass::Float => show_reg(reg),
+        RegClass::Vector => unreachable!(),
+    }
+}
+
+pub fn pretty_print_reg_sized(reg: Reg, size: OperandSize) -> String {
+    show_reg_sized(reg, size)
 }
 
 /// If `ireg` denotes an Int-classed reg, make a best-effort attempt to show

@@ -1,7 +1,7 @@
 use crate::bindings::http::types::ErrorCode;
 use std::error::Error;
 use std::fmt;
-use wasmtime_wasi::ResourceTableError;
+use wasmtime::component::ResourceTableError;
 
 /// A [`Result`] type where the error type defaults to [`HttpError`].
 pub type HttpResult<T, E = HttpError> = Result<T, E>;
@@ -12,17 +12,17 @@ pub type HttpResult<T, E = HttpError> = Result<T, E>;
 /// Modeled after [`TrappableError`](wasmtime_wasi::TrappableError).
 #[repr(transparent)]
 pub struct HttpError {
-    err: anyhow::Error,
+    err: wasmtime::Error,
 }
 
 impl HttpError {
     /// Create a new `HttpError` that represents a trap.
-    pub fn trap(err: impl Into<anyhow::Error>) -> HttpError {
+    pub fn trap(err: impl Into<wasmtime::Error>) -> HttpError {
         HttpError { err: err.into() }
     }
 
     /// Downcast this error to an [`ErrorCode`].
-    pub fn downcast(self) -> anyhow::Result<ErrorCode> {
+    pub fn downcast(self) -> wasmtime::Result<ErrorCode> {
         self.err.downcast()
     }
 
@@ -58,6 +58,7 @@ impl fmt::Display for HttpError {
 
 impl Error for HttpError {}
 
+#[cfg(feature = "default-send-request")]
 pub(crate) fn dns_error(rcode: String, info_code: u16) -> ErrorCode {
     ErrorCode::DnsError(crate::bindings::http::types::DnsErrorPayload {
         rcode: Some(rcode),
@@ -110,4 +111,10 @@ pub fn hyper_response_error(err: hyper::Error) -> ErrorCode {
     tracing::warn!("hyper response error: {err:?}");
 
     ErrorCode::HttpProtocolError
+}
+
+impl From<hyper::Error> for ErrorCode {
+    fn from(err: hyper::Error) -> Self {
+        hyper_response_error(err)
+    }
 }

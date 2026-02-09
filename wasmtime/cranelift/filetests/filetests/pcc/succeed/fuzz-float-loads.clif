@@ -1,7 +1,8 @@
 test compile
 set enable_pcc=true
 set opt_level=speed
-target x86_64
+target aarch64
+;; disabled until PCC is migrated to new assembler: target x86_64
 
 function u0:0(i64 vmctx, i64) fast {
     gv0 = vmctx
@@ -81,5 +82,5 @@ block7(v40: i64):
     v39 = f64const 0x0.0000000005b28p-1022
     v41 = iadd_imm v40, 9
     store notrap aligned v41, v17+8
-    trap unreachable
+    trap user1
 }

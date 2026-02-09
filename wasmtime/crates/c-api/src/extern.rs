@@ -1,6 +1,6 @@
 use crate::{
-    wasm_externkind_t, wasm_externtype_t, wasm_func_t, wasm_global_t, wasm_memory_t, wasm_table_t,
-    WasmStoreRef, WasmtimeStoreContext,
+    WasmStoreRef, WasmtimeStoreContext, wasm_externkind_t, wasm_externtype_t, wasm_func_t,
+    wasm_global_t, wasm_memory_t, wasm_table_t,
 };
 use std::mem::ManuallyDrop;
 use wasmtime::{Extern, Func, Global, Memory, SharedMemory, Table};
@@ -13,60 +13,63 @@ pub struct wasm_extern_t {
 
 wasmtime_c_api_macros::declare_ref!(wasm_extern_t);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_extern_kind(e: &wasm_extern_t) -> wasm_externkind_t {
     match e.which {
         Extern::Func(_) => crate::WASM_EXTERN_FUNC,
         Extern::Global(_) => crate::WASM_EXTERN_GLOBAL,
         Extern::Table(_) => crate::WASM_EXTERN_TABLE,
         Extern::Memory(_) => crate::WASM_EXTERN_MEMORY,
-        Extern::SharedMemory(_) => todo!(),
+        Extern::SharedMemory(_) => panic!(
+            "Shared Memory no implemented for wasm_* types. Please use wasmtime_* types instead"
+        ),
+        Extern::Tag(_) => todo!(), // FIXME: #10252 C embedder API for exceptions and control tags.
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_extern_type(e: &wasm_extern_t) -> Box<wasm_externtype_t> {
     Box::new(wasm_externtype_t::from_extern_type(
         e.which.ty(&e.store.context()),
     ))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_extern_as_func(e: &wasm_extern_t) -> Option<&wasm_func_t> {
     wasm_func_t::try_from(e)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_extern_as_func_const(e: &wasm_extern_t) -> Option<&wasm_func_t> {
     wasm_extern_as_func(e)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_extern_as_global(e: &wasm_extern_t) -> Option<&wasm_global_t> {
     wasm_global_t::try_from(e)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_extern_as_global_const(e: &wasm_extern_t) -> Option<&wasm_global_t> {
     wasm_extern_as_global(e)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_extern_as_table(e: &wasm_extern_t) -> Option<&wasm_table_t> {
     wasm_table_t::try_from(e)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_extern_as_table_const(e: &wasm_extern_t) -> Option<&wasm_table_t> {
     wasm_extern_as_table(e)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_extern_as_memory(e: &wasm_extern_t) -> Option<&wasm_memory_t> {
     wasm_memory_t::try_from(e)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_extern_as_memory_const(e: &wasm_extern_t) -> Option<&wasm_memory_t> {
     wasm_extern_as_memory(e)
 }
@@ -141,16 +144,17 @@ impl From<Extern> for wasmtime_extern_t {
                     sharedmemory: ManuallyDrop::new(Box::new(sharedmemory)),
                 },
             },
+            Extern::Tag(_) => todo!(), // FIXME: #10252 C embedder API for exceptions and control tags.
         }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_extern_delete(e: &mut ManuallyDrop<wasmtime_extern_t>) {
     ManuallyDrop::drop(e);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_extern_type(
     store: WasmtimeStoreContext<'_>,
     e: &wasmtime_extern_t,

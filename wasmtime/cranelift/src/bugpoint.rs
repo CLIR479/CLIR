@@ -4,18 +4,17 @@ use crate::utils::read_to_string;
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use cranelift::prelude::Value;
+use cranelift_codegen::Context;
 use cranelift_codegen::cursor::{Cursor, FuncCursor};
 use cranelift_codegen::flowgraph::ControlFlowGraph;
-use cranelift_codegen::ir::types::{F32, F64, I128, I64};
+use cranelift_codegen::ir::types::{F32, F64, I64, I128};
 use cranelift_codegen::ir::{
     self, Block, FuncRef, Function, GlobalValueData, Inst, InstBuilder, InstructionData,
     StackSlots, TrapCode,
 };
 use cranelift_codegen::isa::TargetIsa;
-use cranelift_codegen::Context;
 use cranelift_entity::PrimaryMap;
-use cranelift_reader::{parse_sets_and_triple, parse_test, ParseOptions};
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use cranelift_reader::{ParseOptions, parse_sets_and_triple, parse_test};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -55,7 +54,9 @@ pub fn run(options: &Options) -> Result<()> {
         anyhow::bail!("compilation requires a target isa");
     };
 
-    std::env::set_var("RUST_BACKTRACE", "0"); // Disable backtraces to reduce verbosity
+    unsafe {
+        std::env::set_var("RUST_BACKTRACE", "0"); // Disable backtraces to reduce verbosity
+    }
 
     for (func, _) in test_file.functions {
         let (orig_block_count, orig_inst_count) = (block_count(&func), inst_count(&func));
@@ -94,7 +95,6 @@ enum ProgressStatus {
 
 trait Mutator {
     fn name(&self) -> &'static str;
-    fn mutation_count(&self, func: &Function) -> usize;
     fn mutate(&mut self, func: Function) -> Option<(Function, String, ProgressStatus)>;
 
     /// Gets called when the returned mutated function kept on causing the crash. This can be used
@@ -122,10 +122,6 @@ impl RemoveInst {
 impl Mutator for RemoveInst {
     fn name(&self) -> &'static str {
         "remove inst"
-    }
-
-    fn mutation_count(&self, func: &Function) -> usize {
-        inst_count(func)
     }
 
     fn mutate(&mut self, mut func: Function) -> Option<(Function, String, ProgressStatus)> {
@@ -163,10 +159,6 @@ impl ReplaceInstWithConst {
 impl Mutator for ReplaceInstWithConst {
     fn name(&self) -> &'static str {
         "replace inst with const"
-    }
-
-    fn mutation_count(&self, func: &Function) -> usize {
-        inst_count(func)
     }
 
     fn mutate(&mut self, mut func: Function) -> Option<(Function, String, ProgressStatus)> {
@@ -259,17 +251,13 @@ impl Mutator for ReplaceInstWithTrap {
         "replace inst with trap"
     }
 
-    fn mutation_count(&self, func: &Function) -> usize {
-        inst_count(func)
-    }
-
     fn mutate(&mut self, mut func: Function) -> Option<(Function, String, ProgressStatus)> {
         next_inst_ret_prev(&func, &mut self.block, &mut self.inst).map(
             |(_prev_block, prev_inst)| {
                 let status = if func.dfg.insts[prev_inst].opcode() == ir::Opcode::Trap {
                     ProgressStatus::Skip
                 } else {
-                    func.dfg.replace(prev_inst).trap(TrapCode::User(0));
+                    func.dfg.replace(prev_inst).trap(TrapCode::unwrap_user(1));
                     ProgressStatus::Changed
                 };
                 (func, format!("Replace inst {prev_inst} with trap"), status)
@@ -298,10 +286,6 @@ impl MoveInstToEntryBlock {
 impl Mutator for MoveInstToEntryBlock {
     fn name(&self) -> &'static str {
         "move inst to entry block"
-    }
-
-    fn mutation_count(&self, func: &Function) -> usize {
-        inst_count(func)
     }
 
     fn mutate(&mut self, mut func: Function) -> Option<(Function, String, ProgressStatus)> {
@@ -348,10 +332,6 @@ impl Mutator for RemoveBlock {
         "remove block"
     }
 
-    fn mutation_count(&self, func: &Function) -> usize {
-        block_count(func)
-    }
-
     fn mutate(&mut self, mut func: Function) -> Option<(Function, String, ProgressStatus)> {
         func.layout.next_block(self.block).map(|next_block| {
             self.block = next_block;
@@ -389,13 +369,6 @@ impl Mutator for ReplaceBlockParamWithConst {
         "replace block parameter with const"
     }
 
-    fn mutation_count(&self, func: &Function) -> usize {
-        func.layout
-            .blocks()
-            .map(|block| func.dfg.num_block_params(block))
-            .sum()
-    }
-
     fn mutate(&mut self, mut func: Function) -> Option<(Function, String, ProgressStatus)> {
         while self.params_remaining == 0 {
             self.block = func.layout.next_block(self.block)?;
@@ -418,7 +391,9 @@ impl Mutator for ReplaceBlockParamWithConst {
         // Remove parameters in branching instructions that point to this block
         for pred in cfg.pred_iter(self.block) {
             let dfg = &mut func.dfg;
-            for branch in dfg.insts[pred.inst].branch_destination_mut(&mut dfg.jump_tables) {
+            for branch in dfg.insts[pred.inst]
+                .branch_destination_mut(&mut dfg.jump_tables, &mut dfg.exception_tables)
+            {
                 if branch.block(&dfg.value_lists) == self.block {
                     branch.remove(param_index, &mut dfg.value_lists);
                 }
@@ -455,10 +430,6 @@ impl RemoveUnusedEntities {
 impl Mutator for RemoveUnusedEntities {
     fn name(&self) -> &'static str {
         "remove unused entities"
-    }
-
-    fn mutation_count(&self, _func: &Function) -> usize {
-        4
     }
 
     fn mutate(&mut self, mut func: Function) -> Option<(Function, String, ProgressStatus)> {
@@ -678,11 +649,6 @@ impl Mutator for MergeBlocks {
         "merge blocks"
     }
 
-    fn mutation_count(&self, func: &Function) -> usize {
-        // N blocks may result in at most N-1 merges.
-        block_count(func) - 1
-    }
-
     fn mutate(&mut self, mut func: Function) -> Option<(Function, String, ProgressStatus)> {
         let block = match func.layout.next_block(self.block) {
             Some(block) => block,
@@ -706,7 +672,8 @@ impl Mutator for MergeBlocks {
 
         // If the branch instruction that lead us to this block wasn't an unconditional jump, then
         // we have a conditional jump sequence that we should not break.
-        let branch_dests = func.dfg.insts[pred.inst].branch_destination(&func.dfg.jump_tables);
+        let branch_dests = func.dfg.insts[pred.inst]
+            .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables);
         if branch_dests.len() != 1 {
             return Some((
                 func,
@@ -715,7 +682,9 @@ impl Mutator for MergeBlocks {
             ));
         }
 
-        let branch_args = branch_dests[0].args_slice(&func.dfg.value_lists).to_vec();
+        let branch_args = branch_dests[0]
+            .args(&func.dfg.value_lists)
+            .collect::<Vec<_>>();
 
         // TODO: should we free the entity list associated with the block params?
         let block_params = func
@@ -729,8 +698,10 @@ impl Mutator for MergeBlocks {
         // If there were any block parameters in block, then the last instruction in pred will
         // fill these parameters. Make the block params aliases of the terminator arguments.
         for (block_param, arg) in block_params.into_iter().zip(branch_args) {
-            if block_param != arg {
-                func.dfg.change_to_alias(block_param, arg);
+            if let Some(arg) = arg.as_value() {
+                if block_param != arg {
+                    func.dfg.change_to_alias(block_param, arg);
+                }
             }
         }
 
@@ -843,11 +814,6 @@ fn reduce(isa: &dyn TargetIsa, mut func: Function, verbose: bool) -> Result<(Fun
     try_resolve_aliases(&mut context, &mut func);
     try_remove_srclocs(&mut context, &mut func);
 
-    let progress_bar = ProgressBar::with_draw_target(0, ProgressDrawTarget::stdout());
-    progress_bar.set_style(
-        ProgressStyle::default_bar().template("{bar:60} {prefix:40} {pos:>4}/{len:>4} {msg}"),
-    );
-
     for pass_idx in 0..100 {
         let mut should_keep_reducing = false;
         let mut phase = 0;
@@ -865,16 +831,9 @@ fn reduce(isa: &dyn TargetIsa, mut func: Function, verbose: bool) -> Result<(Fun
                 _ => break,
             };
 
-            progress_bar.set_prefix(&format!("pass {} phase {}", pass_idx, mutator.name()));
-            progress_bar.set_length(mutator.mutation_count(&func) as u64);
-
-            // Reset progress bar.
-            progress_bar.set_position(0);
-            progress_bar.set_draw_delta(0);
+            println!("pass {} phase {}", pass_idx, mutator.name());
 
             for _ in 0..10000 {
-                progress_bar.inc(1);
-
                 let (mutated_func, msg, mutation_kind) = match mutator.mutate(func.clone()) {
                     Some(res) => res,
                     None => {
@@ -887,8 +846,6 @@ fn reduce(isa: &dyn TargetIsa, mut func: Function, verbose: bool) -> Result<(Fun
                     // iterations.
                     continue;
                 }
-
-                progress_bar.set_message(&msg);
 
                 match context.check_for_crash(&mutated_func) {
                     CheckResult::Succeed => {
@@ -911,7 +868,7 @@ fn reduce(isa: &dyn TargetIsa, mut func: Function, verbose: bool) -> Result<(Fun
                             ProgressStatus::Skip => unreachable!(),
                         };
                         if verbose {
-                            progress_bar.println(format!("{msg}: {verb}"));
+                            println!("{msg}: {verb}");
                         }
                     }
                 }
@@ -920,7 +877,7 @@ fn reduce(isa: &dyn TargetIsa, mut func: Function, verbose: bool) -> Result<(Fun
             phase += 1;
         }
 
-        progress_bar.println(format!(
+        println!(
             "After pass {}, remaining insts/blocks: {}/{} ({})",
             pass_idx,
             inst_count(&func),
@@ -930,7 +887,7 @@ fn reduce(isa: &dyn TargetIsa, mut func: Function, verbose: bool) -> Result<(Fun
             } else {
                 "stop reducing"
             }
-        ));
+        );
 
         if !should_keep_reducing {
             // No new shrinking opportunities have been found this pass. This means none will ever
@@ -940,7 +897,6 @@ fn reduce(isa: &dyn TargetIsa, mut func: Function, verbose: bool) -> Result<(Fun
     }
 
     try_resolve_aliases(&mut context, &mut func);
-    progress_bar.finish();
 
     let crash_msg = match context.check_for_crash(&func) {
         CheckResult::Succeed => unreachable!("Used to crash, but doesn't anymore???"),
@@ -953,9 +909,6 @@ fn reduce(isa: &dyn TargetIsa, mut func: Function, verbose: bool) -> Result<(Fun
 struct CrashCheckContext<'a> {
     /// Cached `Context`, to prevent repeated allocation.
     context: Context,
-
-    /// Cached code memory, to prevent repeated allocation.
-    code_memory: Vec<u8>,
 
     /// The target isa to compile for.
     isa: &'a dyn TargetIsa,
@@ -986,15 +939,12 @@ impl<'a> CrashCheckContext<'a> {
     fn new(isa: &'a dyn TargetIsa) -> Self {
         CrashCheckContext {
             context: Context::new(),
-            code_memory: Vec::new(),
             isa,
         }
     }
 
-    #[cfg_attr(test, allow(unreachable_code))]
     fn check_for_crash(&mut self, func: &Function) -> CheckResult {
         self.context.clear();
-        self.code_memory.clear();
 
         self.context.func = func.clone();
 
@@ -1013,7 +963,7 @@ impl<'a> CrashCheckContext<'a> {
         }
 
         #[cfg(test)]
-        {
+        if true {
             // For testing purposes we emulate a panic caused by the existence of
             // a `call` instruction.
             let contains_call = func.layout.blocks().any(|block| {
@@ -1035,11 +985,7 @@ impl<'a> CrashCheckContext<'a> {
         std::panic::set_hook(Box::new(|_| {})); // silence panics
 
         let res = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = self.context.compile_and_emit(
-                self.isa,
-                &mut self.code_memory,
-                &mut Default::default(),
-            );
+            let _ = self.context.compile(self.isa, &mut Default::default());
         })) {
             Ok(()) => CheckResult::Succeed,
             Err(err) => CheckResult::Crash(get_panic_string(err)),

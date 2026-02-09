@@ -1,8 +1,6 @@
-#[allow(unused)]
-use crate::ir::LibCall;
 use crate::isa::riscv64::inst::*;
 use crate::isa::riscv64::lower::isle::generated_code::FpuOPWidth;
-use std::borrow::Cow;
+use alloc::borrow::Cow;
 
 fn fa7() -> Reg {
     f_reg(17)
@@ -1860,7 +1858,7 @@ fn test_riscv64_binemit() {
             rd: writable_a0(),
             addr: a1(),
             src: a2(),
-            amo: AMO::Aquire,
+            amo: AMO::Acquire,
         },
         "amoswap.w.aq a0,a2,(a1)",
         0xcc5a52f,
@@ -2144,7 +2142,17 @@ fn test_riscv64_binemit() {
 
     insns.push(TestUnit::new(
         Inst::Fli {
-            ty: F32,
+            width: FpuOPWidth::H,
+            rd: writable_fa0(),
+            imm: FliConstant::new(3),
+        },
+        "fli.h fa0,2^-15",
+        0xf4118553,
+    ));
+
+    insns.push(TestUnit::new(
+        Inst::Fli {
+            width: FpuOPWidth::S,
             rd: writable_fa0(),
             imm: FliConstant::new(0),
         },
@@ -2154,7 +2162,7 @@ fn test_riscv64_binemit() {
 
     insns.push(TestUnit::new(
         Inst::Fli {
-            ty: F64,
+            width: FpuOPWidth::D,
             rd: writable_fa0(),
             imm: FliConstant::new(13),
         },

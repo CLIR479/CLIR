@@ -1,24 +1,28 @@
 //! Implements the base structure (i.e. [WasiHttpCtx]) that will provide the
 //! implementation of the wasi-http API.
 
-use crate::io::TokioIo;
 use crate::{
-    bindings::http::types::{self, Method, Scheme},
+    bindings::http::types::{self, ErrorCode, Method, Scheme},
     body::{HostIncomingBody, HyperIncomingBody, HyperOutgoingBody},
-    error::dns_error,
-    hyper_request_error,
 };
-use anyhow::bail;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Body;
 use hyper::header::HeaderName;
 use std::any::Any;
 use std::time::Duration;
-use tokio::net::TcpStream;
-use tokio::time::timeout;
+use wasmtime::bail;
 use wasmtime::component::{Resource, ResourceTable};
-use wasmtime_wasi::{runtime::AbortOnDropJoinHandle, Subscribe};
+use wasmtime_wasi::p2::Pollable;
+use wasmtime_wasi::runtime::AbortOnDropJoinHandle;
+
+#[cfg(feature = "default-send-request")]
+use {
+    crate::io::TokioIo,
+    crate::{error::dns_error, hyper_request_error},
+    tokio::net::TcpStream,
+    tokio::time::timeout,
+};
 
 /// Capture the state necessary for use in the wasi-http API implementation.
 #[derive(Debug)]
@@ -39,7 +43,7 @@ impl WasiHttpCtx {
 ///
 /// ```
 /// use wasmtime::component::ResourceTable;
-/// use wasmtime_wasi::{WasiCtx, WasiView, WasiCtxBuilder};
+/// use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 /// use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 ///
 /// struct MyState {
@@ -54,13 +58,14 @@ impl WasiHttpCtx {
 /// }
 ///
 /// impl WasiView for MyState {
-///     fn ctx(&mut self) -> &mut WasiCtx { &mut self.ctx }
-///     fn table(&mut self) -> &mut ResourceTable { &mut self.table }
+///     fn ctx(&mut self) -> WasiCtxView<'_> {
+///         WasiCtxView { ctx: &mut self.ctx, table: &mut self.table }
+///     }
 /// }
 ///
 /// impl MyState {
 ///     fn new() -> MyState {
-///         let mut wasi = WasiCtxBuilder::new();
+///         let mut wasi = WasiCtx::builder();
 ///         wasi.arg("./foo.wasm");
 ///         wasi.arg("--help");
 ///         wasi.env("FOO", "bar");
@@ -73,11 +78,11 @@ impl WasiHttpCtx {
 ///     }
 /// }
 /// ```
-pub trait WasiHttpView: Send {
+pub trait WasiHttpView {
     /// Returns a mutable reference to the WASI HTTP context.
     fn ctx(&mut self) -> &mut WasiHttpCtx;
 
-    /// Returns a mutable reference to the WASI HTTP resource table.
+    /// Returns the table used to manage resources.
     fn table(&mut self) -> &mut ResourceTable;
 
     /// Create a new incoming request resource.
@@ -87,11 +92,12 @@ pub trait WasiHttpView: Send {
         req: hyper::Request<B>,
     ) -> wasmtime::Result<Resource<HostIncomingRequest>>
     where
-        B: Body<Data = Bytes, Error = hyper::Error> + Send + Sync + 'static,
+        B: Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<ErrorCode>,
         Self: Sized,
     {
         let (parts, body) = req.into_parts();
-        let body = body.map_err(crate::hyper_response_error).boxed();
+        let body = body.map_err(Into::into).boxed_unsync();
         let body = HostIncomingBody::new(
             body,
             // TODO: this needs to be plumbed through
@@ -113,6 +119,7 @@ pub trait WasiHttpView: Send {
     }
 
     /// Send an outgoing request.
+    #[cfg(feature = "default-send-request")]
     fn send_request(
         &mut self,
         request: hyper::Request<HyperOutgoingBody>,
@@ -121,11 +128,37 @@ pub trait WasiHttpView: Send {
         Ok(default_send_request(request, config))
     }
 
+    /// Send an outgoing request.
+    #[cfg(not(feature = "default-send-request"))]
+    fn send_request(
+        &mut self,
+        request: hyper::Request<HyperOutgoingBody>,
+        config: OutgoingRequestConfig,
+    ) -> crate::HttpResult<HostFutureIncomingResponse>;
+
     /// Whether a given header should be considered forbidden and not allowed.
-    fn is_forbidden_header(&mut self, _name: &HeaderName) -> bool {
-        false
+    fn is_forbidden_header(&mut self, name: &HeaderName) -> bool {
+        DEFAULT_FORBIDDEN_HEADERS.contains(name)
+    }
+
+    /// Number of distinct write calls to the outgoing body's output-stream
+    /// that the implementation will buffer.
+    /// Default: 1.
+    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+        DEFAULT_OUTGOING_BODY_BUFFER_CHUNKS
+    }
+
+    /// Maximum size allowed in a write call to the outgoing body's output-stream.
+    /// Default: 1024 * 1024.
+    fn outgoing_body_chunk_size(&mut self) -> usize {
+        DEFAULT_OUTGOING_BODY_CHUNK_SIZE
     }
 }
+
+/// The default value configured for [`WasiHttpView::outgoing_body_buffer_chunks`] in [`WasiHttpView`].
+pub const DEFAULT_OUTGOING_BODY_BUFFER_CHUNKS: usize = 1;
+/// The default value configured for [`WasiHttpView::outgoing_body_chunk_size`] in [`WasiHttpView`].
+pub const DEFAULT_OUTGOING_BODY_CHUNK_SIZE: usize = 1024 * 1024;
 
 impl<T: ?Sized + WasiHttpView> WasiHttpView for &mut T {
     fn ctx(&mut self) -> &mut WasiHttpCtx {
@@ -155,6 +188,14 @@ impl<T: ?Sized + WasiHttpView> WasiHttpView for &mut T {
 
     fn is_forbidden_header(&mut self, name: &HeaderName) -> bool {
         T::is_forbidden_header(self, name)
+    }
+
+    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+        T::outgoing_body_buffer_chunks(self)
+    }
+
+    fn outgoing_body_chunk_size(&mut self) -> usize {
+        T::outgoing_body_chunk_size(self)
     }
 }
 
@@ -186,6 +227,14 @@ impl<T: ?Sized + WasiHttpView> WasiHttpView for Box<T> {
 
     fn is_forbidden_header(&mut self, name: &HeaderName) -> bool {
         T::is_forbidden_header(self, name)
+    }
+
+    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+        T::outgoing_body_buffer_chunks(self)
+    }
+
+    fn outgoing_body_chunk_size(&mut self) -> usize {
+        T::outgoing_body_chunk_size(self)
     }
 }
 
@@ -233,25 +282,29 @@ impl<T: WasiHttpView> WasiHttpView for WasiHttpImpl<T> {
     fn is_forbidden_header(&mut self, name: &HeaderName) -> bool {
         self.0.is_forbidden_header(name)
     }
+
+    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+        self.0.outgoing_body_buffer_chunks()
+    }
+
+    fn outgoing_body_chunk_size(&mut self) -> usize {
+        self.0.outgoing_body_chunk_size()
+    }
 }
 
-/// Returns `true` when the header is forbidden according to this [`WasiHttpView`] implementation.
-pub(crate) fn is_forbidden_header(view: &mut dyn WasiHttpView, name: &HeaderName) -> bool {
-    static FORBIDDEN_HEADERS: [HeaderName; 10] = [
-        hyper::header::CONNECTION,
-        HeaderName::from_static("keep-alive"),
-        hyper::header::PROXY_AUTHENTICATE,
-        hyper::header::PROXY_AUTHORIZATION,
-        HeaderName::from_static("proxy-connection"),
-        hyper::header::TE,
-        hyper::header::TRANSFER_ENCODING,
-        hyper::header::UPGRADE,
-        hyper::header::HOST,
-        HeaderName::from_static("http2-settings"),
-    ];
-
-    FORBIDDEN_HEADERS.contains(name) || view.is_forbidden_header(name)
-}
+/// Set of [http::header::HeaderName], that are forbidden by default
+/// for requests and responses originating in the guest.
+pub const DEFAULT_FORBIDDEN_HEADERS: [http::header::HeaderName; 9] = [
+    hyper::header::CONNECTION,
+    HeaderName::from_static("keep-alive"),
+    hyper::header::PROXY_AUTHENTICATE,
+    hyper::header::PROXY_AUTHORIZATION,
+    HeaderName::from_static("proxy-connection"),
+    hyper::header::TRANSFER_ENCODING,
+    hyper::header::UPGRADE,
+    hyper::header::HOST,
+    HeaderName::from_static("http2-settings"),
+];
 
 /// Removes forbidden headers from a [`hyper::HeaderMap`].
 pub(crate) fn remove_forbidden_headers(
@@ -259,7 +312,7 @@ pub(crate) fn remove_forbidden_headers(
     headers: &mut hyper::HeaderMap,
 ) {
     let forbidden_keys = Vec::from_iter(headers.keys().filter_map(|name| {
-        if is_forbidden_header(view, name) {
+        if view.is_forbidden_header(name) {
             Some(name.clone())
         } else {
             None
@@ -287,6 +340,7 @@ pub struct OutgoingRequestConfig {
 ///
 /// This implementation is used by the `wasi:http/outgoing-handler` interface
 /// default implementation.
+#[cfg(feature = "default-send-request")]
 pub fn default_send_request(
     request: hyper::Request<HyperOutgoingBody>,
     config: OutgoingRequestConfig,
@@ -301,6 +355,7 @@ pub fn default_send_request(
 /// in a task.
 ///
 /// This is called from [default_send_request] to actually send the request.
+#[cfg(feature = "default-send-request")]
 pub async fn default_send_request_handler(
     mut request: hyper::Request<HyperOutgoingBody>,
     OutgoingRequestConfig {
@@ -340,58 +395,48 @@ pub async fn default_send_request_handler(
         })?;
 
     let (mut sender, worker) = if use_tls {
-        #[cfg(any(target_arch = "riscv64", target_arch = "s390x"))]
-        {
-            return Err(crate::bindings::http::types::ErrorCode::InternalError(
-                Some("unsupported architecture for SSL".to_string()),
-            ));
-        }
+        use rustls::pki_types::ServerName;
 
-        #[cfg(not(any(target_arch = "riscv64", target_arch = "s390x")))]
-        {
-            use rustls::pki_types::ServerName;
+        // derived from https://github.com/rustls/rustls/blob/main/examples/src/bin/simpleclient.rs
+        let root_cert_store = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.into(),
+        };
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_cert_store)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+        let mut parts = authority.split(":");
+        let host = parts.next().unwrap_or(&authority);
+        let domain = ServerName::try_from(host)
+            .map_err(|e| {
+                tracing::warn!("dns lookup error: {e:?}");
+                dns_error("invalid dns name".to_string(), 0)
+            })?
+            .to_owned();
+        let stream = connector.connect(domain, tcp_stream).await.map_err(|e| {
+            tracing::warn!("tls protocol error: {e:?}");
+            types::ErrorCode::TlsProtocolError
+        })?;
+        let stream = TokioIo::new(stream);
 
-            // derived from https://github.com/rustls/rustls/blob/main/examples/src/bin/simpleclient.rs
-            let root_cert_store = rustls::RootCertStore {
-                roots: webpki_roots::TLS_SERVER_ROOTS.into(),
-            };
-            let config = rustls::ClientConfig::builder()
-                .with_root_certificates(root_cert_store)
-                .with_no_client_auth();
-            let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
-            let mut parts = authority.split(":");
-            let host = parts.next().unwrap_or(&authority);
-            let domain = ServerName::try_from(host)
-                .map_err(|e| {
-                    tracing::warn!("dns lookup error: {e:?}");
-                    dns_error("invalid dns name".to_string(), 0)
-                })?
-                .to_owned();
-            let stream = connector.connect(domain, tcp_stream).await.map_err(|e| {
-                tracing::warn!("tls protocol error: {e:?}");
-                types::ErrorCode::TlsProtocolError
-            })?;
-            let stream = TokioIo::new(stream);
+        let (sender, conn) = timeout(
+            connect_timeout,
+            hyper::client::conn::http1::handshake(stream),
+        )
+        .await
+        .map_err(|_| types::ErrorCode::ConnectionTimeout)?
+        .map_err(hyper_request_error)?;
 
-            let (sender, conn) = timeout(
-                connect_timeout,
-                hyper::client::conn::http1::handshake(stream),
-            )
-            .await
-            .map_err(|_| types::ErrorCode::ConnectionTimeout)?
-            .map_err(hyper_request_error)?;
+        let worker = wasmtime_wasi::runtime::spawn(async move {
+            match conn.await {
+                Ok(()) => {}
+                // TODO: shouldn't throw away this error and ideally should
+                // surface somewhere.
+                Err(e) => tracing::warn!("dropping error {e}"),
+            }
+        });
 
-            let worker = wasmtime_wasi::runtime::spawn(async move {
-                match conn.await {
-                    Ok(()) => {}
-                    // TODO: shouldn't throw away this error and ideally should
-                    // surface somewhere.
-                    Err(e) => tracing::warn!("dropping error {e}"),
-                }
-            });
-
-            (sender, worker)
-        }
+        (sender, worker)
     } else {
         let tcp_stream = TokioIo::new(tcp_stream);
         let (sender, conn) = timeout(
@@ -432,7 +477,7 @@ pub async fn default_send_request_handler(
         .await
         .map_err(|_| types::ErrorCode::ConnectionReadTimeout)?
         .map_err(hyper_request_error)?
-        .map(|body| body.map_err(hyper_request_error).boxed());
+        .map(|body| body.map_err(hyper_request_error).boxed_unsync());
 
     Ok(IncomingResponse {
         resp,
@@ -486,7 +531,7 @@ impl TryInto<http::Method> for types::Method {
     }
 }
 
-/// The concrete type behind a `wasi:http/types/incoming-request` resource.
+/// The concrete type behind a `wasi:http/types.incoming-request` resource.
 #[derive(Debug)]
 pub struct HostIncomingRequest {
     pub(crate) parts: http::request::Parts,
@@ -503,7 +548,7 @@ impl HostIncomingRequest {
         mut parts: http::request::Parts,
         scheme: Scheme,
         body: Option<HostIncomingBody>,
-    ) -> anyhow::Result<Self> {
+    ) -> wasmtime::Result<Self> {
         let authority = match parts.uri.authority() {
             Some(authority) => authority.to_string(),
             None => match parts.headers.get(http::header::HOST) {
@@ -522,14 +567,14 @@ impl HostIncomingRequest {
     }
 }
 
-/// The concrete type behind a `wasi:http/types/response-outparam` resource.
+/// The concrete type behind a `wasi:http/types.response-outparam` resource.
 pub struct HostResponseOutparam {
     /// The sender for sending a response.
     pub result:
         tokio::sync::oneshot::Sender<Result<hyper::Response<HyperOutgoingBody>, types::ErrorCode>>,
 }
 
-/// The concrete type behind a `wasi:http/types/outgoing-response` resource.
+/// The concrete type behind a `wasi:http/types.outgoing-response` resource.
 pub struct HostOutgoingResponse {
     /// The status of the response.
     pub status: http::StatusCode,
@@ -556,13 +601,13 @@ impl TryFrom<HostOutgoingResponse> for hyper::Response<HyperOutgoingBody> {
             None => builder.body(
                 Empty::<bytes::Bytes>::new()
                     .map_err(|_| unreachable!("Infallible error"))
-                    .boxed(),
+                    .boxed_unsync(),
             ),
         }
     }
 }
 
-/// The concrete type behind a `wasi:http/types/outgoing-request` resource.
+/// The concrete type behind a `wasi:http/types.outgoing-request` resource.
 #[derive(Debug)]
 pub struct HostOutgoingRequest {
     /// The method of the request.
@@ -579,7 +624,7 @@ pub struct HostOutgoingRequest {
     pub body: Option<HyperOutgoingBody>,
 }
 
-/// The concrete type behind a `wasi:http/types/request-options` resource.
+/// The concrete type behind a `wasi:http/types.request-options` resource.
 #[derive(Debug, Default)]
 pub struct HostRequestOptions {
     /// How long to wait for a connection to be established.
@@ -590,7 +635,7 @@ pub struct HostRequestOptions {
     pub between_bytes_timeout: Option<std::time::Duration>,
 }
 
-/// The concrete type behind a `wasi:http/types/incoming-response` resource.
+/// The concrete type behind a `wasi:http/types.incoming-response` resource.
 #[derive(Debug)]
 pub struct HostIncomingResponse {
     /// The response status
@@ -601,7 +646,7 @@ pub struct HostIncomingResponse {
     pub body: Option<HostIncomingBody>,
 }
 
-/// The concrete type behind a `wasi:http/types/fields` resource.
+/// The concrete type behind a `wasi:http/types.fields` resource.
 #[derive(Debug)]
 pub enum HostFields {
     /// A reference to the fields of a parent entry.
@@ -628,7 +673,7 @@ pub type FieldMap = hyper::HeaderMap;
 
 /// A handle to a future incoming response.
 pub type FutureIncomingResponseHandle =
-    AbortOnDropJoinHandle<anyhow::Result<Result<IncomingResponse, types::ErrorCode>>>;
+    AbortOnDropJoinHandle<wasmtime::Result<Result<IncomingResponse, types::ErrorCode>>>;
 
 /// A response that is in the process of being received.
 #[derive(Debug)]
@@ -641,7 +686,7 @@ pub struct IncomingResponse {
     pub between_bytes_timeout: std::time::Duration,
 }
 
-/// The concrete type behind a `wasi:http/types/future-incoming-response` resource.
+/// The concrete type behind a `wasi:http/types.future-incoming-response` resource.
 #[derive(Debug)]
 pub enum HostFutureIncomingResponse {
     /// A pending response
@@ -649,7 +694,7 @@ pub enum HostFutureIncomingResponse {
     /// The response is ready.
     ///
     /// An outer error will trap while the inner error gets returned to the guest.
-    Ready(anyhow::Result<Result<IncomingResponse, types::ErrorCode>>),
+    Ready(wasmtime::Result<Result<IncomingResponse, types::ErrorCode>>),
     /// The response has been consumed.
     Consumed,
 }
@@ -661,7 +706,7 @@ impl HostFutureIncomingResponse {
     }
 
     /// Create a new `HostFutureIncomingResponse` that is ready.
-    pub fn ready(result: anyhow::Result<Result<IncomingResponse, types::ErrorCode>>) -> Self {
+    pub fn ready(result: wasmtime::Result<Result<IncomingResponse, types::ErrorCode>>) -> Self {
         Self::Ready(result)
     }
 
@@ -671,7 +716,7 @@ impl HostFutureIncomingResponse {
     }
 
     /// Unwrap the response, panicking if it is not ready.
-    pub fn unwrap_ready(self) -> anyhow::Result<Result<IncomingResponse, types::ErrorCode>> {
+    pub fn unwrap_ready(self) -> wasmtime::Result<Result<IncomingResponse, types::ErrorCode>> {
         match self {
             Self::Ready(res) => res,
             Self::Pending(_) | Self::Consumed => {
@@ -682,7 +727,7 @@ impl HostFutureIncomingResponse {
 }
 
 #[async_trait::async_trait]
-impl Subscribe for HostFutureIncomingResponse {
+impl Pollable for HostFutureIncomingResponse {
     async fn ready(&mut self) {
         if let Self::Pending(handle) = self {
             *self = Self::Ready(handle.await);

@@ -3,8 +3,6 @@
 use crate::error::Location;
 use cranelift_codegen::ir::types;
 use cranelift_codegen::ir::{Block, Value};
-#[allow(unused_imports, deprecated)]
-use std::ascii::AsciiExt;
 use std::str::CharIndices;
 use std::u16;
 
@@ -15,43 +13,49 @@ use std::u16;
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Token<'a> {
     Comment(&'a str),
-    LPar,                  // '('
-    RPar,                  // ')'
-    LBrace,                // '{'
-    RBrace,                // '}'
-    LBracket,              // '['
-    RBracket,              // ']'
-    Minus,                 // '-'
-    Plus,                  // '+'
-    Multiply,              // '*'
-    Comma,                 // ','
-    Dot,                   // '.'
-    Colon,                 // ':'
-    Equal,                 // '='
-    Bang,                  // '!'
-    At,                    // '@'
-    Arrow,                 // '->'
-    Float(&'a str),        // Floating point immediate
-    Integer(&'a str),      // Integer immediate
-    Type(types::Type),     // i32, f32, i32x4, ...
-    DynamicType(u32),      // dt5
-    Value(Value),          // v12, v7
-    Block(Block),          // block3
-    Cold,                  // cold (flag on block)
-    StackSlot(u32),        // ss3
-    DynamicStackSlot(u32), // dss4
-    GlobalValue(u32),      // gv3
-    MemoryType(u32),       // mt0
-    Constant(u32),         // const2
-    FuncRef(u32),          // fn2
-    SigRef(u32),           // sig2
-    UserRef(u32),          // u345
-    UserNameRef(u32),      // userextname345
-    Name(&'a str),         // %9arbitrary_alphanum, %x3, %0, %function ...
-    String(&'a str),       // "arbitrary quoted string with no escape" ...
-    HexSequence(&'a str),  // #89AF
-    Identifier(&'a str),   // Unrecognized identifier (opcode, enumerator, ...)
-    SourceLoc(&'a str),    // @00c7
+    LPar,                   // '('
+    RPar,                   // ')'
+    LBrace,                 // '{'
+    RBrace,                 // '}'
+    LBracket,               // '['
+    RBracket,               // ']'
+    LAngle,                 // '<'
+    RAngle,                 // '>'
+    Minus,                  // '-'
+    Plus,                   // '+'
+    Multiply,               // '*'
+    Comma,                  // ','
+    Dot,                    // '.'
+    Colon,                  // ':'
+    Equal,                  // '='
+    Bang,                   // '!'
+    At,                     // '@'
+    Arrow,                  // '->'
+    Float(&'a str),         // Floating point immediate
+    Integer(&'a str),       // Integer immediate
+    Type(types::Type),      // i32, f32, i32x4, ...
+    DynamicType(u32),       // dt5
+    Value(Value),           // v12, v7
+    Block(Block),           // block3
+    Cold,                   // cold (flag on block)
+    StackSlot(u32),         // ss3
+    DynamicStackSlot(u32),  // dss4
+    GlobalValue(u32),       // gv3
+    MemoryType(u32),        // mt0
+    Constant(u32),          // const2
+    FuncRef(u32),           // fn2
+    SigRef(u32),            // sig2
+    UserRef(u32),           // u345
+    UserNameRef(u32),       // userextname345
+    ExceptionTableRef(u32), // ex123
+    ExceptionTag(u32),      // tag123
+    TryCallRet(u32),        // ret123
+    TryCallExn(u32),        // exn123
+    Name(&'a str),          // %9arbitrary_alphanum, %x3, %0, %function ...
+    String(&'a str),        // "arbitrary quoted string with no escape" ...
+    HexSequence(&'a str),   // #89AF
+    Identifier(&'a str),    // Unrecognized identifier (opcode, enumerator, ...)
+    SourceLoc(&'a str),     // @00c7
 }
 
 /// A `Token` with an associated location.
@@ -351,6 +355,10 @@ impl<'a> Lexer<'a> {
             "sig" => Some(Token::SigRef(number)),
             "u" => Some(Token::UserRef(number)),
             "userextname" => Some(Token::UserNameRef(number)),
+            "extable" => Some(Token::ExceptionTableRef(number)),
+            "tag" => Some(Token::ExceptionTag(number)),
+            "ret" => Some(Token::TryCallRet(number)),
+            "exn" => Some(Token::TryCallExn(number)),
             _ => None,
         }
     }
@@ -476,6 +484,8 @@ impl<'a> Lexer<'a> {
                 Some('}') => Some(self.scan_char(Token::RBrace)),
                 Some('[') => Some(self.scan_char(Token::LBracket)),
                 Some(']') => Some(self.scan_char(Token::RBracket)),
+                Some('<') => Some(self.scan_char(Token::LAngle)),
+                Some('>') => Some(self.scan_char(Token::RAngle)),
                 Some(',') => Some(self.scan_char(Token::Comma)),
                 Some('.') => Some(self.scan_char(Token::Dot)),
                 Some(':') => Some(self.scan_char(Token::Colon)),

@@ -1,8 +1,8 @@
-use anyhow::Result;
 use std::path::Path;
 use tempfile::TempDir;
 use wasi_common::pipe::WritePipe;
 use wasmtime::{Linker, Module, Store};
+use wasmtime_environ::error::{Error as EnvError, Result};
 
 pub fn prepare_workspace(exe_name: &str) -> Result<TempDir> {
     let prefix = format!("wasi_common_{exe_name}_");
@@ -12,7 +12,7 @@ pub fn prepare_workspace(exe_name: &str) -> Result<TempDir> {
 
 macro_rules! assert_test_exists {
     ($name:ident) => {
-        #[allow(unused_imports)]
+        #[expect(unused_imports, reason = "just here to ensure a name exists")]
         use self::$name as _;
     };
 }

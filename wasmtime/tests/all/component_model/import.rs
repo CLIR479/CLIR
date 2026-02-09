@@ -1,10 +1,10 @@
 #![cfg(not(miri))]
 
 use super::REALLOC_AND_FREE;
-use anyhow::Result;
 use std::ops::Deref;
+use wasmtime::Result;
 use wasmtime::component::*;
-use wasmtime::{Store, StoreContextMut, Trap, WasmBacktrace};
+use wasmtime::{Config, Engine, Store, StoreContextMut, Trap, WasmBacktrace};
 
 #[test]
 fn can_compile() -> Result<()> {
@@ -148,7 +148,7 @@ fn simple() -> Result<()> {
     let mut linker = Linker::new(&engine);
     linker.root().func_new(
         "a",
-        |mut store: StoreContextMut<'_, Option<String>>, args, _results| {
+        |mut store: StoreContextMut<'_, Option<String>>, _, args, _results| {
             if let Val::String(s) = &args[0] {
                 assert!(store.data().is_none());
                 *store.data_mut() = Some(s.to_string());
@@ -219,9 +219,9 @@ fn functions_in_instances() -> Result<()> {
 
     let engine = super::engine();
     let component = Component::new(&engine, component)?;
-    let (_, instance_index) = component.export_index(None, "test:test/foo").unwrap();
-    let (_, func_index) = component
-        .export_index(Some(&instance_index), "call")
+    let instance_index = component.get_export_index(None, "test:test/foo").unwrap();
+    let func_index = component
+        .get_export_index(Some(&instance_index), "call")
         .unwrap();
     let mut store = Store::new(&engine, None);
     assert!(store.data().is_none());
@@ -249,7 +249,7 @@ fn functions_in_instances() -> Result<()> {
     let mut linker = Linker::new(&engine);
     linker.instance("test:test/foo")?.func_new(
         "a",
-        |mut store: StoreContextMut<'_, Option<String>>, args, _results| {
+        |mut store: StoreContextMut<'_, Option<String>>, _, args, _results| {
             if let Val::String(s) = &args[0] {
                 assert!(store.data().is_none());
                 *store.data_mut() = Some(s.to_string());
@@ -348,55 +348,63 @@ fn attempt_to_leave_during_malloc() -> Result<()> {
             Ok(("hello".to_string(),))
         })?;
     let component = Component::new(&engine, component)?;
-    let mut store = Store::new(&engine, ());
 
-    // Assert that during a host import if we return values to wasm that a trap
-    // happens if we try to leave the instance.
-    let trap = linker
-        .instantiate(&mut store, &component)?
-        .get_typed_func::<(), ()>(&mut store, "run")?
-        .call(&mut store, ())
-        .unwrap_err();
-    assert!(
-        format!("{trap:?}").contains("cannot leave component instance"),
-        "bad trap: {trap:?}",
-    );
+    {
+        let mut store = Store::new(&engine, ());
 
-    let trace = trap.downcast_ref::<WasmBacktrace>().unwrap().frames();
-    assert_eq!(trace.len(), 4);
+        // Assert that during a host import if we return values to wasm that a trap
+        // happens if we try to leave the instance.
+        let trap = linker
+            .instantiate(&mut store, &component)?
+            .get_typed_func::<(), ()>(&mut store, "run")?
+            .call(&mut store, ())
+            .unwrap_err();
+        assert!(
+            format!("{trap:?}").contains("cannot leave component instance"),
+            "bad trap: {trap:?}",
+        );
 
-    // This was our entry point...
-    assert_eq!(trace[3].module().name(), Some("m"));
-    assert_eq!(trace[3].func_name(), Some("run"));
+        let trace = trap.downcast_ref::<WasmBacktrace>().unwrap().frames();
+        assert_eq!(trace.len(), 4);
 
-    // ... which called an imported function which ends up being originally
-    // defined by the shim instance. The shim instance then does an indirect
-    // call through a table which goes to the `canon.lower`'d host function
-    assert_eq!(trace[2].module().name(), Some("host_shim"));
-    assert_eq!(trace[2].func_name(), Some("shim_ret_string"));
+        // This was our entry point...
+        assert_eq!(trace[3].module().name(), Some("m"));
+        assert_eq!(trace[3].func_name(), Some("run"));
 
-    // ... and the lowered host function will call realloc to allocate space for
-    // the result
-    assert_eq!(trace[1].module().name(), Some("m"));
-    assert_eq!(trace[1].func_name(), Some("realloc"));
+        // ... which called an imported function which ends up being originally
+        // defined by the shim instance. The shim instance then does an indirect
+        // call through a table which goes to the `canon.lower`'d host function
+        assert_eq!(trace[2].module().name(), Some("host_shim"));
+        assert_eq!(trace[2].func_name(), Some("shim_ret_string"));
 
-    // ... but realloc calls the shim instance and tries to exit the
-    // component, triggering a dynamic trap
-    assert_eq!(trace[0].module().name(), Some("host_shim"));
-    assert_eq!(trace[0].func_name(), Some("shim_thunk"));
+        // ... and the lowered host function will call realloc to allocate space for
+        // the result
+        assert_eq!(trace[1].module().name(), Some("m"));
+        assert_eq!(trace[1].func_name(), Some("realloc"));
 
-    // In addition to the above trap also ensure that when we enter a wasm
-    // component if we try to leave while lowering then that's also a dynamic
-    // trap.
-    let trap = linker
-        .instantiate(&mut store, &component)?
-        .get_typed_func::<(&str,), ()>(&mut store, "take-string")?
-        .call(&mut store, ("x",))
-        .unwrap_err();
-    assert!(
-        format!("{trap:?}").contains("cannot leave component instance"),
-        "bad trap: {trap:?}",
-    );
+        // ... but realloc calls the shim instance and tries to exit the
+        // component, triggering a dynamic trap
+        assert_eq!(trace[0].module().name(), Some("host_shim"));
+        assert_eq!(trace[0].func_name(), Some("shim_thunk"));
+    }
+
+    {
+        let mut store = Store::new(&engine, ());
+
+        // In addition to the above trap also ensure that when we enter a wasm
+        // component if we try to leave while lowering then that's also a dynamic
+        // trap.
+        let trap = linker
+            .instantiate(&mut store, &component)?
+            .get_typed_func::<(&str,), ()>(&mut store, "take-string")?
+            .call(&mut store, ("x",))
+            .unwrap_err();
+        assert!(
+            format!("{trap:?}").contains("cannot leave component instance"),
+            "bad trap: {trap:?}",
+        );
+    }
+
     Ok(())
 }
 
@@ -462,7 +470,7 @@ fn attempt_to_reenter_during_host() -> Result<()> {
     let mut linker = Linker::new(&engine);
     linker.root().func_new(
         "thunk",
-        |mut store: StoreContextMut<'_, DynamicState>, _, _| {
+        |mut store: StoreContextMut<'_, DynamicState>, _, _, _| {
             let func = store.data_mut().func.take().unwrap();
             let trap = func.call(&mut store, &[], &mut []).unwrap_err();
             assert_eq!(
@@ -481,37 +489,83 @@ fn attempt_to_reenter_during_host() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn stack_and_heap_args_and_rets() -> Result<()> {
-    let component = format!(
-        r#"
-(component
-  (type $many_params (tuple
-                      string string string string
-                      string string string string
-                      string))
-  (import "f1" (func $f1 (param "a" u32) (result u32)))
-  (import "f2" (func $f2 (param "a" $many_params) (result u32)))
-  (import "f3" (func $f3 (param "a" u32) (result string)))
-  (import "f4" (func $f4 (param "a" $many_params) (result string)))
+#[tokio::test]
+async fn stack_and_heap_args_and_rets() -> Result<()> {
+    test_stack_and_heap_args_and_rets(false).await
+}
 
-  (core module $libc
-    {REALLOC_AND_FREE}
-    (memory (export "memory") 1)
-  )
-  (core instance $libc (instantiate (module $libc)))
+#[tokio::test]
+async fn stack_and_heap_args_and_rets_concurrent() -> Result<()> {
+    test_stack_and_heap_args_and_rets(true).await
+}
 
-  (core func $f1_lower (canon lower (func $f1) (memory $libc "memory") (realloc (func $libc "realloc"))))
-  (core func $f2_lower (canon lower (func $f2) (memory $libc "memory") (realloc (func $libc "realloc"))))
-  (core func $f3_lower (canon lower (func $f3) (memory $libc "memory") (realloc (func $libc "realloc"))))
-  (core func $f4_lower (canon lower (func $f4) (memory $libc "memory") (realloc (func $libc "realloc"))))
+async fn test_stack_and_heap_args_and_rets(concurrent: bool) -> Result<()> {
+    let (body, async_lower_opts, async_lift_opts, async_type) = if concurrent {
+        (
+            r#"
+    (import "host" "f1" (func $f1 (param i32 i32) (result i32)))
+    (import "host" "f2" (func $f2 (param i32 i32) (result i32)))
+    (import "host" "f3" (func $f3 (param i32 i32) (result i32)))
+    (import "host" "f4" (func $f4 (param i32 i32) (result i32)))
 
-  (core module $m
+    (func $run (export "run") (result i32)
+      (local $params i32)
+      (local $results i32)
+
+      block
+        (local.set $results (call $realloc (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 4)))
+        (call $f1 (i32.const 1) (local.get $results))
+        drop
+        (i32.load offset=0 (local.get $results))
+        i32.const 2
+        i32.eq
+        br_if 0
+        unreachable
+      end
+
+      block
+        (local.set $params (call $allocate_empty_strings))
+        (local.set $results (call $realloc (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 4)))
+        (call $f2 (local.get $params) (local.get $results))
+        drop
+        (i32.load offset=0 (local.get $results))
+        i32.const 3
+        i32.eq
+        br_if 0
+        unreachable
+      end
+
+      block
+        (local.set $results (call $realloc (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 8)))
+        (call $f3 (i32.const 8) (local.get $results))
+        drop
+        (call $validate_string_ret (local.get $results))
+      end
+
+      block
+        (local.set $params (call $allocate_empty_strings))
+        (local.set $results (call $realloc (i32.const 0) (i32.const 0) (i32.const 4) (i32.const 8)))
+        (call $f4 (local.get $params) (local.get $results))
+        drop
+        (call $validate_string_ret (local.get $results))
+      end
+
+      (call $task-return)
+
+      i32.const 0
+    )
+            "#,
+            "async",
+            r#"async (callback (func $m "callback"))"#,
+            "async",
+        )
+    } else {
+        (
+            r#"
     (import "host" "f1" (func $f1 (param i32) (result i32)))
     (import "host" "f2" (func $f2 (param i32) (result i32)))
     (import "host" "f3" (func $f3 (param i32 i32)))
     (import "host" "f4" (func $f4 (param i32 i32)))
-    (import "libc" "memory" (memory 1))
 
     (func $run (export "run")
       block
@@ -546,6 +600,59 @@ fn stack_and_heap_args_and_rets() -> Result<()> {
         (call $validate_string_ret (i32.const 20000))
       end
     )
+            "#,
+            "",
+            "",
+            "",
+        )
+    };
+
+    let component = format!(
+        r#"
+(component
+  (type $many_params (tuple
+                      string string string string
+                      string string string string
+                      string))
+  (import "f1" (func $f1 {async_type} (param "a" u32) (result u32)))
+  (import "f2" (func $f2 {async_type} (param "a" $many_params) (result u32)))
+  (import "f3" (func $f3 {async_type} (param "a" u32) (result string)))
+  (import "f4" (func $f4 {async_type} (param "a" $many_params) (result string)))
+
+  (core module $libc
+    {REALLOC_AND_FREE}
+    (memory (export "memory") 1)
+  )
+  (core instance $libc (instantiate (module $libc)))
+
+  (core func $f1_lower (canon lower (func $f1)
+      (memory $libc "memory")
+      (realloc (func $libc "realloc"))
+      {async_lower_opts}
+  ))
+  (core func $f2_lower (canon lower (func $f2)
+      (memory $libc "memory")
+      (realloc (func $libc "realloc"))
+      {async_lower_opts}
+  ))
+  (core func $f3_lower (canon lower (func $f3)
+      (memory $libc "memory")
+      (realloc (func $libc "realloc"))
+      {async_lower_opts}
+  ))
+  (core func $f4_lower (canon lower (func $f4)
+      (memory $libc "memory")
+      (realloc (func $libc "realloc"))
+      {async_lower_opts}
+  ))
+
+  (core module $m
+    (import "libc" "memory" (memory 1))
+    (import "libc" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
+    (import "host" "task.return" (func $task-return))
+    {body}
+
+    (func (export "callback") (param i32 i32 i32) (result i32) unreachable)
 
     (func $allocate_empty_strings (result i32)
       (local $ret i32)
@@ -601,6 +708,7 @@ fn stack_and_heap_args_and_rets() -> Result<()> {
 
     (data (i32.const 1000) "abc")
   )
+  (core func $task-return (canon task.return))
   (core instance $m (instantiate $m
     (with "libc" (instance $libc))
     (with "host" (instance
@@ -608,130 +716,265 @@ fn stack_and_heap_args_and_rets() -> Result<()> {
       (export "f2" (func $f2_lower))
       (export "f3" (func $f3_lower))
       (export "f4" (func $f4_lower))
+      (export "task.return" (func $task-return))
     ))
   ))
 
-  (func (export "run")
-    (canon lift (core func $m "run"))
+  (func (export "run") {async_type}
+    (canon lift (core func $m "run") {async_lift_opts})
   )
 )
         "#
     );
 
-    let engine = super::engine();
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = &Engine::new(&config)?;
     let component = Component::new(&engine, component)?;
     let mut store = Store::new(&engine, ());
 
     // First, test the static API
 
     let mut linker = Linker::new(&engine);
-    linker
-        .root()
-        .func_wrap("f1", |_, (x,): (u32,)| -> Result<(u32,)> {
-            assert_eq!(x, 1);
-            Ok((2,))
-        })?;
-    linker.root().func_wrap(
-        "f2",
-        |cx: StoreContextMut<'_, ()>,
-         (arg,): ((
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-        ),)|
-         -> Result<(u32,)> {
-            assert_eq!(arg.0.to_str(&cx).unwrap(), "abc");
-            Ok((3,))
-        },
-    )?;
-    linker
-        .root()
-        .func_wrap("f3", |_, (arg,): (u32,)| -> Result<(String,)> {
-            assert_eq!(arg, 8);
-            Ok(("xyz".to_string(),))
-        })?;
-    linker.root().func_wrap(
-        "f4",
-        |cx: StoreContextMut<'_, ()>,
-         (arg,): ((
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-            WasmStr,
-        ),)|
-         -> Result<(String,)> {
-            assert_eq!(arg.0.to_str(&cx).unwrap(), "abc");
-            Ok(("xyz".to_string(),))
-        },
-    )?;
-    let instance = linker.instantiate(&mut store, &component)?;
-    instance
-        .get_typed_func::<(), ()>(&mut store, "run")?
-        .call(&mut store, ())?;
+    if concurrent {
+        linker
+            .root()
+            .func_wrap_concurrent("f1", |_, (x,): (u32,)| {
+                assert_eq!(x, 1);
+                Box::pin(async { Ok((2u32,)) })
+            })?;
+        linker.root().func_wrap_concurrent(
+            "f2",
+            |accessor,
+             (arg,): ((
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+            ),)| {
+                accessor.with(|v| assert_eq!(arg.0.to_str(&v).unwrap(), "abc"));
+                Box::pin(async { Ok((3u32,)) })
+            },
+        )?;
+        linker
+            .root()
+            .func_wrap_concurrent("f3", |_, (arg,): (u32,)| {
+                assert_eq!(arg, 8);
+                Box::pin(async { Ok(("xyz".to_string(),)) })
+            })?;
+        linker.root().func_wrap_concurrent(
+            "f4",
+            |accessor,
+             (arg,): ((
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+            ),)| {
+                accessor.with(|v| assert_eq!(arg.0.to_str(&v).unwrap(), "abc"));
+                Box::pin(async { Ok(("xyz".to_string(),)) })
+            },
+        )?;
+    } else {
+        linker
+            .root()
+            .func_wrap("f1", |_, (x,): (u32,)| -> Result<(u32,)> {
+                assert_eq!(x, 1);
+                Ok((2,))
+            })?;
+        linker.root().func_wrap(
+            "f2",
+            |cx: StoreContextMut<'_, ()>,
+             (arg,): ((
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+            ),)|
+             -> Result<(u32,)> {
+                assert_eq!(arg.0.to_str(&cx).unwrap(), "abc");
+                Ok((3,))
+            },
+        )?;
+        linker
+            .root()
+            .func_wrap("f3", |_, (arg,): (u32,)| -> Result<(String,)> {
+                assert_eq!(arg, 8);
+                Ok(("xyz".to_string(),))
+            })?;
+        linker.root().func_wrap(
+            "f4",
+            |cx: StoreContextMut<'_, ()>,
+             (arg,): ((
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+                WasmStr,
+            ),)|
+             -> Result<(String,)> {
+                assert_eq!(arg.0.to_str(&cx).unwrap(), "abc");
+                Ok(("xyz".to_string(),))
+            },
+        )?;
+    }
+
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+
+    if concurrent {
+        store
+            .run_concurrent(async move |accessor| {
+                wasmtime::error::Ok(run.call_concurrent(accessor, ()).await?.0)
+            })
+            .await??;
+    } else {
+        run.call_async(&mut store, ()).await?;
+    }
 
     // Next, test the dynamic API
 
     let mut linker = Linker::new(&engine);
-    linker.root().func_new("f1", |_, args, results| {
-        if let Val::U32(x) = &args[0] {
-            assert_eq!(*x, 1);
-            results[0] = Val::U32(2);
-            Ok(())
-        } else {
-            panic!()
-        }
-    })?;
-    linker.root().func_new("f2", |_, args, results| {
-        if let Val::Tuple(tuple) = &args[0] {
-            if let Val::String(s) = &tuple[0] {
-                assert_eq!(s.deref(), "abc");
-                results[0] = Val::U32(3);
+    if concurrent {
+        linker
+            .root()
+            .func_new_concurrent("f1", |_, _, args, results| {
+                if let Val::U32(x) = &args[0] {
+                    assert_eq!(*x, 1);
+                    Box::pin(async {
+                        results[0] = Val::U32(2);
+                        Ok(())
+                    })
+                } else {
+                    panic!()
+                }
+            })?;
+        linker
+            .root()
+            .func_new_concurrent("f2", |_, _, args, results| {
+                if let Val::Tuple(tuple) = &args[0] {
+                    if let Val::String(s) = &tuple[0] {
+                        assert_eq!(s.deref(), "abc");
+                        Box::pin(async {
+                            results[0] = Val::U32(3);
+                            Ok(())
+                        })
+                    } else {
+                        panic!()
+                    }
+                } else {
+                    panic!()
+                }
+            })?;
+        linker
+            .root()
+            .func_new_concurrent("f3", |_, _, args, results| {
+                if let Val::U32(x) = &args[0] {
+                    assert_eq!(*x, 8);
+                    Box::pin(async {
+                        results[0] = Val::String("xyz".into());
+                        Ok(())
+                    })
+                } else {
+                    panic!();
+                }
+            })?;
+        linker
+            .root()
+            .func_new_concurrent("f4", |_, _, args, results| {
+                if let Val::Tuple(tuple) = &args[0] {
+                    if let Val::String(s) = &tuple[0] {
+                        assert_eq!(s.deref(), "abc");
+                        Box::pin(async {
+                            results[0] = Val::String("xyz".into());
+                            Ok(())
+                        })
+                    } else {
+                        panic!()
+                    }
+                } else {
+                    panic!()
+                }
+            })?;
+    } else {
+        linker.root().func_new("f1", |_, _, args, results| {
+            if let Val::U32(x) = &args[0] {
+                assert_eq!(*x, 1);
+                results[0] = Val::U32(2);
                 Ok(())
             } else {
                 panic!()
             }
-        } else {
-            panic!()
-        }
-    })?;
-    linker.root().func_new("f3", |_, args, results| {
-        if let Val::U32(x) = &args[0] {
-            assert_eq!(*x, 8);
-            results[0] = Val::String("xyz".into());
-            Ok(())
-        } else {
-            panic!();
-        }
-    })?;
-    linker.root().func_new("f4", |_, args, results| {
-        if let Val::Tuple(tuple) = &args[0] {
-            if let Val::String(s) = &tuple[0] {
-                assert_eq!(s.deref(), "abc");
+        })?;
+        linker.root().func_new("f2", |_, _, args, results| {
+            if let Val::Tuple(tuple) = &args[0] {
+                if let Val::String(s) = &tuple[0] {
+                    assert_eq!(s.deref(), "abc");
+                    results[0] = Val::U32(3);
+                    Ok(())
+                } else {
+                    panic!()
+                }
+            } else {
+                panic!()
+            }
+        })?;
+        linker.root().func_new("f3", |_, _, args, results| {
+            if let Val::U32(x) = &args[0] {
+                assert_eq!(*x, 8);
                 results[0] = Val::String("xyz".into());
                 Ok(())
             } else {
+                panic!();
+            }
+        })?;
+        linker.root().func_new("f4", |_, _, args, results| {
+            if let Val::Tuple(tuple) = &args[0] {
+                if let Val::String(s) = &tuple[0] {
+                    assert_eq!(s.deref(), "abc");
+                    results[0] = Val::String("xyz".into());
+                    Ok(())
+                } else {
+                    panic!()
+                }
+            } else {
                 panic!()
             }
-        } else {
-            panic!()
-        }
-    })?;
-    let instance = linker.instantiate(&mut store, &component)?;
-    instance
-        .get_func(&mut store, "run")
-        .unwrap()
-        .call(&mut store, &[], &mut [])?;
+        })?;
+    }
+
+    let instance = linker.instantiate_async(&mut store, &component).await?;
+    let run = instance.get_func(&mut store, "run").unwrap();
+
+    if concurrent {
+        store
+            .run_concurrent(async |store| {
+                run.call_concurrent(store, &[], &mut []).await?;
+                wasmtime::error::Ok(())
+            })
+            .await??;
+    } else {
+        run.call_async(&mut store, &[], &mut []).await?;
+    }
 
     Ok(())
 }
@@ -812,28 +1055,34 @@ fn bad_import_alignment() -> Result<()> {
          -> Result<()> { unreachable!() },
     )?;
     let component = Component::new(&engine, component)?;
-    let mut store = Store::new(&engine, ());
 
-    let trap = linker
-        .instantiate(&mut store, &component)?
-        .get_typed_func::<(), ()>(&mut store, "unaligned-retptr2")?
-        .call(&mut store, ())
-        .unwrap_err();
-    assert!(
-        format!("{trap:?}").contains("pointer not aligned"),
-        "{}",
-        trap
-    );
-    let trap = linker
-        .instantiate(&mut store, &component)?
-        .get_typed_func::<(), ()>(&mut store, "unaligned-argptr2")?
-        .call(&mut store, ())
-        .unwrap_err();
-    assert!(
-        format!("{trap:?}").contains("pointer not aligned"),
-        "{}",
-        trap
-    );
+    {
+        let mut store = Store::new(&engine, ());
+        let trap = linker
+            .instantiate(&mut store, &component)?
+            .get_typed_func::<(), ()>(&mut store, "unaligned-retptr2")?
+            .call(&mut store, ())
+            .unwrap_err();
+        assert!(
+            format!("{trap:?}").contains("pointer not aligned"),
+            "{}",
+            trap
+        );
+    }
+
+    {
+        let mut store = Store::new(&engine, ());
+        let trap = linker
+            .instantiate(&mut store, &component)?
+            .get_typed_func::<(), ()>(&mut store, "unaligned-argptr2")?
+            .call(&mut store, ())
+            .unwrap_err();
+        assert!(
+            format!("{trap:?}").contains("pointer not aligned"),
+            "{}",
+            trap
+        );
+    }
 
     Ok(())
 }
@@ -892,7 +1141,7 @@ fn no_actual_wasm_code() -> Result<()> {
     let mut linker = Linker::new(&engine);
     linker
         .root()
-        .func_new("f", |mut store: StoreContextMut<'_, u32>, _, _| {
+        .func_new("f", |mut store: StoreContextMut<'_, u32>, _, _, _| {
             *store.data_mut() += 1;
             Ok(())
         })?;

@@ -2,20 +2,7 @@
 Example of instantiating of the WebAssembly module and invoking its exported
 function.
 
-You can compile and run this example on Linux with:
-
-   cargo build --release -p wasmtime-c-api
-   cc examples/memory.c \
-       -I crates/c-api/include \
-       target/release/libwasmtime.a \
-       -lpthread -ldl -lm \
-       -o memory
-   ./memory
-
-Note that on Windows and macOS the command will be similar, but you'll need
-to tweak the `-lpthread` and such annotations.
-
-You can also build using cmake:
+You can build using cmake:
 
 mkdir build && cd build && cmake .. && cmake --build . --target wasmtime-memory
 
@@ -131,7 +118,7 @@ void check_trap2(wasmtime_context_t *store, wasmtime_func_t *func, int32_t arg1,
   check_trap(store, func, args, 2, 0);
 }
 
-int main(int argc, const char *argv[]) {
+int main() {
   // Initialize.
   printf("Initializing...\n");
   wasm_engine_t *engine = wasm_engine_new();

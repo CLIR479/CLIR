@@ -1,9 +1,8 @@
 #![cfg(not(miri))]
 
-use super::{TypedFuncExt, REALLOC_AND_FREE};
-use anyhow::Result;
-use std::rc::Rc;
+use super::{ApiStyle, REALLOC_AND_FREE};
 use std::sync::Arc;
+use wasmtime::Result;
 use wasmtime::component::*;
 use wasmtime::{Config, Engine, Store, StoreContextMut, Trap};
 
@@ -34,7 +33,7 @@ fn thunks() -> Result<()> {
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
     instance
         .get_typed_func::<(), ()>(&mut store, "thunk")?
-        .call_and_post_return(&mut store, ())?;
+        .call(&mut store, ())?;
     let err = instance
         .get_typed_func::<(), ()>(&mut store, "thunk-trap")?
         .call(&mut store, ())
@@ -68,7 +67,7 @@ fn typecheck() -> Result<()> {
             (func (export "take-two-args") (param "a" s32) (param "b" (list u8))
                 (canon lift (core func $i "two-args") (memory $i "memory") (realloc (func $i "realloc")))
             )
-            (func (export "ret-tuple") (result "a" u8) (result "b" s8)
+            (func (export "ret-tuple") (result (tuple u8 s8))
                 (canon lift (core func $i "ret-one") (memory $i "memory") (realloc (func $i "realloc")))
             )
             (func (export "ret-tuple1") (result (tuple u32))
@@ -83,9 +82,7 @@ fn typecheck() -> Result<()> {
         )
     "#;
 
-    let mut config = Config::new();
-    config.wasm_component_model_multiple_returns(true);
-    let engine = Engine::new(&config)?;
+    let engine = Engine::default();
     let component = Component::new(&engine, component)?;
     let mut store = Store::new(&engine, ());
     let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
@@ -109,7 +106,7 @@ fn typecheck() -> Result<()> {
     assert!(take_two_args.typed::<(i32, &[u8]), ()>(&store).is_ok());
     assert!(ret_tuple.typed::<(), ()>(&store).is_err());
     assert!(ret_tuple.typed::<(), (u8,)>(&store).is_err());
-    assert!(ret_tuple.typed::<(), (u8, i8)>(&store).is_ok());
+    assert!(ret_tuple.typed::<(), ((u8, i8),)>(&store).is_ok());
     assert!(ret_tuple1.typed::<(), ((u32,),)>(&store).is_ok());
     assert!(ret_tuple1.typed::<(), (u32,)>(&store).is_err());
     assert!(ret_string.typed::<(), ()>(&store).is_err());
@@ -186,124 +183,139 @@ fn integers() -> Result<()> {
     let engine = super::engine();
     let component = Component::new(&engine, component)?;
     let mut store = Store::new(&engine, ());
-    let new_instance = |store: &mut Store<()>| Linker::new(&engine).instantiate(store, &component);
-    let instance = new_instance(&mut store)?;
+    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
 
     // Passing in 100 is valid for all primitives
     instance
         .get_typed_func::<(u8,), ()>(&mut store, "take-u8")?
-        .call_and_post_return(&mut store, (100,))?;
+        .call(&mut store, (100,))?;
     instance
         .get_typed_func::<(i8,), ()>(&mut store, "take-s8")?
-        .call_and_post_return(&mut store, (100,))?;
+        .call(&mut store, (100,))?;
     instance
         .get_typed_func::<(u16,), ()>(&mut store, "take-u16")?
-        .call_and_post_return(&mut store, (100,))?;
+        .call(&mut store, (100,))?;
     instance
         .get_typed_func::<(i16,), ()>(&mut store, "take-s16")?
-        .call_and_post_return(&mut store, (100,))?;
+        .call(&mut store, (100,))?;
     instance
         .get_typed_func::<(u32,), ()>(&mut store, "take-u32")?
-        .call_and_post_return(&mut store, (100,))?;
+        .call(&mut store, (100,))?;
     instance
         .get_typed_func::<(i32,), ()>(&mut store, "take-s32")?
-        .call_and_post_return(&mut store, (100,))?;
+        .call(&mut store, (100,))?;
     instance
         .get_typed_func::<(u64,), ()>(&mut store, "take-u64")?
-        .call_and_post_return(&mut store, (100,))?;
+        .call(&mut store, (100,))?;
     instance
         .get_typed_func::<(i64,), ()>(&mut store, "take-s64")?
-        .call_and_post_return(&mut store, (100,))?;
+        .call(&mut store, (100,))?;
 
     // This specific wasm instance traps if any value other than 100 is passed
-    new_instance(&mut store)?
-        .get_typed_func::<(u8,), ()>(&mut store, "take-u8")?
-        .call(&mut store, (101,))
-        .unwrap_err()
-        .downcast::<Trap>()?;
-    new_instance(&mut store)?
-        .get_typed_func::<(i8,), ()>(&mut store, "take-s8")?
-        .call(&mut store, (101,))
-        .unwrap_err()
-        .downcast::<Trap>()?;
-    new_instance(&mut store)?
-        .get_typed_func::<(u16,), ()>(&mut store, "take-u16")?
-        .call(&mut store, (101,))
-        .unwrap_err()
-        .downcast::<Trap>()?;
-    new_instance(&mut store)?
-        .get_typed_func::<(i16,), ()>(&mut store, "take-s16")?
-        .call(&mut store, (101,))
-        .unwrap_err()
-        .downcast::<Trap>()?;
-    new_instance(&mut store)?
-        .get_typed_func::<(u32,), ()>(&mut store, "take-u32")?
-        .call(&mut store, (101,))
-        .unwrap_err()
-        .downcast::<Trap>()?;
-    new_instance(&mut store)?
-        .get_typed_func::<(i32,), ()>(&mut store, "take-s32")?
-        .call(&mut store, (101,))
-        .unwrap_err()
-        .downcast::<Trap>()?;
-    new_instance(&mut store)?
-        .get_typed_func::<(u64,), ()>(&mut store, "take-u64")?
-        .call(&mut store, (101,))
-        .unwrap_err()
-        .downcast::<Trap>()?;
-    new_instance(&mut store)?
-        .get_typed_func::<(i64,), ()>(&mut store, "take-s64")?
-        .call(&mut store, (101,))
-        .unwrap_err()
-        .downcast::<Trap>()?;
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(u8,), ()>(&mut *store, "take-u8")?
+            .call(store, (101,))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(i8,), ()>(&mut *store, "take-s8")?
+            .call(store, (101,))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(u16,), ()>(&mut *store, "take-u16")?
+            .call(store, (101,))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(i16,), ()>(&mut *store, "take-s16")?
+            .call(store, (101,))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(u32,), ()>(&mut *store, "take-u32")?
+            .call(store, (101,))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(i32,), ()>(&mut *store, "take-s32")?
+            .call(store, (101,))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(u64,), ()>(&mut *store, "take-u64")?
+            .call(store, (101,))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(i64,), ()>(&mut *store, "take-s64")?
+            .call(store, (101,))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
 
     // Zero can be returned as any integer
     assert_eq!(
         instance
             .get_typed_func::<(), (u8,)>(&mut store, "ret-u8")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i8,)>(&mut store, "ret-s8")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (u16,)>(&mut store, "ret-u16")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i16,)>(&mut store, "ret-s16")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (u32,)>(&mut store, "ret-u32")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i32,)>(&mut store, "ret-s32")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (u64,)>(&mut store, "ret-u64")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i64,)>(&mut store, "ret-s64")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0,)
     );
 
@@ -311,49 +323,49 @@ fn integers() -> Result<()> {
     assert_eq!(
         instance
             .get_typed_func::<(), (u8,)>(&mut store, "retm1-u8")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0xff,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i8,)>(&mut store, "retm1-s8")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (-1,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (u16,)>(&mut store, "retm1-u16")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0xffff,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i16,)>(&mut store, "retm1-s16")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (-1,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (u32,)>(&mut store, "retm1-u32")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0xffffffff,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i32,)>(&mut store, "retm1-s32")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (-1,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (u64,)>(&mut store, "retm1-u64")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (0xffffffff_ffffffff,)
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i64,)>(&mut store, "retm1-s64")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (-1,)
     );
 
@@ -362,37 +374,37 @@ fn integers() -> Result<()> {
     assert_eq!(
         instance
             .get_typed_func::<(), (u8,)>(&mut store, "retbig-u8")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (ret as u8,),
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i8,)>(&mut store, "retbig-s8")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (ret as i8,),
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (u16,)>(&mut store, "retbig-u16")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (ret as u16,),
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i16,)>(&mut store, "retbig-s16")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (ret as i16,),
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (u32,)>(&mut store, "retbig-u32")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (ret,),
     );
     assert_eq!(
         instance
             .get_typed_func::<(), (i32,)>(&mut store, "retbig-s32")?
-            .call_and_post_return(&mut store, ())?,
+            .call(&mut store, ())?,
         (ret as i32,),
     );
 
@@ -424,19 +436,16 @@ fn type_layers() -> Result<()> {
 
     instance
         .get_typed_func::<(Box<u32>,), ()>(&mut store, "take-u32")?
-        .call_and_post_return(&mut store, (Box::new(2),))?;
+        .call(&mut store, (Box::new(2),))?;
     instance
         .get_typed_func::<(&u32,), ()>(&mut store, "take-u32")?
-        .call_and_post_return(&mut store, (&2,))?;
-    instance
-        .get_typed_func::<(Rc<u32>,), ()>(&mut store, "take-u32")?
-        .call_and_post_return(&mut store, (Rc::new(2),))?;
+        .call(&mut store, (&2,))?;
     instance
         .get_typed_func::<(Arc<u32>,), ()>(&mut store, "take-u32")?
-        .call_and_post_return(&mut store, (Arc::new(2),))?;
+        .call(&mut store, (Arc::new(2),))?;
     instance
-        .get_typed_func::<(&Box<Arc<Rc<u32>>>,), ()>(&mut store, "take-u32")?
-        .call_and_post_return(&mut store, (&Box::new(Arc::new(Rc::new(2))),))?;
+        .get_typed_func::<(&Box<Arc<Box<u32>>>,), ()>(&mut store, "take-u32")?
+        .call(&mut store, (&Box::new(Arc::new(Box::new(2))),))?;
 
     Ok(())
 }
@@ -490,41 +499,33 @@ fn floats() -> Result<()> {
     let u64_to_f64 = instance.get_typed_func::<(u64,), (f64,)>(&mut store, "u64-to-f64")?;
 
     assert_eq!(f32_to_u32.call(&mut store, (1.0,))?, (1.0f32.to_bits(),));
-    f32_to_u32.post_return(&mut store)?;
     assert_eq!(f64_to_u64.call(&mut store, (2.0,))?, (2.0f64.to_bits(),));
-    f64_to_u64.post_return(&mut store)?;
     assert_eq!(u32_to_f32.call(&mut store, (3.0f32.to_bits(),))?, (3.0,));
-    u32_to_f32.post_return(&mut store)?;
     assert_eq!(u64_to_f64.call(&mut store, (4.0f64.to_bits(),))?, (4.0,));
-    u64_to_f64.post_return(&mut store)?;
 
     assert_eq!(
         u32_to_f32
             .call(&mut store, (CANON_32BIT_NAN | 1,))?
             .0
             .to_bits(),
-        CANON_32BIT_NAN
+        CANON_32BIT_NAN | 1
     );
-    u32_to_f32.post_return(&mut store)?;
     assert_eq!(
         u64_to_f64
             .call(&mut store, (CANON_64BIT_NAN | 1,))?
             .0
             .to_bits(),
-        CANON_64BIT_NAN,
+        CANON_64BIT_NAN | 1,
     );
-    u64_to_f64.post_return(&mut store)?;
 
     assert_eq!(
         f32_to_u32.call(&mut store, (f32::from_bits(CANON_32BIT_NAN | 1),))?,
-        (CANON_32BIT_NAN,)
+        (CANON_32BIT_NAN | 1,)
     );
-    f32_to_u32.post_return(&mut store)?;
     assert_eq!(
         f64_to_u64.call(&mut store, (f64::from_bits(CANON_64BIT_NAN | 1),))?,
-        (CANON_64BIT_NAN,)
+        (CANON_64BIT_NAN | 1,)
     );
-    f64_to_u64.post_return(&mut store)?;
 
     Ok(())
 }
@@ -555,15 +556,10 @@ fn bools() -> Result<()> {
     let bool_to_u32 = instance.get_typed_func::<(bool,), (u32,)>(&mut store, "bool-to-u32")?;
 
     assert_eq!(bool_to_u32.call(&mut store, (false,))?, (0,));
-    bool_to_u32.post_return(&mut store)?;
     assert_eq!(bool_to_u32.call(&mut store, (true,))?, (1,));
-    bool_to_u32.post_return(&mut store)?;
     assert_eq!(u32_to_bool.call(&mut store, (0,))?, (false,));
-    u32_to_bool.post_return(&mut store)?;
     assert_eq!(u32_to_bool.call(&mut store, (1,))?, (true,));
-    u32_to_bool.post_return(&mut store)?;
     assert_eq!(u32_to_bool.call(&mut store, (2,))?, (true,));
-    u32_to_bool.post_return(&mut store)?;
 
     Ok(())
 }
@@ -595,9 +591,7 @@ fn chars() -> Result<()> {
 
     let mut roundtrip = |x: char| -> Result<()> {
         assert_eq!(char_to_u32.call(&mut store, (x,))?, (x as u32,));
-        char_to_u32.post_return(&mut store)?;
         assert_eq!(u32_to_char.call(&mut store, (x as u32,))?, (x,));
-        u32_to_char.post_return(&mut store)?;
         Ok(())
     };
 
@@ -673,7 +667,7 @@ fn tuple_result() -> Result<()> {
     let input = (-1, 100, 3.0, 100.0);
     let output = instance
         .get_typed_func::<(i8, u16, f32, f64), ((i8, u16, f32, f64),)>(&mut store, "tuple")?
-        .call_and_post_return(&mut store, input)?;
+        .call(&mut store, input)?;
     assert_eq!((input,), output);
 
     let invalid_func =
@@ -764,23 +758,19 @@ fn strings() -> Result<()> {
     let mut roundtrip = |x: &str| -> Result<()> {
         let ret = list8_to_str.call(&mut store, (x.as_bytes(),))?.0;
         assert_eq!(ret.to_str(&store)?, x);
-        list8_to_str.post_return(&mut store)?;
 
         let utf16 = x.encode_utf16().collect::<Vec<_>>();
         let ret = list16_to_str.call(&mut store, (&utf16[..],))?.0;
         assert_eq!(ret.to_str(&store)?, x);
-        list16_to_str.post_return(&mut store)?;
 
         let ret = str_to_list8.call(&mut store, (x,))?.0;
         assert_eq!(
             ret.iter(&mut store).collect::<Result<Vec<_>>>()?,
             x.as_bytes()
         );
-        str_to_list8.post_return(&mut store)?;
 
         let ret = str_to_list16.call(&mut store, (x,))?.0;
         assert_eq!(ret.iter(&mut store).collect::<Result<Vec<_>>>()?, utf16,);
-        str_to_list16.post_return(&mut store)?;
 
         Ok(())
     };
@@ -794,40 +784,404 @@ fn strings() -> Result<()> {
     let ret = list8_to_str.call(&mut store, (b"\xff",))?.0;
     let err = ret.to_str(&store).unwrap_err();
     assert!(err.to_string().contains("invalid utf-8"), "{}", err);
-    list8_to_str.post_return(&mut store)?;
 
     let ret = list8_to_str
         .call(&mut store, (b"hello there \xff invalid",))?
         .0;
     let err = ret.to_str(&store).unwrap_err();
     assert!(err.to_string().contains("invalid utf-8"), "{}", err);
-    list8_to_str.post_return(&mut store)?;
 
     let ret = list16_to_str.call(&mut store, (&[0xd800],))?.0;
     let err = ret.to_str(&store).unwrap_err();
     assert!(err.to_string().contains("unpaired surrogate"), "{}", err);
-    list16_to_str.post_return(&mut store)?;
 
     let ret = list16_to_str.call(&mut store, (&[0xdfff],))?.0;
     let err = ret.to_str(&store).unwrap_err();
     assert!(err.to_string().contains("unpaired surrogate"), "{}", err);
-    list16_to_str.post_return(&mut store)?;
 
     let ret = list16_to_str.call(&mut store, (&[0xd800, 0xff00],))?.0;
     let err = ret.to_str(&store).unwrap_err();
     assert!(err.to_string().contains("unpaired surrogate"), "{}", err);
-    list16_to_str.post_return(&mut store)?;
 
     Ok(())
 }
 
-#[test]
-fn many_parameters() -> Result<()> {
-    let component = format!(
+#[tokio::test]
+async fn async_reentrance() -> Result<()> {
+    _ = env_logger::try_init();
+
+    let component = r#"
+        (component
+            (core module $shim
+                (import "" "task.return" (func $task-return (param i32)))
+                (table (export "funcs") 1 1 funcref)
+                (func (export "export") (param i32) (result i32)
+                    (call_indirect (i32.const 0) (local.get 0))
+                )
+                (func (export "callback") (param i32 i32 i32) (result i32) unreachable)
+            )
+            (core func $task-return (canon task.return (result u32)))
+            (core instance $shim (instantiate $shim
+                (with "" (instance (export "task.return" (func $task-return))))
+            ))
+            (func $shim-export (param "p1" u32) (result u32)
+                (canon lift (core func $shim "export") async (callback (func $shim "callback")))
+            )
+
+            (component $inner
+                (import "import" (func $import (param "p1" u32) (result u32)))
+                (core module $libc (memory (export "memory") 1))
+                (core instance $libc (instantiate $libc))
+                (core func $import (canon lower (func $import) async (memory $libc "memory")))
+
+                (core module $m
+                    (import "libc" "memory" (memory 1))
+                    (import "" "import" (func $import (param i32 i32) (result i32)))
+                    (import "" "task.return" (func $task-return (param i32)))
+                    (func (export "export") (param i32) (result i32)
+                        (i32.store offset=0 (i32.const 1200) (local.get 0))
+                        (call $import (i32.const 1200) (i32.const 1204))
+                        drop
+                        (call $task-return (i32.load offset=0 (i32.const 1204)))
+                        i32.const 0
+                    )
+                    (func (export "callback") (param i32 i32 i32) (result i32) unreachable)
+                )
+                (core type $task-return-type (func (param i32)))
+                (core func $task-return (canon task.return (result u32)))
+                (core instance $i (instantiate $m
+                    (with "" (instance
+                        (export "task.return" (func $task-return))
+                        (export "import" (func $import))
+                    ))
+                    (with "libc" (instance $libc))
+                ))
+                (func (export "export") (param "p1" u32) (result u32)
+                    (canon lift (core func $i "export") async (callback (func $i "callback")))
+                )
+            )
+            (instance $inner (instantiate $inner (with "import" (func $shim-export))))
+
+            (core module $libc (memory (export "memory") 1))
+            (core instance $libc (instantiate $libc))
+            (core func $inner-export (canon lower (func $inner "export") async (memory $libc "memory")))
+
+            (core module $donut
+                (import "" "funcs" (table 1 1 funcref))
+                (import "libc" "memory" (memory 1))
+                (import "" "import" (func $import (param i32 i32) (result i32)))
+                (import "" "task.return" (func $task-return (param i32)))
+                (func $host-export (export "export") (param i32) (result i32)
+                    (i32.store offset=0 (i32.const 1200) (local.get 0))
+                    (call $import (i32.const 1200) (i32.const 1204))
+                    drop
+                    (call $task-return (i32.load offset=0 (i32.const 1204)))
+                    i32.const 0
+                )
+                (func $guest-export (export "guest-export") (param i32) (result i32) unreachable)
+                (func (export "callback") (param i32 i32 i32) (result i32) unreachable)
+                (func $start
+                    (table.set (i32.const 0) (ref.func $guest-export))
+                )
+                (start $start)
+            )
+
+            (core instance $donut (instantiate $donut
+                (with "" (instance
+                    (export "task.return" (func $task-return))
+                    (export "import" (func $inner-export))
+                    (export "funcs" (table $shim "funcs"))
+                ))
+                (with "libc" (instance $libc))
+            ))
+            (func (export "export") (param "p1" u32) (result u32)
+                (canon lift (core func $donut "export") async (callback (func $donut "callback")))
+            )
+        )"#;
+
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    config.wasm_component_model_async_stackful(true);
+    config.wasm_component_model_threading(true);
+    let engine = &Engine::new(&config)?;
+    let component = Component::new(&engine, component)?;
+    let mut store = Store::new(&engine, ());
+
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+    let func = instance.get_typed_func::<(u32,), (u32,)>(&mut store, "export")?;
+    let message = "cannot enter component instance";
+    match store
+        .run_concurrent(async move |accessor| {
+            wasmtime::error::Ok(func.call_concurrent(accessor, (42,)).await?.0)
+        })
+        .await
+    {
+        Ok(_) => panic!(),
+        Err(e) => assert!(
+            format!("{e:?}").contains(message),
+            "expected `{message}`; got `{e:?}`"
+        ),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_task_return_call_stackless() -> Result<()> {
+    task_return_trap(
         r#"(component
             (core module $m
-                (memory (export "memory") 1)
-                (func (export "foo") (param i32) (result i32)
+                (import "" "task.return" (func $task-return))
+                (func (export "foo") (result i32)
+                    i32.const 0
+                )
+                (func (export "callback") (param i32 i32 i32) (result i32) unreachable)
+            )
+            (core func $task-return (canon task.return))
+            (core instance $i (instantiate $m
+                (with "" (instance (export "task.return" (func $task-return))))
+            ))
+            (func (export "foo") (canon lift (core func $i "foo") async (callback (func $i "callback"))))
+        )"#,
+        "wasm trap: async-lifted export failed to produce a result",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn missing_task_return_call_stackless_explicit_thread() -> Result<()> {
+    task_return_trap(
+        r#"(component
+            (core module $libc
+                (table (export "__indirect_function_table") 1 funcref))
+            (core module $m
+                (import "" "task.return" (func $task-return))
+                (import "" "thread.new-indirect" (func $thread-new-indirect (param i32 i32) (result i32)))
+                (import "" "thread.resume-later" (func $thread-resume-later (param i32)))
+                (import "libc" "__indirect_function_table" (table $indirect-function-table 1 funcref))
+                (func $thread-start (param i32) (; empty ;))
+                (elem (table $indirect-function-table) (i32.const 0) func $thread-start)
+                (func (export "foo") (result i32)
+                    (call $thread-resume-later
+                        (call $thread-new-indirect (i32.const 0) (i32.const 0)))
+                    i32.const 0
+                )
+                (func (export "callback") (param i32 i32 i32) (result i32) unreachable)
+            )
+            (core instance $libc (instantiate $libc))
+            (core type $start-func-ty (func (param i32)))
+            (alias core export $libc "__indirect_function_table" (core table $indirect-function-table))
+            (core func $thread-new-indirect
+                (canon thread.new-indirect $start-func-ty (table $indirect-function-table)))
+            (core func $thread-resume-later (canon thread.resume-later))
+            (core func $task-return (canon task.return))
+            (core instance $i (instantiate $m
+                (with "" (instance
+                    (export "thread.new-indirect" (func $thread-new-indirect))
+                    (export "thread.resume-later" (func $thread-resume-later))
+                    (export "task.return" (func $task-return))
+                ))
+                (with "libc" (instance $libc))
+            ))
+            (func (export "foo") (canon lift (core func $i "foo") async (callback (func $i "callback"))))
+        )"#,
+        "wasm trap: async-lifted export failed to produce a result",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn missing_task_return_call_stackful_explicit_thread() -> Result<()> {
+    task_return_trap(
+        r#"(component
+            (core module $libc
+                (table (export "__indirect_function_table") 1 funcref))
+            (core module $m
+                (import "" "task.return" (func $task-return))
+                (import "" "thread.new-indirect" (func $thread-new-indirect (param i32 i32) (result i32)))
+                (import "" "thread.resume-later" (func $thread-resume-later (param i32)))
+                (import "libc" "__indirect_function_table" (table $indirect-function-table 1 funcref))
+                (func $thread-start (param i32) (; empty ;))
+                (elem (table $indirect-function-table) (i32.const 0) func $thread-start)
+                (func (export "foo")
+                    (call $thread-resume-later
+                        (call $thread-new-indirect (i32.const 0) (i32.const 0)))
+                )
+            )
+            (core instance $libc (instantiate $libc))
+            (core type $start-func-ty (func (param i32)))
+            (alias core export $libc "__indirect_function_table" (core table $indirect-function-table))
+            (core func $thread-new-indirect
+                (canon thread.new-indirect $start-func-ty (table $indirect-function-table)))
+            (core func $thread-resume-later (canon thread.resume-later))
+            (core func $task-return (canon task.return))
+            (core instance $i (instantiate $m
+                (with "" (instance
+                    (export "thread.new-indirect" (func $thread-new-indirect))
+                    (export "thread.resume-later" (func $thread-resume-later))
+                    (export "task.return" (func $task-return))
+                ))
+                (with "libc" (instance $libc))
+            ))
+            (func (export "foo") (canon lift (core func $i "foo") async))
+        )"#,
+        "wasm trap: async-lifted export failed to produce a result",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn missing_task_return_call_stackful() -> Result<()> {
+    task_return_trap(
+        r#"(component
+            (core module $m
+                (import "" "task.return" (func $task-return))
+                (func (export "foo"))
+            )
+            (core func $task-return (canon task.return))
+            (core instance $i (instantiate $m
+                (with "" (instance (export "task.return" (func $task-return))))
+            ))
+            (func (export "foo") (canon lift (core func $i "foo") async))
+        )"#,
+        "wasm trap: async-lifted export failed to produce a result",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn task_return_type_mismatch() -> Result<()> {
+    task_return_trap(
+        r#"(component
+            (core module $m
+                (import "" "task.return" (func $task-return (param i32)))
+                (func (export "foo") (call $task-return (i32.const 42)))
+            )
+            (core func $task-return (canon task.return (result u32)))
+            (core instance $i (instantiate $m
+                (with "" (instance (export "task.return" (func $task-return))))
+            ))
+            (func (export "foo") (canon lift (core func $i "foo") async))
+        )"#,
+        "invalid `task.return` signature and/or options for current task",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn task_return_memory_mismatch() -> Result<()> {
+    task_return_trap(
+        r#"(component
+            (core module $libc (memory (export "memory") 1))
+            (core instance $libc (instantiate $libc))
+            (core module $m
+                (import "" "task.return" (func $task-return))
+                (func (export "foo") (call $task-return))
+            )
+            (core func $task-return (canon task.return (memory $libc "memory")))
+            (core instance $i (instantiate $m
+                (with "" (instance (export "task.return" (func $task-return))))
+            ))
+            (func (export "foo") (canon lift (core func $i "foo") async))
+        )"#,
+        "invalid `task.return` signature and/or options for current task",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn task_return_string_encoding_mismatch() -> Result<()> {
+    task_return_trap(
+        r#"(component
+            (core module $m
+                (import "" "task.return" (func $task-return))
+                (func (export "foo") (call $task-return))
+            )
+            (core func $task-return (canon task.return string-encoding=utf16))
+            (core instance $i (instantiate $m
+                (with "" (instance (export "task.return" (func $task-return))))
+            ))
+            (func (export "foo") (canon lift (core func $i "foo") async))
+        )"#,
+        "invalid `task.return` signature and/or options for current task",
+    )
+    .await
+}
+
+async fn task_return_trap(component: &str, substring: &str) -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    config.wasm_component_model_async_stackful(true);
+    config.wasm_component_model_threading(true);
+    let engine = &Engine::new(&config)?;
+    let component = Component::new(&engine, component)?;
+    let mut store = Store::new(&engine, ());
+
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+
+    let func = instance.get_typed_func::<(), ()>(&mut store, "foo")?;
+    match store
+        .run_concurrent(async move |accessor| {
+            wasmtime::error::Ok(func.call_concurrent(accessor, ()).await?.0)
+        })
+        .await
+    {
+        Ok(_) => panic!(),
+        Err(e) => {
+            assert!(
+                format!("{e:?}").contains(substring),
+                "could not find `{substring}` in `{e:?}`"
+            )
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn many_parameters() -> Result<()> {
+    test_many_parameters(false, false).await
+}
+
+#[tokio::test]
+async fn many_parameters_concurrent() -> Result<()> {
+    test_many_parameters(false, true).await
+}
+
+#[tokio::test]
+async fn many_parameters_dynamic() -> Result<()> {
+    test_many_parameters(true, false).await
+}
+
+#[tokio::test]
+async fn many_parameters_dynamic_concurrent() -> Result<()> {
+    test_many_parameters(true, true).await
+}
+
+async fn test_many_parameters(dynamic: bool, concurrent: bool) -> Result<()> {
+    let (body, async_opts) = if concurrent {
+        (
+            r#"
+                    (call $task-return
+                        (i32.const 0)
+                        (i32.mul
+                            (memory.size)
+                            (i32.const 65536)
+                        )
+                        (local.get 0)
+                    )
+
+                    (i32.const 0)
+            "#,
+            r#"async (callback (func $i "callback"))"#,
+        )
+    } else {
+        (
+            r#"
                     (local $base i32)
 
                     ;; Allocate space for the return
@@ -855,11 +1209,37 @@ fn many_parameters() -> Result<()> {
                         (local.get 0))
 
                     (local.get $base)
-                )
+            "#,
+            "",
+        )
+    };
+
+    let component = format!(
+        r#"(component
+            (core module $libc
+                (memory (export "memory") 1)
 
                 {REALLOC_AND_FREE}
             )
-            (core instance $i (instantiate $m))
+            (core instance $libc (instantiate $libc))
+            (core module $m
+                (import "libc" "memory" (memory 1))
+                (import "libc" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
+                (import "" "task.return" (func $task-return (param i32 i32 i32)))
+                (func (export "foo") (param i32) (result i32)
+                    {body}
+                )
+                (func (export "callback") (param i32 i32 i32) (result i32) unreachable)
+            )
+            (type $tuple (tuple (list u8) u32))
+            (core func $task-return (canon task.return
+                (result $tuple)
+                (memory $libc "memory")
+            ))
+            (core instance $i (instantiate $m
+                (with "" (instance (export "task.return" (func $task-return))))
+                (with "libc" (instance $libc))
+            ))
 
             (type $t (func
                 (param "p1" s8)              ;; offset  0, size 1
@@ -870,43 +1250,34 @@ fn many_parameters() -> Result<()> {
                 (param "p6" string)          ;; offset 24, size 8
                 (param "p7" (list u32))      ;; offset 32, size 8
                 (param "p8" bool)            ;; offset 40, size 1
-                (param "p0" bool)            ;; offset 40, size 1
-                (param "pa" char)            ;; offset 44, size 4
-                (param "pb" (list bool))     ;; offset 48, size 8
-                (param "pc" (list char))     ;; offset 56, size 8
-                (param "pd" (list string))   ;; offset 64, size 8
+                (param "p9" bool)            ;; offset 41, size 1
+                (param "p0" char)            ;; offset 44, size 4
+                (param "pa" (list bool))     ;; offset 48, size 8
+                (param "pb" (list char))     ;; offset 56, size 8
+                (param "pc" (list string))   ;; offset 64, size 8
 
-                (result (tuple (list u8) u32))
+                (result $tuple)
             ))
             (func (export "many-param") (type $t)
                 (canon lift
                     (core func $i "foo")
-                    (memory $i "memory")
-                    (realloc (func $i "realloc"))
+                    (memory $libc "memory")
+                    (realloc (func $libc "realloc"))
+                    {async_opts}
                 )
             )
         )"#
     );
 
-    let engine = super::engine();
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = &Engine::new(&config)?;
     let component = Component::new(&engine, component)?;
     let mut store = Store::new(&engine, ());
-    let instance = Linker::new(&engine).instantiate(&mut store, &component)?;
-    let func = instance.get_typed_func::<(
-        i8,
-        u64,
-        f32,
-        u8,
-        i16,
-        &str,
-        &[u32],
-        bool,
-        bool,
-        char,
-        &[bool],
-        &[char],
-        &[&str],
-    ), ((WasmList<u8>, u32),)>(&mut store, "many-param")?;
+
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
 
     let input = (
         -100,
@@ -930,14 +1301,92 @@ fn many_parameters() -> Result<()> {
         ]
         .as_slice(),
     );
-    let ((memory, pointer),) = func.call(&mut store, input)?;
-    let memory = memory.as_le_slice(&store);
+
+    let (memory, pointer) = if dynamic {
+        let input = vec![
+            Val::S8(input.0),
+            Val::U64(input.1),
+            Val::Float32(input.2),
+            Val::U8(input.3),
+            Val::S16(input.4),
+            Val::String(input.5.into()),
+            Val::List(input.6.iter().copied().map(Val::U32).collect()),
+            Val::Bool(input.7),
+            Val::Bool(input.8),
+            Val::Char(input.9),
+            Val::List(input.10.iter().copied().map(Val::Bool).collect()),
+            Val::List(input.11.iter().copied().map(Val::Char).collect()),
+            Val::List(input.12.iter().map(|&s| Val::String(s.into())).collect()),
+        ];
+        let func = instance.get_func(&mut store, "many-param").unwrap();
+
+        let mut results = vec![Val::Bool(false)];
+        if concurrent {
+            store
+                .run_concurrent(async |store| {
+                    func.call_concurrent(store, &input, &mut results).await?;
+                    wasmtime::error::Ok(())
+                })
+                .await??;
+        } else {
+            func.call_async(&mut store, &input, &mut results).await?;
+        };
+        let mut results = results.into_iter();
+        let Some(Val::Tuple(results)) = results.next() else {
+            panic!()
+        };
+        let mut results = results.into_iter();
+        let Some(Val::List(memory)) = results.next() else {
+            panic!()
+        };
+        let Some(Val::U32(pointer)) = results.next() else {
+            panic!()
+        };
+        (
+            memory
+                .into_iter()
+                .map(|v| if let Val::U8(v) = v { v } else { panic!() })
+                .collect(),
+            pointer,
+        )
+    } else {
+        let func = instance.get_typed_func::<(
+            i8,
+            u64,
+            f32,
+            u8,
+            i16,
+            &str,
+            &[u32],
+            bool,
+            bool,
+            char,
+            &[bool],
+            &[char],
+            &[&str],
+        ), ((Vec<u8>, u32),)>(&mut store, "many-param")?;
+
+        if concurrent {
+            store
+                .run_concurrent(async move |accessor| {
+                    wasmtime::error::Ok(func.call_concurrent(accessor, input).await?.0)
+                })
+                .await??
+                .0
+        } else {
+            func.call_async(&mut store, input).await?.0
+        }
+    };
+    let memory = &memory[..];
 
     let mut actual = &memory[pointer as usize..][..72];
     assert_eq!(i8::from_le_bytes(*actual.take_n::<1>()), input.0);
     actual.skip::<7>();
     assert_eq!(u64::from_le_bytes(*actual.take_n::<8>()), input.1);
-    assert_eq!(u32::from_le_bytes(*actual.take_n::<4>()), CANON_32BIT_NAN);
+    assert_eq!(
+        u32::from_le_bytes(*actual.take_n::<4>()),
+        CANON_32BIT_NAN | 1
+    );
     assert_eq!(u8::from_le_bytes(*actual.take_n::<1>()), input.3);
     actual.skip::<1>();
     assert_eq!(i16::from_le_bytes(*actual.take_n::<2>()), input.4);
@@ -974,6 +1423,453 @@ fn many_parameters() -> Result<()> {
     }
     assert!(mem.is_empty());
     assert!(actual.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn many_results() -> Result<()> {
+    test_many_results(false, false).await
+}
+
+#[tokio::test]
+async fn many_results_concurrent() -> Result<()> {
+    test_many_results(false, true).await
+}
+
+#[tokio::test]
+async fn many_results_dynamic() -> Result<()> {
+    test_many_results(true, false).await
+}
+
+#[tokio::test]
+async fn many_results_dynamic_concurrent() -> Result<()> {
+    test_many_results(true, true).await
+}
+
+async fn test_many_results(dynamic: bool, concurrent: bool) -> Result<()> {
+    let (ret, async_opts) = if concurrent {
+        (
+            r#"
+                   call $task-return
+                   i32.const 0
+            "#,
+            r#"async (callback (func $i "callback"))"#,
+        )
+    } else {
+        ("", "")
+    };
+
+    let my_nan = CANON_32BIT_NAN | 1;
+
+    let component = format!(
+        r#"(component
+            (core module $libc
+                (memory (export "memory") 1)
+
+                {REALLOC_AND_FREE}
+            )
+            (core instance $libc (instantiate $libc))
+            (core module $m
+                (import "libc" "memory" (memory 1))
+                (import "libc" "realloc" (func $realloc (param i32 i32 i32 i32) (result i32)))
+                (import "" "task.return" (func $task-return (param i32)))
+                (func (export "foo") (result i32)
+                    (local $base i32)
+                    (local $string i32)
+                    (local $list i32)
+
+                    (local.set $base
+                        (call $realloc
+                            (i32.const 0)
+                            (i32.const 0)
+                            (i32.const 8)
+                            (i32.const 72)))
+
+                    (i32.store8 offset=0
+                        (local.get $base)
+                        (i32.const -100))
+
+                    (i64.store offset=8
+                        (local.get $base)
+                        (i64.const 9223372036854775807))
+
+                    (f32.store offset=16
+                        (local.get $base)
+                        (f32.reinterpret_i32 (i32.const {my_nan})))
+
+                    (i32.store8 offset=20
+                        (local.get $base)
+                        (i32.const 38))
+
+                    (i32.store16 offset=22
+                        (local.get $base)
+                        (i32.const 18831))
+
+                    (local.set $string
+                        (call $realloc
+                            (i32.const 0)
+                            (i32.const 0)
+                            (i32.const 1)
+                            (i32.const 6)))
+
+                    (i32.store8 offset=0
+                        (local.get $string)
+                        (i32.const 97)) ;; 'a'
+                    (i32.store8 offset=1
+                        (local.get $string)
+                        (i32.const 98)) ;; 'b'
+                    (i32.store8 offset=2
+                        (local.get $string)
+                        (i32.const 99)) ;; 'c'
+                    (i32.store8 offset=3
+                        (local.get $string)
+                        (i32.const 100)) ;; 'd'
+                    (i32.store8 offset=4
+                        (local.get $string)
+                        (i32.const 101)) ;; 'e'
+                    (i32.store8 offset=5
+                        (local.get $string)
+                        (i32.const 102)) ;; 'f'
+
+                    (i32.store offset=24
+                        (local.get $base)
+                        (local.get $string))
+
+                    (i32.store offset=28
+                        (local.get $base)
+                        (i32.const 2))
+
+                    (local.set $list
+                        (call $realloc
+                            (i32.const 0)
+                            (i32.const 0)
+                            (i32.const 4)
+                            (i32.const 32)))
+
+                    (i32.store offset=0
+                        (local.get $list)
+                        (i32.const 1))
+                    (i32.store offset=4
+                        (local.get $list)
+                        (i32.const 2))
+                    (i32.store offset=8
+                        (local.get $list)
+                        (i32.const 3))
+                    (i32.store offset=12
+                        (local.get $list)
+                        (i32.const 4))
+                    (i32.store offset=16
+                        (local.get $list)
+                        (i32.const 5))
+                    (i32.store offset=20
+                        (local.get $list)
+                        (i32.const 6))
+                    (i32.store offset=24
+                        (local.get $list)
+                        (i32.const 7))
+                    (i32.store offset=28
+                        (local.get $list)
+                        (i32.const 8))
+
+                    (i32.store offset=32
+                        (local.get $base)
+                        (local.get $list))
+
+                    (i32.store offset=36
+                        (local.get $base)
+                        (i32.const 8))
+
+                    (i32.store8 offset=40
+                        (local.get $base)
+                        (i32.const 1))
+
+                    (i32.store8 offset=41
+                        (local.get $base)
+                        (i32.const 0))
+
+                    (i32.store offset=44
+                        (local.get $base)
+                        (i32.const 128681)) ;; '🚩'
+
+                    (local.set $list
+                        (call $realloc
+                            (i32.const 0)
+                            (i32.const 0)
+                            (i32.const 1)
+                            (i32.const 5)))
+
+                    (i32.store8 offset=0
+                        (local.get $list)
+                        (i32.const 0))
+                    (i32.store8 offset=1
+                        (local.get $list)
+                        (i32.const 1))
+                    (i32.store8 offset=2
+                        (local.get $list)
+                        (i32.const 0))
+                    (i32.store8 offset=3
+                        (local.get $list)
+                        (i32.const 1))
+                    (i32.store8 offset=4
+                        (local.get $list)
+                        (i32.const 1))
+
+                    (i32.store offset=48
+                        (local.get $base)
+                        (local.get $list))
+
+                    (i32.store offset=52
+                        (local.get $base)
+                        (i32.const 5))
+
+                    (local.set $list
+                        (call $realloc
+                            (i32.const 0)
+                            (i32.const 0)
+                            (i32.const 4)
+                            (i32.const 20)))
+
+                    (i32.store offset=0
+                        (local.get $list)
+                        (i32.const 127820)) ;; '🍌'
+                    (i32.store offset=4
+                        (local.get $list)
+                        (i32.const 129360)) ;; '🥐'
+                    (i32.store offset=8
+                        (local.get $list)
+                        (i32.const 127831)) ;; '🍗'
+                    (i32.store offset=12
+                        (local.get $list)
+                        (i32.const 127833)) ;; '🍙'
+                    (i32.store offset=16
+                        (local.get $list)
+                        (i32.const 127841)) ;; '🍡'
+
+                    (i32.store offset=56
+                        (local.get $base)
+                        (local.get $list))
+
+                    (i32.store offset=60
+                        (local.get $base)
+                        (i32.const 5))
+
+                    (local.set $list
+                        (call $realloc
+                            (i32.const 0)
+                            (i32.const 0)
+                            (i32.const 4)
+                            (i32.const 16)))
+
+                    (i32.store offset=0
+                        (local.get $list)
+                        (i32.add (local.get $string) (i32.const 2)))
+                    (i32.store offset=4
+                        (local.get $list)
+                        (i32.const 2))
+                    (i32.store offset=8
+                        (local.get $list)
+                        (i32.add (local.get $string) (i32.const 4)))
+                    (i32.store offset=12
+                        (local.get $list)
+                        (i32.const 2))
+
+                    (i32.store offset=64
+                        (local.get $base)
+                        (local.get $list))
+
+                    (i32.store offset=68
+                        (local.get $base)
+                        (i32.const 2))
+
+                    local.get $base
+
+                    {ret}
+                )
+                (func (export "callback") (param i32 i32 i32) (result i32) unreachable)
+            )
+            (type $tuple (tuple
+                s8
+                u64
+                float32
+                u8
+                s16
+                string
+                (list u32)
+                bool
+                bool
+                char
+                (list bool)
+                (list char)
+                (list string)
+            ))
+            (core func $task-return (canon task.return
+                (result $tuple)
+                (memory $libc "memory")
+            ))
+            (core instance $i (instantiate $m
+                (with "" (instance (export "task.return" (func $task-return))))
+                (with "libc" (instance $libc))
+            ))
+
+            (type $t (func (result $tuple)))
+            (func (export "many-results") (type $t)
+                (canon lift
+                    (core func $i "foo")
+                    (memory $libc "memory")
+                    (realloc (func $libc "realloc"))
+                    {async_opts}
+                )
+            )
+        )"#
+    );
+
+    let mut config = Config::new();
+    config.wasm_component_model_async(true);
+    let engine = &Engine::new(&config)?;
+    let component = Component::new(&engine, component)?;
+    let mut store = Store::new(&engine, ());
+
+    let instance = Linker::new(&engine)
+        .instantiate_async(&mut store, &component)
+        .await?;
+
+    let expected = (
+        -100i8,
+        u64::MAX / 2,
+        f32::from_bits(CANON_32BIT_NAN | 1),
+        38u8,
+        18831i16,
+        "ab".to_string(),
+        vec![1u32, 2, 3, 4, 5, 6, 7, 8],
+        true,
+        false,
+        '🚩',
+        vec![false, true, false, true, true],
+        vec!['🍌', '🥐', '🍗', '🍙', '🍡'],
+        vec!["cd".to_string(), "ef".to_string()],
+    );
+
+    let actual = if dynamic {
+        let func = instance.get_func(&mut store, "many-results").unwrap();
+
+        let mut results = vec![Val::Bool(false)];
+        if concurrent {
+            store
+                .run_concurrent(async |store| {
+                    func.call_concurrent(store, &[], &mut results).await?;
+                    wasmtime::error::Ok(())
+                })
+                .await??;
+        } else {
+            func.call_async(&mut store, &[], &mut results).await?;
+        };
+        let mut results = results.into_iter();
+
+        let Some(Val::Tuple(results)) = results.next() else {
+            panic!()
+        };
+        let mut results = results.into_iter();
+        let Some(Val::S8(p1)) = results.next() else {
+            panic!()
+        };
+        let Some(Val::U64(p2)) = results.next() else {
+            panic!()
+        };
+        let Some(Val::Float32(p3)) = results.next() else {
+            panic!()
+        };
+        let Some(Val::U8(p4)) = results.next() else {
+            panic!()
+        };
+        let Some(Val::S16(p5)) = results.next() else {
+            panic!()
+        };
+        let Some(Val::String(p6)) = results.next() else {
+            panic!()
+        };
+        let Some(Val::List(p7)) = results.next() else {
+            panic!()
+        };
+        let p7 = p7
+            .into_iter()
+            .map(|v| if let Val::U32(v) = v { v } else { panic!() })
+            .collect();
+        let Some(Val::Bool(p8)) = results.next() else {
+            panic!()
+        };
+        let Some(Val::Bool(p9)) = results.next() else {
+            panic!()
+        };
+        let Some(Val::Char(p0)) = results.next() else {
+            panic!()
+        };
+        let Some(Val::List(pa)) = results.next() else {
+            panic!()
+        };
+        let pa = pa
+            .into_iter()
+            .map(|v| if let Val::Bool(v) = v { v } else { panic!() })
+            .collect();
+        let Some(Val::List(pb)) = results.next() else {
+            panic!()
+        };
+        let pb = pb
+            .into_iter()
+            .map(|v| if let Val::Char(v) = v { v } else { panic!() })
+            .collect();
+        let Some(Val::List(pc)) = results.next() else {
+            panic!()
+        };
+        let pc = pc
+            .into_iter()
+            .map(|v| if let Val::String(v) = v { v } else { panic!() })
+            .collect();
+
+        (p1, p2, p3, p4, p5, p6, p7, p8, p9, p0, pa, pb, pc)
+    } else {
+        let func = instance.get_typed_func::<(), ((
+            i8,
+            u64,
+            f32,
+            u8,
+            i16,
+            String,
+            Vec<u32>,
+            bool,
+            bool,
+            char,
+            Vec<bool>,
+            Vec<char>,
+            Vec<String>,
+        ),)>(&mut store, "many-results")?;
+
+        if concurrent {
+            store
+                .run_concurrent(async move |accessor| {
+                    wasmtime::error::Ok(func.call_concurrent(accessor, ()).await?.0)
+                })
+                .await??
+                .0
+        } else {
+            func.call_async(&mut store, ()).await?.0
+        }
+    };
+
+    assert_eq!(expected.0, actual.0);
+    assert_eq!(expected.1, actual.1);
+    assert!(expected.2.is_nan());
+    assert!(actual.2.is_nan());
+    assert_eq!(expected.3, actual.3);
+    assert_eq!(expected.4, actual.4);
+    assert_eq!(expected.5, actual.5);
+    assert_eq!(expected.6, actual.6);
+    assert_eq!(expected.7, actual.7);
+    assert_eq!(expected.8, actual.8);
+    assert_eq!(expected.9, actual.9);
+    assert_eq!(expected.10, actual.10);
+    assert_eq!(expected.11, actual.11);
+    assert_eq!(expected.12, actual.12);
 
     Ok(())
 }
@@ -1082,35 +1978,39 @@ fn some_traps() -> Result<()> {
 
     let engine = super::engine();
     let component = Component::new(&engine, component)?;
-    let mut store = Store::new(&engine, ());
-    let instance = |store: &mut Store<()>| Linker::new(&engine).instantiate(store, &component);
 
     // This should fail when calling the allocator function for the argument
-    let err = instance(&mut store)?
-        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-unreachable")?
-        .call(&mut store, (&[],))
-        .unwrap_err()
-        .downcast::<Trap>()?;
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&[u8],), ()>(&mut *store, "take-list-unreachable")?
+            .call(store, (&[],))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
     assert_eq!(err, Trap::UnreachableCodeReached);
 
     // This should fail when calling the allocator function for the argument
-    let err = instance(&mut store)?
-        .get_typed_func::<(&str,), ()>(&mut store, "take-string-unreachable")?
-        .call(&mut store, ("",))
-        .unwrap_err()
-        .downcast::<Trap>()?;
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str,), ()>(&mut *store, "take-string-unreachable")?
+            .call(store, ("",))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
     assert_eq!(err, Trap::UnreachableCodeReached);
 
     // This should fail when calling the allocator function for the space
     // to store the arguments (before arguments are even lowered)
-    let err = instance(&mut store)?
-        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
-            &mut store,
-            "take-many-unreachable",
-        )?
-        .call(&mut store, ("", "", "", "", "", "", "", "", "", ""))
-        .unwrap_err()
-        .downcast::<Trap>()?;
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
+                &mut *store,
+                "take-many-unreachable",
+            )?
+            .call(store, ("", "", "", "", "", "", "", "", "", ""))
+            .unwrap_err()
+            .downcast::<Trap>()
+    })?;
     assert_eq!(err, Trap::UnreachableCodeReached);
 
     // Assert that when the base pointer returned by malloc is out of bounds
@@ -1120,94 +2020,122 @@ fn some_traps() -> Result<()> {
     // FIXME(WebAssembly/component-model#32) confirm the semantics here are
     // what's desired.
     #[track_caller]
-    fn assert_oob(err: &anyhow::Error) {
+    fn assert_oob(err: &wasmtime::Error) {
         assert!(
             err.to_string()
                 .contains("realloc return: beyond end of memory"),
             "{err:?}",
         );
     }
-    let err = instance(&mut store)?
-        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-base-oob")?
-        .call(&mut store, (&[],))
-        .unwrap_err();
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&[u8],), ()>(&mut *store, "take-list-base-oob")?
+            .call(store, (&[],))
+    })
+    .unwrap_err();
     assert_oob(&err);
-    let err = instance(&mut store)?
-        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-base-oob")?
-        .call(&mut store, (&[1],))
-        .unwrap_err();
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&[u8],), ()>(&mut *store, "take-list-base-oob")?
+            .call(store, (&[1],))
+    })
+    .unwrap_err();
     assert_oob(&err);
-    let err = instance(&mut store)?
-        .get_typed_func::<(&str,), ()>(&mut store, "take-string-base-oob")?
-        .call(&mut store, ("",))
-        .unwrap_err();
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str,), ()>(&mut *store, "take-string-base-oob")?
+            .call(store, ("",))
+    })
+    .unwrap_err();
     assert_oob(&err);
-    let err = instance(&mut store)?
-        .get_typed_func::<(&str,), ()>(&mut store, "take-string-base-oob")?
-        .call(&mut store, ("x",))
-        .unwrap_err();
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str,), ()>(&mut *store, "take-string-base-oob")?
+            .call(store, ("x",))
+    })
+    .unwrap_err();
     assert_oob(&err);
-    let err = instance(&mut store)?
-        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
-            &mut store,
-            "take-many-base-oob",
-        )?
-        .call(&mut store, ("", "", "", "", "", "", "", "", "", ""))
-        .unwrap_err();
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
+                &mut *store,
+                "take-many-base-oob",
+            )?
+            .call(store, ("", "", "", "", "", "", "", "", "", ""))
+    })
+    .unwrap_err();
     assert_oob(&err);
 
     // Test here that when the returned pointer from malloc is one byte from the
     // end of memory that empty things are fine, but larger things are not.
 
-    instance(&mut store)?
-        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-end-oob")?
-        .call_and_post_return(&mut store, (&[],))?;
-    instance(&mut store)?
-        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-end-oob")?
-        .call_and_post_return(&mut store, (&[1, 2, 3, 4],))?;
-    let err = instance(&mut store)?
-        .get_typed_func::<(&[u8],), ()>(&mut store, "take-list-end-oob")?
-        .call(&mut store, (&[1, 2, 3, 4, 5],))
-        .unwrap_err();
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&[u8],), ()>(&mut *store, "take-list-end-oob")?
+            .call(store, (&[],))
+    })?;
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&[u8],), ()>(&mut *store, "take-list-end-oob")?
+            .call(store, (&[1, 2, 3, 4],))
+    })?;
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&[u8],), ()>(&mut *store, "take-list-end-oob")?
+            .call(store, (&[1, 2, 3, 4, 5],))
+    })
+    .unwrap_err();
     assert_oob(&err);
-    instance(&mut store)?
-        .get_typed_func::<(&str,), ()>(&mut store, "take-string-end-oob")?
-        .call_and_post_return(&mut store, ("",))?;
-    instance(&mut store)?
-        .get_typed_func::<(&str,), ()>(&mut store, "take-string-end-oob")?
-        .call_and_post_return(&mut store, ("abcd",))?;
-    let err = instance(&mut store)?
-        .get_typed_func::<(&str,), ()>(&mut store, "take-string-end-oob")?
-        .call(&mut store, ("abcde",))
-        .unwrap_err();
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str,), ()>(&mut *store, "take-string-end-oob")?
+            .call(store, ("",))
+    })?;
+    with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str,), ()>(&mut *store, "take-string-end-oob")?
+            .call(store, ("abcd",))
+    })?;
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str,), ()>(&mut *store, "take-string-end-oob")?
+            .call(store, ("abcde",))
+    })
+    .unwrap_err();
     assert_oob(&err);
-    let err = instance(&mut store)?
-        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
-            &mut store,
-            "take-many-end-oob",
-        )?
-        .call(&mut store, ("", "", "", "", "", "", "", "", "", ""))
-        .unwrap_err();
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
+                &mut *store,
+                "take-many-end-oob",
+            )?
+            .call(store, ("", "", "", "", "", "", "", "", "", ""))
+    })
+    .unwrap_err();
     assert_oob(&err);
 
     // For this function the first allocation, the space to store all the
     // arguments, is in-bounds but then all further allocations, such as for
     // each individual string, are all out of bounds.
-    let err = instance(&mut store)?
-        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
-            &mut store,
-            "take-many-second-oob",
-        )?
-        .call(&mut store, ("", "", "", "", "", "", "", "", "", ""))
-        .unwrap_err();
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
+                &mut *store,
+                "take-many-second-oob",
+            )?
+            .call(store, ("", "", "", "", "", "", "", "", "", ""))
+    })
+    .unwrap_err();
     assert_oob(&err);
-    let err = instance(&mut store)?
-        .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
-            &mut store,
-            "take-many-second-oob",
-        )?
-        .call(&mut store, ("", "", "", "", "", "", "", "", "", "x"))
-        .unwrap_err();
+    let err = with_new_instance(&engine, &component, |store, instance| {
+        instance
+            .get_typed_func::<(&str, &str, &str, &str, &str, &str, &str, &str, &str, &str), ()>(
+                &mut *store,
+                "take-many-second-oob",
+            )?
+            .call(store, ("", "", "", "", "", "", "", "", "", "x"))
+    })
+    .unwrap_err();
     assert_oob(&err);
     Ok(())
 }
@@ -1262,15 +2190,12 @@ fn char_bool_memory() -> Result<()> {
 
     let (ret,) = func.call(&mut store, (0, 'a' as u32))?;
     assert_eq!(ret, (false, 'a'));
-    func.post_return(&mut store)?;
 
     let (ret,) = func.call(&mut store, (1, '🍰' as u32))?;
     assert_eq!(ret, (true, '🍰'));
-    func.post_return(&mut store)?;
 
     let (ret,) = func.call(&mut store, (2, 'a' as u32))?;
     assert_eq!(ret, (true, 'a'));
-    func.post_return(&mut store)?;
 
     assert!(func.call(&mut store, (0, 0xd800)).is_err());
 
@@ -1482,26 +2407,20 @@ fn option() -> Result<()> {
     let option_u8_to_tuple = instance
         .get_typed_func::<(Option<u8>,), ((u32, u32),)>(&mut store, "option-u8-to-tuple")?;
     assert_eq!(option_u8_to_tuple.call(&mut store, (None,))?, ((0, 0),));
-    option_u8_to_tuple.post_return(&mut store)?;
     assert_eq!(option_u8_to_tuple.call(&mut store, (Some(0),))?, ((1, 0),));
-    option_u8_to_tuple.post_return(&mut store)?;
     assert_eq!(
         option_u8_to_tuple.call(&mut store, (Some(100),))?,
         ((1, 100),)
     );
-    option_u8_to_tuple.post_return(&mut store)?;
 
     let option_u32_to_tuple = instance
         .get_typed_func::<(Option<u32>,), ((u32, u32),)>(&mut store, "option-u32-to-tuple")?;
     assert_eq!(option_u32_to_tuple.call(&mut store, (None,))?, ((0, 0),));
-    option_u32_to_tuple.post_return(&mut store)?;
     assert_eq!(option_u32_to_tuple.call(&mut store, (Some(0),))?, ((1, 0),));
-    option_u32_to_tuple.post_return(&mut store)?;
     assert_eq!(
         option_u32_to_tuple.call(&mut store, (Some(100),))?,
         ((1, 100),)
     );
-    option_u32_to_tuple.post_return(&mut store)?;
 
     let option_string_to_tuple = instance.get_typed_func::<(Option<&str>,), ((u32, WasmStr),)>(
         &mut store,
@@ -1510,39 +2429,30 @@ fn option() -> Result<()> {
     let ((a, b),) = option_string_to_tuple.call(&mut store, (None,))?;
     assert_eq!(a, 0);
     assert_eq!(b.to_str(&store)?, "");
-    option_string_to_tuple.post_return(&mut store)?;
     let ((a, b),) = option_string_to_tuple.call(&mut store, (Some(""),))?;
     assert_eq!(a, 1);
     assert_eq!(b.to_str(&store)?, "");
-    option_string_to_tuple.post_return(&mut store)?;
     let ((a, b),) = option_string_to_tuple.call(&mut store, (Some("hello"),))?;
     assert_eq!(a, 1);
     assert_eq!(b.to_str(&store)?, "hello");
-    option_string_to_tuple.post_return(&mut store)?;
 
     let instance = linker.instantiate(&mut store, &component)?;
     let to_option_u8 =
         instance.get_typed_func::<(u32, u32), (Option<u8>,)>(&mut store, "to-option-u8")?;
     assert_eq!(to_option_u8.call(&mut store, (0x00_00, 0))?, (None,));
-    to_option_u8.post_return(&mut store)?;
     assert_eq!(to_option_u8.call(&mut store, (0x00_01, 0))?, (Some(0),));
-    to_option_u8.post_return(&mut store)?;
     assert_eq!(to_option_u8.call(&mut store, (0xfd_01, 0))?, (Some(0xfd),));
-    to_option_u8.post_return(&mut store)?;
     assert!(to_option_u8.call(&mut store, (0x00_02, 0)).is_err());
 
     let instance = linker.instantiate(&mut store, &component)?;
     let to_option_u32 =
         instance.get_typed_func::<(u32, u32), (Option<u32>,)>(&mut store, "to-option-u32")?;
     assert_eq!(to_option_u32.call(&mut store, (0, 0))?, (None,));
-    to_option_u32.post_return(&mut store)?;
     assert_eq!(to_option_u32.call(&mut store, (1, 0))?, (Some(0),));
-    to_option_u32.post_return(&mut store)?;
     assert_eq!(
         to_option_u32.call(&mut store, (1, 0x1234fead))?,
         (Some(0x1234fead),)
     );
-    to_option_u32.post_return(&mut store)?;
     assert!(to_option_u32.call(&mut store, (2, 0)).is_err());
 
     let instance = linker.instantiate(&mut store, &component)?;
@@ -1550,13 +2460,10 @@ fn option() -> Result<()> {
         .get_typed_func::<(u32, &str), (Option<WasmStr>,)>(&mut store, "to-option-string")?;
     let ret = to_option_string.call(&mut store, (0, ""))?.0;
     assert!(ret.is_none());
-    to_option_string.post_return(&mut store)?;
     let ret = to_option_string.call(&mut store, (1, ""))?.0;
     assert_eq!(ret.unwrap().to_str(&store)?, "");
-    to_option_string.post_return(&mut store)?;
     let ret = to_option_string.call(&mut store, (1, "cheesecake"))?.0;
     assert_eq!(ret.unwrap().to_str(&store)?, "cheesecake");
-    to_option_string.post_return(&mut store)?;
     assert!(to_option_string.call(&mut store, (2, "")).is_err());
 
     Ok(())
@@ -1650,19 +2557,15 @@ fn expected() -> Result<()> {
     let take_expected_unit =
         instance.get_typed_func::<(Result<(), ()>,), (u32,)>(&mut store, "take-expected-unit")?;
     assert_eq!(take_expected_unit.call(&mut store, (Ok(()),))?, (0,));
-    take_expected_unit.post_return(&mut store)?;
     assert_eq!(take_expected_unit.call(&mut store, (Err(()),))?, (1,));
-    take_expected_unit.post_return(&mut store)?;
 
     let take_expected_u8_f32 = instance
         .get_typed_func::<(Result<u8, f32>,), ((u32, u32),)>(&mut store, "take-expected-u8-f32")?;
     assert_eq!(take_expected_u8_f32.call(&mut store, (Ok(1),))?, ((0, 1),));
-    take_expected_u8_f32.post_return(&mut store)?;
     assert_eq!(
         take_expected_u8_f32.call(&mut store, (Err(2.0),))?,
         ((1, 2.0f32.to_bits()),)
     );
-    take_expected_u8_f32.post_return(&mut store)?;
 
     let take_expected_string = instance
         .get_typed_func::<(Result<&str, &[u8]>,), ((u32, WasmStr),)>(
@@ -1672,19 +2575,15 @@ fn expected() -> Result<()> {
     let ((a, b),) = take_expected_string.call(&mut store, (Ok("hello"),))?;
     assert_eq!(a, 0);
     assert_eq!(b.to_str(&store)?, "hello");
-    take_expected_string.post_return(&mut store)?;
     let ((a, b),) = take_expected_string.call(&mut store, (Err(b"goodbye"),))?;
     assert_eq!(a, 1);
     assert_eq!(b.to_str(&store)?, "goodbye");
-    take_expected_string.post_return(&mut store)?;
 
     let instance = linker.instantiate(&mut store, &component)?;
     let to_expected_unit =
         instance.get_typed_func::<(u32,), (Result<(), ()>,)>(&mut store, "to-expected-unit")?;
     assert_eq!(to_expected_unit.call(&mut store, (0,))?, (Ok(()),));
-    to_expected_unit.post_return(&mut store)?;
     assert_eq!(to_expected_unit.call(&mut store, (1,))?, (Err(()),));
-    to_expected_unit.post_return(&mut store)?;
     let err = to_expected_unit.call(&mut store, (2,)).unwrap_err();
     assert!(err.to_string().contains("invalid expected"), "{}", err);
 
@@ -1692,19 +2591,15 @@ fn expected() -> Result<()> {
     let to_expected_s16_f32 = instance
         .get_typed_func::<(u32, u32), (Result<i16, f32>,)>(&mut store, "to-expected-s16-f32")?;
     assert_eq!(to_expected_s16_f32.call(&mut store, (0, 0))?, (Ok(0),));
-    to_expected_s16_f32.post_return(&mut store)?;
     assert_eq!(to_expected_s16_f32.call(&mut store, (0, 100))?, (Ok(100),));
-    to_expected_s16_f32.post_return(&mut store)?;
     assert_eq!(
         to_expected_s16_f32.call(&mut store, (1, 1.0f32.to_bits()))?,
         (Err(1.0),)
     );
-    to_expected_s16_f32.post_return(&mut store)?;
     let ret = to_expected_s16_f32
         .call(&mut store, (1, CANON_32BIT_NAN | 1))?
         .0;
-    assert_eq!(ret.unwrap_err().to_bits(), CANON_32BIT_NAN);
-    to_expected_s16_f32.post_return(&mut store)?;
+    assert_eq!(ret.unwrap_err().to_bits(), CANON_32BIT_NAN | 1);
     assert!(to_expected_s16_f32.call(&mut store, (2, 0)).is_err());
 
     Ok(())
@@ -2056,7 +2951,7 @@ fn raw_slice_of_various_types() -> Result<()> {
 
     let list = instance
         .get_typed_func::<(), (WasmList<u8>,)>(&mut store, "list-u8")?
-        .call_and_post_return(&mut store, ())?
+        .call(&mut store, ())?
         .0;
     assert_eq!(
         list.as_le_slice(&store),
@@ -2067,7 +2962,7 @@ fn raw_slice_of_various_types() -> Result<()> {
     );
     let list = instance
         .get_typed_func::<(), (WasmList<i8>,)>(&mut store, "list-i8")?
-        .call_and_post_return(&mut store, ())?
+        .call(&mut store, ())?
         .0;
     assert_eq!(
         list.as_le_slice(&store),
@@ -2079,7 +2974,7 @@ fn raw_slice_of_various_types() -> Result<()> {
 
     let list = instance
         .get_typed_func::<(), (WasmList<u16>,)>(&mut store, "list-u16")?
-        .call_and_post_return(&mut store, ())?
+        .call(&mut store, ())?
         .0;
     assert_eq!(
         list.as_le_slice(&store),
@@ -2096,7 +2991,7 @@ fn raw_slice_of_various_types() -> Result<()> {
     );
     let list = instance
         .get_typed_func::<(), (WasmList<i16>,)>(&mut store, "list-i16")?
-        .call_and_post_return(&mut store, ())?
+        .call(&mut store, ())?
         .0;
     assert_eq!(
         list.as_le_slice(&store),
@@ -2113,7 +3008,7 @@ fn raw_slice_of_various_types() -> Result<()> {
     );
     let list = instance
         .get_typed_func::<(), (WasmList<u32>,)>(&mut store, "list-u32")?
-        .call_and_post_return(&mut store, ())?
+        .call(&mut store, ())?
         .0;
     assert_eq!(
         list.as_le_slice(&store),
@@ -2126,7 +3021,7 @@ fn raw_slice_of_various_types() -> Result<()> {
     );
     let list = instance
         .get_typed_func::<(), (WasmList<i32>,)>(&mut store, "list-i32")?
-        .call_and_post_return(&mut store, ())?
+        .call(&mut store, ())?
         .0;
     assert_eq!(
         list.as_le_slice(&store),
@@ -2139,7 +3034,7 @@ fn raw_slice_of_various_types() -> Result<()> {
     );
     let list = instance
         .get_typed_func::<(), (WasmList<u64>,)>(&mut store, "list-u64")?
-        .call_and_post_return(&mut store, ())?
+        .call(&mut store, ())?
         .0;
     assert_eq!(
         list.as_le_slice(&store),
@@ -2150,7 +3045,7 @@ fn raw_slice_of_various_types() -> Result<()> {
     );
     let list = instance
         .get_typed_func::<(), (WasmList<i64>,)>(&mut store, "list-i64")?
-        .call_and_post_return(&mut store, ())?
+        .call(&mut store, ())?
         .0;
     assert_eq!(
         list.as_le_slice(&store),
@@ -2314,24 +3209,39 @@ fn errors_that_poison_instance() -> Result<()> {
 
     let engine = super::engine();
     let component = Component::new(&engine, component)?;
-    let mut store = Store::new(&engine, ());
     let linker = Linker::new(&engine);
-    let instance = linker.instantiate(&mut store, &component)?;
-    let f1 = instance.get_typed_func::<(), ()>(&mut store, "f1")?;
-    let f2 = instance.get_typed_func::<(), ()>(&mut store, "f2")?;
-    assert_unreachable(f1.call(&mut store, ()));
-    assert_poisoned(f1.call(&mut store, ()));
-    assert_poisoned(f2.call(&mut store, ()));
 
-    let instance = linker.instantiate(&mut store, &component)?;
-    let f3 = instance.get_typed_func::<(&str,), ()>(&mut store, "f3")?;
-    assert_unreachable(f3.call(&mut store, ("x",)));
-    assert_poisoned(f3.call(&mut store, ("x",)));
+    {
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate(&mut store, &component)?;
+        let f1 = instance.get_typed_func::<(), ()>(&mut store, "f1")?;
+        let f2 = instance.get_typed_func::<(), ()>(&mut store, "f2")?;
+        assert_unreachable(f1.call(&mut store, ()));
+        assert_poisoned(f1.call(&mut store, ()));
+        assert_poisoned(f2.call(&mut store, ()));
+    }
 
-    let instance = linker.instantiate(&mut store, &component)?;
-    let f4 = instance.get_typed_func::<(), (WasmStr,)>(&mut store, "f4")?;
-    assert!(f4.call(&mut store, ()).is_err());
-    assert_poisoned(f4.call(&mut store, ()));
+    {
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate(&mut store, &component)?;
+        let f3 = instance.get_typed_func::<(&str,), ()>(&mut store, "f3")?;
+        assert_unreachable(f3.call(&mut store, ("x",)));
+        assert_poisoned(f3.call(&mut store, ("x",)));
+
+        // Since we actually poison the store, even an unrelated instance will
+        // be considered poisoned:
+        let instance = linker.instantiate(&mut store, &component)?;
+        let f3 = instance.get_typed_func::<(&str,), ()>(&mut store, "f3")?;
+        assert_poisoned(f3.call(&mut store, ("x",)));
+    }
+
+    {
+        let mut store = Store::new(&engine, ());
+        let instance = linker.instantiate(&mut store, &component)?;
+        let f4 = instance.get_typed_func::<(), (WasmStr,)>(&mut store, "f4")?;
+        assert!(f4.call(&mut store, ()).is_err());
+        assert_poisoned(f4.call(&mut store, ()));
+    }
 
     return Ok(());
 
@@ -2406,4 +3316,417 @@ fn run_export_with_internal_adapter() -> Result<()> {
     let run = instance.get_typed_func::<(), (u32,)>(&mut store, "run")?;
     assert_eq!(run.call(&mut store, ())?, (5,));
     Ok(())
+}
+
+enum RecurseKind {
+    AThenA,
+    AThenB,
+    AThenBThenA,
+}
+
+#[test]
+fn recurse() -> Result<()> {
+    test_recurse(RecurseKind::AThenB)
+}
+
+#[test]
+fn recurse_trap() -> Result<()> {
+    let error = test_recurse(RecurseKind::AThenA).unwrap_err();
+
+    assert_eq!(error.downcast::<Trap>()?, Trap::CannotEnterComponent);
+
+    Ok(())
+}
+
+#[test]
+fn recurse_more_trap() -> Result<()> {
+    let error = test_recurse(RecurseKind::AThenBThenA).unwrap_err();
+
+    assert_eq!(error.downcast::<Trap>()?, Trap::CannotEnterComponent);
+
+    Ok(())
+}
+
+fn test_recurse(kind: RecurseKind) -> Result<()> {
+    #[derive(Default)]
+    struct Ctx {
+        instances: Vec<Arc<Instance>>,
+    }
+
+    let component = r#"
+(component
+  (import "import" (func $import))
+  (core func $import (canon lower (func $import)))
+  (core module $m
+    (func $import (import "" "import"))
+    (func (export "export") call $import)
+  )
+  (core instance $m (instantiate $m (with "" (instance
+    (export "import" (func $import))
+  ))))
+  (func (export "export") (canon lift (core func $m "export")))
+)
+"#;
+    let engine = super::engine();
+    let component = Component::new(&engine, component)?;
+    let mut store = Store::new(&engine, Ctx::default());
+    let mut linker = Linker::<Ctx>::new(&engine);
+    linker.root().func_wrap("import", |mut store, (): ()| {
+        if let Some(instance) = store.data_mut().instances.pop() {
+            let run = instance.get_typed_func::<(), ()>(&mut store, "export")?;
+            run.call(&mut store, ())?;
+            store.data_mut().instances.push(instance);
+        }
+        Ok(())
+    })?;
+    let instance = Arc::new(linker.instantiate(&mut store, &component)?);
+    let instance = match kind {
+        RecurseKind::AThenA => {
+            store.data_mut().instances.push(instance.clone());
+            instance
+        }
+        RecurseKind::AThenB => {
+            let other = Arc::new(linker.instantiate(&mut store, &component)?);
+            store.data_mut().instances.push(other);
+            instance
+        }
+        RecurseKind::AThenBThenA => {
+            store.data_mut().instances.push(instance.clone());
+            let other = Arc::new(linker.instantiate(&mut store, &component)?);
+            store.data_mut().instances.push(other);
+            instance
+        }
+    };
+
+    let export = instance.get_typed_func::<(), ()>(&mut store, "export")?;
+    export.call(&mut store, ())?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_index_via_instantiation_sync() -> Result<()> {
+    thread_index_via_instantiation(ApiStyle::Sync).await
+}
+
+#[tokio::test]
+async fn thread_index_via_instantiation_async() -> Result<()> {
+    thread_index_via_instantiation(ApiStyle::Async).await
+}
+
+async fn thread_index_via_instantiation(style: ApiStyle) -> Result<()> {
+    let component = r#"
+(component
+  (core module $m
+    (import "" "thread.index" (func $thread-index (result i32)))
+    (func $start
+       (if (i32.eqz (call $thread-index)) (then unreachable))
+    )
+    (start $start)
+  )
+  (core func $thread-index (canon thread.index))
+  (core instance $m (instantiate $m (with "" (instance
+    (export "thread.index" (func $thread-index))
+  ))))
+)
+"#;
+    let engine = Engine::new(&style.config())?;
+    let component = Component::new(&engine, component)?;
+    let mut store = Store::new(&engine, ());
+    let linker = Linker::new(&engine);
+    style.instantiate(&mut store, &linker, &component).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_index_via_call_sync() -> Result<()> {
+    thread_index_via_call(ApiStyle::Sync).await
+}
+
+#[tokio::test]
+async fn thread_index_via_call_async() -> Result<()> {
+    thread_index_via_call(ApiStyle::Async).await
+}
+
+#[tokio::test]
+async fn thread_index_via_call_concurrent() -> Result<()> {
+    thread_index_via_call(ApiStyle::Concurrent).await
+}
+
+async fn thread_index_via_call(style: ApiStyle) -> Result<()> {
+    let component = r#"
+(component
+  (core module $m
+    (import "" "thread.index" (func $thread-index (result i32)))
+    (func (export "run")
+       (if (i32.eqz (call $thread-index)) (then unreachable))
+    )
+  )
+  (core func $thread-index (canon thread.index))
+  (core instance $m (instantiate $m (with "" (instance
+    (export "thread.index" (func $thread-index))
+  ))))
+  (func (export "run") (canon lift (core func $m "run")))
+)
+"#;
+    let engine = Engine::new(&style.config())?;
+    let component = Component::new(&engine, component)?;
+    let mut store = Store::new(&engine, ());
+    let linker = Linker::new(&engine);
+    let instance = style.instantiate(&mut store, &linker, &component).await?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    style.call(&mut store, run, ()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_index_via_post_return_sync() -> Result<()> {
+    thread_index_via_post_return(ApiStyle::Sync).await
+}
+
+#[tokio::test]
+async fn thread_index_via_post_return_async() -> Result<()> {
+    thread_index_via_post_return(ApiStyle::Async).await
+}
+
+#[tokio::test]
+async fn thread_index_via_post_return_concurrent() -> Result<()> {
+    thread_index_via_post_return(ApiStyle::Concurrent).await
+}
+
+async fn thread_index_via_post_return(style: ApiStyle) -> Result<()> {
+    let component = r#"
+(component
+  (core module $m
+    (import "" "thread.index" (func $thread-index (result i32)))
+    (global $index (mut i32) (i32.const 0))
+    (func (export "run")
+       (global.set $index (call $thread-index))
+       (if (i32.eqz (global.get $index)) (then unreachable))
+    )
+    (func (export "run-post-return")
+       (local $index i32)
+       (local.set $index (call $thread-index))
+       (if (i32.eqz (local.get $index)) (then unreachable))
+       (if (i32.ne (local.get $index) (global.get $index)) (then unreachable))
+    )
+  )
+  (core func $thread-index (canon thread.index))
+  (core instance $m (instantiate $m (with "" (instance
+    (export "thread.index" (func $thread-index))
+  ))))
+  (func (export "run") (canon lift (core func $m "run") (post-return (func $m "run-post-return"))))
+)
+"#;
+    let engine = Engine::new(&style.config())?;
+    let component = Component::new(&engine, component)?;
+    let mut store = Store::new(&engine, ());
+    let linker = Linker::new(&engine);
+    let instance = style.instantiate(&mut store, &linker, &component).await?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    style.call(&mut store, run, ()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_index_via_cabi_realloc_sync() -> Result<()> {
+    thread_index_via_cabi_realloc(ApiStyle::Sync).await
+}
+
+#[tokio::test]
+async fn thread_index_via_cabi_realloc_async() -> Result<()> {
+    thread_index_via_cabi_realloc(ApiStyle::Async).await
+}
+
+#[tokio::test]
+async fn thread_index_via_cabi_realloc_concurrent() -> Result<()> {
+    thread_index_via_cabi_realloc(ApiStyle::Concurrent).await
+}
+
+async fn thread_index_via_cabi_realloc(style: ApiStyle) -> Result<()> {
+    let component = r#"
+(component
+  (core module $m
+    (import "" "thread.index" (func $thread-index (result i32)))
+    (global $index (mut i32) (i32.const 0))
+    (memory (export "memory") 1)
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32)
+       (global.set $index (call $thread-index))
+       (if (i32.eqz (global.get $index)) (then unreachable))
+       (i32.const 100)
+    )
+    (func (export "run") (param i32 i32)
+       (local $index i32)
+       (local.set $index (call $thread-index))
+       (if (i32.eqz (local.get $index)) (then unreachable))
+       (if (i32.ne (local.get $index) (global.get $index)) (then unreachable))
+    )
+  )
+  (core func $thread-index (canon thread.index))
+  (core instance $m (instantiate $m (with "" (instance
+    (export "thread.index" (func $thread-index))
+  ))))
+  (func (export "run") (param "s" string) (canon lift
+    (core func $m "run")
+    (memory $m "memory")
+    (realloc (func $m "realloc"))
+  ))
+)
+"#;
+    let engine = Engine::new(&style.config())?;
+    let component = Component::new(&engine, component)?;
+    let mut store = Store::new(&engine, ());
+    let linker = Linker::new(&engine);
+    let instance = style.instantiate(&mut store, &linker, &component).await?;
+    let run = instance.get_typed_func::<(String,), ()>(&mut store, "run")?;
+    style.call(&mut store, run, ("hola".to_string(),)).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_index_via_resource_drop_sync() -> Result<()> {
+    thread_index_via_resource_drop(ApiStyle::Sync).await
+}
+
+#[tokio::test]
+async fn thread_index_via_resource_drop_async() -> Result<()> {
+    thread_index_via_resource_drop(ApiStyle::Async).await
+}
+
+#[tokio::test]
+async fn thread_index_via_resource_drop_concurrent() -> Result<()> {
+    thread_index_via_resource_drop(ApiStyle::Concurrent).await
+}
+
+async fn thread_index_via_resource_drop(style: ApiStyle) -> Result<()> {
+    let component = r#"
+(component
+  (core module $m
+    (import "" "thread.index" (func $thread-index (result i32)))
+    (func (export "dtor") (param i32)
+       (if (i32.eqz (call $thread-index)) (then unreachable))
+    )
+  )
+  (core func $thread-index (canon thread.index))
+  (core instance $m (instantiate $m (with "" (instance
+    (export "thread.index" (func $thread-index))
+  ))))
+  (type $r (resource (rep i32) (dtor (func $m "dtor"))))
+  (core func $new (canon resource.new $r))
+  (core module $m2
+    (import "" "new" (func $new (param i32) (result i32)))
+    (func (export "new") (result i32)
+       (call $new (i32.const 100))
+    )
+  )
+  (core instance $m2 (instantiate $m2 (with "" (instance
+    (export "new" (func $new))
+  ))))
+  (func $new (result (own $r)) (canon lift (core func $m2 "new")))
+  (component $c
+    (import "r" (type $r (sub resource)))
+    (import "new" (func $new (result (own $r))))
+    (export $r-export "r" (type $r))
+    (export "new" (func $new) (func (result (own $r-export))))
+  )
+  (instance $c (instantiate $c
+    (with "r" (type $r))
+    (with "new" (func $new))
+  ))
+  (export "i" (instance $c))
+)
+"#;
+    let engine = Engine::new(&style.config())?;
+    let component = Component::new(&engine, component)?;
+    let mut store = Store::new(&engine, ());
+    let linker = Linker::new(&engine);
+    let instance = style.instantiate(&mut store, &linker, &component).await?;
+    let instance_index = instance.get_export_index(&mut store, None, "i").unwrap();
+    let func_index = instance
+        .get_export_index(&mut store, Some(&instance_index), "new")
+        .unwrap();
+    let run = instance.get_typed_func::<(), (ResourceAny,)>(&mut store, &func_index)?;
+    let (resource,) = style.call(&mut store, run, ()).await?;
+    style.resource_drop(&mut store, resource).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_index_via_guest_call_sync() -> Result<()> {
+    thread_index_via_guest_call(ApiStyle::Sync).await
+}
+
+#[tokio::test]
+async fn thread_index_via_guest_call_async() -> Result<()> {
+    thread_index_via_guest_call(ApiStyle::Async).await
+}
+
+#[tokio::test]
+async fn thread_index_via_guest_call_concurrent() -> Result<()> {
+    thread_index_via_guest_call(ApiStyle::Concurrent).await
+}
+
+async fn thread_index_via_guest_call(style: ApiStyle) -> Result<()> {
+    let component = r#"
+(component
+  (component $c
+    (core module $m
+      (import "" "thread.index" (func $thread-index (result i32)))
+      (func (export "run") (result i32)
+         (call $thread-index)
+      )
+    )
+    (core func $thread-index (canon thread.index))
+    (core instance $m (instantiate $m (with "" (instance
+      (export "thread.index" (func $thread-index))
+    ))))
+    (func (export "run") (result u32) (canon lift (core func $m "run")))
+  )
+  (instance $c (instantiate $c))
+
+  (component $d
+    (import "c" (instance $c
+      (export "run" (func (result u32)))
+    ))
+    (core func $run (canon lower (func $c "run")))
+    (core module $m
+      (import "" "thread.index" (func $thread-index (result i32)))
+      (import "" "run" (func $run (result i32)))
+      (func (export "run")
+         (local $mine i32)
+         (local $theirs i32)
+         (local.set $mine (call $thread-index))
+         (if (i32.eqz (local.get $mine)) (then unreachable))
+         (local.set $theirs (call $run))
+         (if (i32.eqz (local.get $theirs)) (then unreachable))
+      )
+    )
+    (core func $thread-index (canon thread.index))
+    (core instance $m (instantiate $m (with "" (instance
+      (export "thread.index" (func $thread-index))
+      (export "run" (func $run))
+    ))))
+    (func (export "run") (canon lift (core func $m "run")))
+  )
+  (instance $d (instantiate $d (with "c" (instance $c))))
+  (func (export "run") (alias export $d "run"))
+)
+"#;
+    let engine = Engine::new(&style.config())?;
+    let component = Component::new(&engine, component)?;
+    let mut store = Store::new(&engine, ());
+    let linker = Linker::new(&engine);
+    let instance = style.instantiate(&mut store, &linker, &component).await?;
+    let run = instance.get_typed_func::<(), ()>(&mut store, "run")?;
+    style.call(&mut store, run, ()).await?;
+    Ok(())
+}
+
+fn with_new_instance<T>(
+    engine: &Engine,
+    component: &Component,
+    fun: impl Fn(&mut Store<()>, Instance) -> wasmtime::Result<T>,
+) -> wasmtime::Result<T> {
+    let mut store = Store::new(engine, ());
+    let instance = Linker::new(engine).instantiate(&mut store, component)?;
+    fun(&mut store, instance)
 }

@@ -2,21 +2,7 @@
 Example of instantiating of the WebAssembly module and invoking its exported
 function.
 
-You can compile and run this example on Linux with:
-
-   cargo build --release -p wasmtime-c-api
-   cc examples/hello.c \
-       -I crates/c-api/include \
-       target/release/libwasmtime.a \
-       -lpthread -ldl -lm \
-       -o hello
-   ./hello
-
-Note that on Windows and macOS the command will be similar, but you'll need
-to tweak the `-lpthread` and such annotations as well as the name of the
-`libwasmtime.a` file on Windows.
-
-You can also build using cmake:
+You can build using cmake:
 
 mkdir build && cd build && cmake .. && cmake --build . --target wasmtime-hello
 */
@@ -33,6 +19,12 @@ static void exit_with_error(const char *message, wasmtime_error_t *error,
 static wasm_trap_t *hello_callback(void *env, wasmtime_caller_t *caller,
                                    const wasmtime_val_t *args, size_t nargs,
                                    wasmtime_val_t *results, size_t nresults) {
+  (void)env;
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  (void)results;
+  (void)nresults;
   printf("Calling back...\n");
   printf("> Hello World!\n");
   return NULL;
@@ -91,6 +83,7 @@ int main() {
   wasm_functype_t *hello_ty = wasm_functype_new_0_0();
   wasmtime_func_t hello;
   wasmtime_func_new(context, hello_ty, hello_callback, NULL, NULL, &hello);
+  wasm_functype_delete(hello_ty);
 
   // With our callback function we can now instantiate the compiled module,
   // giving us an instance we can then execute exports from. Note that

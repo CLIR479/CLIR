@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, reason = "lots of macro-generated code")]
 
 macro_rules! gentest {
     ($id:ident $name:tt $path:tt) => {
@@ -9,16 +9,31 @@ macro_rules! gentest {
             mod async_ {
                 wasmtime::component::bindgen!({
                     path: $path,
-                    async: true,
+                    imports: { default: async },
+                    exports: { default: async },
+                });
+            }
+            mod concurrent {
+                wasmtime::component::bindgen!({
+                    path: $path,
+                    imports: { default: async | store },
+                    exports: { default: async | store },
                 });
             }
             mod tracing {
                 wasmtime::component::bindgen!({
                     path: $path,
-                    tracing: true,
+                    imports: { default: tracing | verbose_tracing },
+                    exports: { default: tracing | verbose_tracing },
                     ownership: Borrowing {
                         duplicate_if_necessary: true
                     }
+                });
+            }
+            mod imports_with_store {
+                wasmtime::component::bindgen!({
+                    path: $path,
+                    imports: { default: store },
                 });
             }
         }
@@ -28,7 +43,7 @@ macro_rules! gentest {
 component_macro_test_helpers::foreach!(gentest);
 
 mod with_key_and_resources {
-    use anyhow::Result;
+    use wasmtime::Result;
     use wasmtime::component::Resource;
 
     wasmtime::component::bindgen!({
@@ -55,10 +70,10 @@ mod with_key_and_resources {
         with: {
             "a": MyA,
             "b": MyA,
-            "foo/a": MyA,
-            "foo/b": MyA,
-            "demo:pkg/bar/a": MyA,
-            "demo:pkg/bar/b": MyA,
+            "foo.a": MyA,
+            "foo.b": MyA,
+            "demo:pkg/bar.a": MyA,
+            "demo:pkg/bar.b": MyA,
         },
     });
 
@@ -111,6 +126,7 @@ mod with_key_and_resources {
 
 mod trappable_errors_with_versioned_and_unversioned_packages {
     wasmtime::component::bindgen!({
+        world: "foo:foo/nope",
         inline: "
             package foo:foo@0.1.0;
 
@@ -128,11 +144,10 @@ mod trappable_errors_with_versioned_and_unversioned_packages {
         ",
         path: "tests/codegen/unversioned-foo.wit",
         trappable_error_type: {
-            "foo:foo/a@0.1.0/error" => MyX,
+            "foo:foo/a@0.1.0.error" => MyX,
         },
     });
 
-    #[allow(dead_code)]
     type MyX = u64;
 }
 
@@ -169,12 +184,11 @@ mod trappable_errors {
             }
         ",
         trappable_error_type: {
-            "demo:pkg/a/b" => MyX,
-            "demo:pkg/c/b" => MyX,
+            "demo:pkg/a.b" => MyX,
+            "demo:pkg/c.b" => MyX,
         },
     });
 
-    #[allow(dead_code)]
     type MyX = u32;
 }
 
@@ -353,7 +367,6 @@ mod trappable_imports {
                     import foo: func();
                 }
             ",
-            trappable_imports: false,
         });
         struct X;
 
@@ -371,7 +384,7 @@ mod trappable_imports {
                     import foo: func();
                 }
             ",
-            trappable_imports: true,
+            imports: { default: trappable },
         });
         struct X;
 
@@ -392,7 +405,7 @@ mod trappable_imports {
                     import bar: func();
                 }
             ",
-            trappable_imports: ["foo"],
+            imports: { "foo": trappable },
         });
         struct X;
 
@@ -433,8 +446,12 @@ mod trappable_imports {
 
                 }
             ",
-            trappable_imports: ["foo"],
-            with: { "foo:foo/a/r": R },
+            imports: {
+                "foo": trappable | exact,
+                "i.foo": trappable,
+                "foo:foo/a.foo": trappable,
+            },
+            with: { "foo:foo/a.r": R },
         });
 
         struct X;
@@ -493,12 +510,12 @@ mod trappable_imports {
 
                 }
             ",
-            trappable_imports: [
-                "[constructor]r",
-                "[method]r.foo",
-                "[static]r.bar",
-            ],
-            with: { "foo:foo/a/r": R },
+            imports: {
+                "foo:foo/a.[constructor]r": trappable,
+                "foo:foo/a.[method]r.foo": trappable,
+                "foo:foo/a.[static]r.bar": trappable,
+            },
+            with: { "foo:foo/a.r": R },
         });
 
         struct X;
@@ -524,7 +541,7 @@ mod trappable_imports {
 }
 
 mod custom_derives {
-    use std::collections::{hash_map::RandomState, HashSet};
+    use std::collections::{HashSet, hash_map::RandomState};
 
     wasmtime::component::bindgen!({
         inline: "
@@ -592,8 +609,8 @@ mod with_and_mixing_async {
                     import bar;
                 }
             ",
-            async: {
-                only_imports: ["bar"],
+            imports: {
+                "my:inline/bar.bar": async,
             },
         });
     }
@@ -663,7 +680,7 @@ mod trappable_error_type_and_versions {
                 world foo {}
             ",
             trappable_error_type: {
-                "my:inline/i/e" => super::MyError,
+                "my:inline/i.e" => super::MyError,
             },
         });
     }
@@ -677,7 +694,7 @@ mod trappable_error_type_and_versions {
                 world foo {}
             ",
             trappable_error_type: {
-                "my:inline/i/e" => super::MyError,
+                "my:inline/i.e" => super::MyError,
             },
         });
     }
@@ -691,8 +708,80 @@ mod trappable_error_type_and_versions {
                 world foo {}
             ",
             trappable_error_type: {
-                "my:inline/i@1.0.0/e" => super::MyError,
+                "my:inline/i@1.0.0.e" => super::MyError,
             },
+        });
+    }
+}
+
+mod paths {
+    mod multiple_paths {
+        wasmtime::component::bindgen!({
+            world: "test:paths/test",
+            inline: r#"
+            package test:paths;
+            world test {
+                import paths:path1/test;
+                export paths:path2/test;
+            }
+            "#,
+            path: ["tests/codegen/path1", "tests/codegen/path2"],
+        });
+    }
+}
+
+mod import_async_interface {
+    pub mod async_interface_implementation {
+        wasmtime::component::bindgen!({
+            world: "test:async-import/blah-impl",
+            inline: r#"
+            package test:async-import;
+
+            interface blah {
+                foo: func();
+            }
+
+            world blah-impl {
+                import blah;
+            }
+
+            world bar {
+                import blah;
+            }
+            "#,
+            imports: { default: async },
+        });
+
+        use test::async_import::blah::Host;
+        struct X;
+
+        impl Host for X {
+            async fn foo(&mut self) {}
+        }
+    }
+
+    mod require_t_send {
+        wasmtime::component::bindgen!({
+            world: "test:async-import/bar",
+            inline: r#"
+            package test:async-import;
+
+            interface blah {
+                foo: func();
+            }
+
+            world blah-impl {
+                import blah;
+            }
+
+            world bar {
+                import blah;
+            }
+            "#,
+            with: {
+                "test:async-import/blah": super::async_interface_implementation::test::async_import::blah,
+            },
+            imports: { default: async },
         });
     }
 }

@@ -1,14 +1,14 @@
 #![no_main]
 
-use libfuzzer_sys::arbitrary::{Result, Unstructured};
+use libfuzzer_sys::arbitrary::{self, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use wasmtime_fuzzing::generators::{Config, DiffValue, DiffValueType, SingleInstModule};
 use wasmtime_fuzzing::oracles::diff_wasmtime::WasmtimeInstance;
 use wasmtime_fuzzing::oracles::engine::{build_allowed_env_list, parse_env_list};
-use wasmtime_fuzzing::oracles::{differential, engine, log_wasm, DiffEqResult};
+use wasmtime_fuzzing::oracles::{DiffEqResult, differential, engine, log_wasm};
 
 // Upper limit on the number of invocations for each WebAssembly function
 // executed by this fuzz target.
@@ -22,8 +22,8 @@ static SETUP: Once = Once::new();
 // - ALLOWED_ENGINES=wasmi,spec cargo +nightly fuzz run ...
 // - ALLOWED_ENGINES=-v8 cargo +nightly fuzz run ...
 // - ALLOWED_MODULES=single-inst cargo +nightly fuzz run ...
-static mut ALLOWED_ENGINES: Vec<&str> = vec![];
-static mut ALLOWED_MODULES: Vec<&str> = vec![];
+static ALLOWED_ENGINES: Mutex<Vec<Option<&str>>> = Mutex::new(vec![]);
+static ALLOWED_MODULES: Mutex<Vec<Option<&str>>> = Mutex::new(vec![]);
 
 // Statistics about what's actually getting executed during fuzzing
 static STATS: RuntimeStats = RuntimeStats::new();
@@ -38,17 +38,15 @@ fuzz_target!(|data: &[u8]| {
         // environment variables.
         let allowed_engines = build_allowed_env_list(
             parse_env_list("ALLOWED_ENGINES"),
-            &["wasmtime", "wasmi", "spec", "v8", "winch"],
+            &["wasmtime", "wasmi", "spec", "v8", "winch", "pulley"],
         );
         let allowed_modules = build_allowed_env_list(
             parse_env_list("ALLOWED_MODULES"),
             &["wasm-smith", "single-inst"],
         );
 
-        unsafe {
-            ALLOWED_ENGINES = allowed_engines;
-            ALLOWED_MODULES = allowed_modules;
-        }
+        *ALLOWED_ENGINES.lock().unwrap() = allowed_engines;
+        *ALLOWED_MODULES.lock().unwrap() = allowed_modules;
     });
 
     // Errors in `run` have to do with not enough input in `data`, which we
@@ -57,6 +55,7 @@ fuzz_target!(|data: &[u8]| {
 });
 
 fn execute_one(data: &[u8]) -> Result<()> {
+    wasmtime_fuzzing::init_fuzzing();
     STATS.bump_attempts();
 
     let mut u = Unstructured::new(data);
@@ -68,36 +67,54 @@ fn execute_one(data: &[u8]) -> Result<()> {
     let mut config: Config = u.arbitrary()?;
     config.set_differential_config();
 
+    let allowed_engines = ALLOWED_ENGINES.lock().unwrap();
+    let allowed_modules = ALLOWED_MODULES.lock().unwrap();
+
     // Choose an engine that Wasmtime will be differentially executed against.
     // The chosen engine is then created, which might update `config`, and
     // returned as a trait object.
-    let lhs = u.choose(unsafe { &*std::ptr::addr_of!(ALLOWED_ENGINES) })?;
+    let lhs = match *u.choose(&allowed_engines)? {
+        Some(engine) => engine,
+        None => {
+            log::debug!("test case uses a runtime-disabled engine");
+            return Ok(());
+        }
+    };
+
+    log::trace!("Building LHS engine");
     let mut lhs = match engine::build(&mut u, lhs, &mut config)? {
         Some(engine) => engine,
         // The chosen engine does not have support compiled into the fuzzer,
         // discard this test case.
         None => return Ok(()),
     };
+    log::debug!("lhs engine: {}", lhs.name());
 
     // Using the now-legalized module configuration generate the Wasm module;
     // this is specified by either the ALLOWED_MODULES environment variable or a
     // random selection between wasm-smith and single-inst.
     let build_wasm_smith_module = |u: &mut Unstructured, config: &Config| -> Result<_> {
+        log::debug!("build wasm-smith with {config:?}");
         STATS.wasm_smith_modules.fetch_add(1, SeqCst);
         let module = config.generate(u, Some(1000))?;
         Ok(module.to_bytes())
     };
     let build_single_inst_module = |u: &mut Unstructured, config: &Config| -> Result<_> {
+        log::debug!("build single-inst with {config:?}");
         STATS.single_instruction_modules.fetch_add(1, SeqCst);
         let module = SingleInstModule::new(u, &config.module_config)?;
         Ok(module.to_bytes())
     };
-    if unsafe { ALLOWED_MODULES.is_empty() } {
+    if allowed_modules.is_empty() {
         panic!("unable to generate a module to fuzz against; check `ALLOWED_MODULES`")
     }
-    let wasm = match *u.choose(unsafe { ALLOWED_MODULES.as_slice() })? {
-        "wasm-smith" => build_wasm_smith_module(&mut u, &config)?,
-        "single-inst" => build_single_inst_module(&mut u, &config)?,
+    let wasm = match *u.choose(&allowed_modules)? {
+        Some("wasm-smith") => build_wasm_smith_module(&mut u, &config)?,
+        Some("single-inst") => build_single_inst_module(&mut u, &config)?,
+        None => {
+            log::debug!("test case uses a runtime-disabled module strategy");
+            return Ok(());
+        }
         _ => unreachable!(),
     };
 
@@ -108,6 +125,7 @@ fn execute_one(data: &[u8]) -> Result<()> {
     STATS.bump_engine(lhs.name());
 
     // Always use Wasmtime as the second engine to instantiate within.
+    log::debug!("Building RHS Wasmtime");
     let rhs_store = config.to_store();
     let rhs_module = wasmtime::Module::new(rhs_store.engine(), &wasm).unwrap();
     let rhs_instance = WasmtimeInstance::new(rhs_store, rhs_module);
@@ -126,14 +144,35 @@ fn execute_one(data: &[u8]) -> Result<()> {
     'outer: for (name, signature) in rhs_instance.exported_functions() {
         let mut invocations = 0;
         loop {
-            let arguments = signature
+            let arguments = match signature
                 .params()
-                .map(|t| DiffValue::arbitrary_of_type(&mut u, t.try_into().unwrap()))
-                .collect::<Result<Vec<_>>>()?;
-            let result_tys = signature
+                .map(|ty| {
+                    let ty = ty
+                        .try_into()
+                        .map_err(|_| arbitrary::Error::IncorrectFormat)?;
+                    DiffValue::arbitrary_of_type(&mut u, ty)
+                })
+                .collect::<Result<Vec<_>>>()
+            {
+                Ok(args) => args,
+                // This function signature isn't compatible with differential
+                // fuzzing yet, try the next exported function in the meantime.
+                Err(_) => continue 'outer,
+            };
+
+            let result_tys = match signature
                 .results()
-                .map(|t| DiffValueType::try_from(t).unwrap())
-                .collect::<Vec<_>>();
+                .map(|ty| {
+                    DiffValueType::try_from(ty).map_err(|_| arbitrary::Error::IncorrectFormat)
+                })
+                .collect::<Result<Vec<_>>>()
+            {
+                Ok(tys) => tys,
+                // This function signature isn't compatible with differential
+                // fuzzing yet, try the next exported function in the meantime.
+                Err(_) => continue 'outer,
+            };
+
             let ok = differential(
                 lhs_instance.as_mut(),
                 lhs.as_ref(),
@@ -186,6 +225,7 @@ struct RuntimeStats {
     spec: AtomicUsize,
     wasmtime: AtomicUsize,
     winch: AtomicUsize,
+    pulley: AtomicUsize,
 
     // Counters for which style of module is chosen
     wasm_smith_modules: AtomicUsize,
@@ -203,6 +243,7 @@ impl RuntimeStats {
             spec: AtomicUsize::new(0),
             wasmtime: AtomicUsize::new(0),
             winch: AtomicUsize::new(0),
+            pulley: AtomicUsize::new(0),
             wasm_smith_modules: AtomicUsize::new(0),
             single_instruction_modules: AtomicUsize::new(0),
         }
@@ -226,14 +267,18 @@ impl RuntimeStats {
         let wasmi = self.wasmi.load(SeqCst);
         let wasmtime = self.wasmtime.load(SeqCst);
         let winch = self.winch.load(SeqCst);
-        let total = v8 + spec + wasmi + wasmtime + winch;
+        let pulley = self.pulley.load(SeqCst);
+        let total = v8 + spec + wasmi + wasmtime + winch + pulley;
         println!(
-            "\twasmi: {:.02}%, spec: {:.02}%, wasmtime: {:.02}%, v8: {:.02}%, winch: {:.02}%",
+            "\twasmi: {:.02}%, spec: {:.02}%, wasmtime: {:.02}%, v8: {:.02}%, \
+             winch: {:.02}, \
+             pulley: {:.02}%",
             wasmi as f64 / total as f64 * 100f64,
             spec as f64 / total as f64 * 100f64,
             wasmtime as f64 / total as f64 * 100f64,
             v8 as f64 / total as f64 * 100f64,
             winch as f64 / total as f64 * 100f64,
+            pulley as f64 / total as f64 * 100f64,
         );
 
         let wasm_smith = self.wasm_smith_modules.load(SeqCst);
@@ -253,6 +298,7 @@ impl RuntimeStats {
             "spec" => self.spec.fetch_add(1, SeqCst),
             "v8" => self.v8.fetch_add(1, SeqCst),
             "winch" => self.winch.fetch_add(1, SeqCst),
+            "pulley" => self.pulley.fetch_add(1, SeqCst),
             _ => return,
         };
     }

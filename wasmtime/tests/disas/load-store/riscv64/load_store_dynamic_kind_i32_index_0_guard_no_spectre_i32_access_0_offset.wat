@@ -23,35 +23,35 @@
 ;;       sd      ra, 8(sp)
 ;;       sd      s0, 0(sp)
 ;;       mv      s0, sp
-;;       ld      a5, 0x68(a0)
+;;       ld      a5, 0x40(a0)
 ;;       slli    a2, a2, 0x20
 ;;       srli    a4, a2, 0x20
 ;;       addi    a5, a5, -4
-;;       bltu    a5, a4, 0x20
-;;       ld      a5, 0x60(a0)
+;;       bgeu    a5, a4, 8
+;;       .byte   0x00, 0x00, 0x00, 0x00
+;;       ld      a5, 0x38(a0)
 ;;       add     a4, a5, a4
 ;;       sw      a3, 0(a4)
 ;;       ld      ra, 8(sp)
 ;;       ld      s0, 0(sp)
 ;;       addi    sp, sp, 0x10
 ;;       ret
-;;       .byte   0x00, 0x00, 0x00, 0x00
 ;;
 ;; wasm[0]::function[1]:
 ;;       addi    sp, sp, -0x10
 ;;       sd      ra, 8(sp)
 ;;       sd      s0, 0(sp)
 ;;       mv      s0, sp
-;;       ld      a3, 0x68(a0)
+;;       ld      a3, 0x40(a0)
 ;;       slli    a2, a2, 0x20
 ;;       srli    a4, a2, 0x20
 ;;       addi    a3, a3, -4
-;;       bltu    a3, a4, 0x20
-;;       ld      a5, 0x60(a0)
+;;       bgeu    a3, a4, 8
+;;       .byte   0x00, 0x00, 0x00, 0x00
+;;       ld      a5, 0x38(a0)
 ;;       add     a4, a5, a4
 ;;       lw      a0, 0(a4)
 ;;       ld      ra, 8(sp)
 ;;       ld      s0, 0(sp)
 ;;       addi    sp, sp, 0x10
 ;;       ret
-;;       .byte   0x00, 0x00, 0x00, 0x00

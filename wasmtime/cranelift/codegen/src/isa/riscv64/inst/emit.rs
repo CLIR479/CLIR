@@ -8,6 +8,7 @@ use crate::isa::riscv64::lower::isle::generated_code::{
 use cranelift_control::ControlPlane;
 
 pub struct EmitInfo {
+    #[expect(dead_code, reason = "may want to be used in the future")]
     shared_flag: settings::Flags,
     isa_flags: super::super::riscv_settings::Flags,
 }
@@ -25,14 +26,14 @@ impl EmitInfo {
 }
 
 pub(crate) fn reg_to_gpr_num(m: Reg) -> u32 {
-    u32::try_from(m.to_real_reg().unwrap().hw_enc() & 31).unwrap()
+    u32::from(m.to_real_reg().unwrap().hw_enc() & 31)
 }
 
 pub(crate) fn reg_to_compressed_gpr_num(m: Reg) -> u32 {
     let real_reg = m.to_real_reg().unwrap().hw_enc();
     debug_assert!(real_reg >= 8 && real_reg < 16);
     let compressed_reg = real_reg - 8;
-    u32::try_from(compressed_reg).unwrap()
+    u32::from(compressed_reg)
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -64,6 +65,10 @@ impl EmitState {
     fn take_stack_map(&mut self) -> Option<ir::UserStackMap> {
         self.user_stack_map.take()
     }
+
+    fn clobber_vstate(&mut self) {
+        self.vstate = EmitVState::Unknown;
+    }
 }
 
 impl MachInstEmitState<Inst> for EmitState {
@@ -93,7 +98,7 @@ impl MachInstEmitState<Inst> for EmitState {
 
     fn on_new_block(&mut self) {
         // Reset the vector state.
-        self.vstate = EmitVState::Unknown;
+        self.clobber_vstate();
     }
 
     fn frame_layout(&self) -> &FrameLayout {
@@ -114,7 +119,7 @@ impl Inst {
             I32 | I16 => {
                 insts.push(Inst::load_imm12(rd, Imm12::from_i16(-1)));
                 insts.push(Inst::Extend {
-                    rd: rd,
+                    rd,
                     rn: rd.to_reg(),
                     signed: false,
                     from_bits: ty.bits() as u8,
@@ -166,7 +171,9 @@ impl Inst {
             | Inst::ReturnCallInd { .. }
             | Inst::Jal { .. }
             | Inst::CondBr { .. }
-            | Inst::LoadExtName { .. }
+            | Inst::LoadExtNameGot { .. }
+            | Inst::LoadExtNameNear { .. }
+            | Inst::LoadExtNameFar { .. }
             | Inst::ElfTlsGetAddr { .. }
             | Inst::LoadAddr { .. }
             | Inst::Mov { .. }
@@ -187,6 +194,8 @@ impl Inst {
             | Inst::TrapIf { .. }
             | Inst::Unwind { .. }
             | Inst::DummyUse { .. }
+            | Inst::LabelAddress { .. }
+            | Inst::SequencePoint { .. }
             | Inst::Popcnt { .. }
             | Inst::Cltz { .. }
             | Inst::Brev8 { .. }
@@ -210,6 +219,7 @@ impl Inst {
             // some cases.
             Inst::VecLoad { vstate, .. }
             | Inst::VecStore { vstate, .. } => Some(vstate),
+            Inst::EmitIsland { .. } => None,
         }
     }
 }
@@ -245,12 +255,19 @@ impl MachInstEmit for Inst {
             self.emit_uncompressed(sink, emit_info, state, &mut start_off);
         }
 
-        // We exclude br_table and return call from these checks since they emit
-        // their own islands, and thus are allowed to exceed the worst case size.
-        if !matches!(
-            self,
-            Inst::BrTable { .. } | Inst::ReturnCall { .. } | Inst::ReturnCallInd { .. }
-        ) {
+        // We exclude br_table, call, return_call and try_call from
+        // these checks since they emit their own islands, and thus
+        // are allowed to exceed the worst case size.
+        let emits_own_island = match self {
+            Inst::BrTable { .. }
+            | Inst::ReturnCall { .. }
+            | Inst::ReturnCallInd { .. }
+            | Inst::Call { .. }
+            | Inst::CallInd { .. }
+            | Inst::EmitIsland { .. } => true,
+            _ => false,
+        };
+        if !emits_own_island {
             let end_off = sink.cur_offset();
             assert!(
                 (end_off - start_off) <= Inst::worst_case_size(),
@@ -387,6 +404,7 @@ impl Inst {
                 if rd.to_reg() == zero_reg() && base != zero_reg() && offset.as_i16() == 0 =>
             {
                 sink.put2(encode_cr2_type(CrOp::CJr, base));
+                state.clobber_vstate();
             }
 
             // c.jalr
@@ -394,6 +412,7 @@ impl Inst {
                 if rd.to_reg() == link_reg() && base != zero_reg() && offset.as_i16() == 0 =>
             {
                 sink.put2(encode_cr2_type(CrOp::CJalr, base));
+                state.clobber_vstate();
             }
 
             // c.ebreak
@@ -868,8 +887,8 @@ impl Inst {
                 let x: u32 = 0b0110111 | reg_to_gpr_num(rd.to_reg()) << 7 | (imm.bits() << 12);
                 sink.put4(x);
             }
-            &Inst::Fli { rd, ty, imm } => {
-                sink.put4(encode_fli(ty, imm, rd));
+            &Inst::Fli { rd, width, imm } => {
+                sink.put4(encode_fli(width, imm, rd));
             }
             &Inst::LoadInlineConst { rd, ty, imm } => {
                 let data = &imm.to_le_bytes()[..ty.bytes() as usize];
@@ -903,7 +922,7 @@ impl Inst {
                 rs,
             } => {
                 if alu_op.is_convert_to_int() {
-                    sink.add_trap(TrapCode::BadConversionToInteger);
+                    sink.add_trap(TrapCode::BAD_CONVERSION_TO_INTEGER);
                 }
                 sink.put4(encode_fp_rr(alu_op, width, frm, rd, rs));
             }
@@ -976,6 +995,43 @@ impl Inst {
             }
             &Inst::Load {
                 rd,
+                op: LoadOP::Flh,
+                from,
+                flags,
+            } if !emit_info.isa_flags.has_zfhmin() => {
+                // flh unavailable, use an integer load instead
+                Inst::Load {
+                    rd: writable_spilltmp_reg(),
+                    op: LoadOP::Lh,
+                    flags,
+                    from,
+                }
+                .emit(sink, emit_info, state);
+                // NaN-box the `f16` before loading it into the floating-point
+                // register with a 32-bit `fmv`.
+                Inst::Lui {
+                    rd: writable_spilltmp_reg2(),
+                    imm: Imm20::from_i32((0xffff_0000_u32 as i32) >> 12),
+                }
+                .emit(sink, emit_info, state);
+                Inst::AluRRR {
+                    alu_op: AluOPRRR::Or,
+                    rd: writable_spilltmp_reg(),
+                    rs1: spilltmp_reg(),
+                    rs2: spilltmp_reg2(),
+                }
+                .emit(sink, emit_info, state);
+                Inst::FpuRR {
+                    alu_op: FpuOPRR::FmvFmtX,
+                    width: FpuOPWidth::S,
+                    frm: FRM::RNE,
+                    rd,
+                    rs: spilltmp_reg(),
+                }
+                .emit(sink, emit_info, state);
+            }
+            &Inst::Load {
+                rd,
                 op,
                 from,
                 flags,
@@ -1034,6 +1090,29 @@ impl Inst {
                 }
 
                 sink.put4(encode_i_type(op.op_code(), rd, op.funct3(), addr, imm12));
+            }
+            &Inst::Store {
+                op: StoreOP::Fsh,
+                src,
+                flags,
+                to,
+            } if !emit_info.isa_flags.has_zfhmin() => {
+                // fsh unavailable, use an integer store instead
+                Inst::FpuRR {
+                    alu_op: FpuOPRR::FmvXFmt,
+                    width: FpuOPWidth::S,
+                    frm: FRM::RNE,
+                    rd: writable_spilltmp_reg(),
+                    rs: src,
+                }
+                .emit(sink, emit_info, state);
+                Inst::Store {
+                    to,
+                    op: StoreOP::Sh,
+                    flags,
+                    src: spilltmp_reg(),
+                }
+                .emit(sink, emit_info, state);
             }
             &Inst::Store { op, src, flags, to } => {
                 let base = to.get_base_register();
@@ -1115,9 +1194,9 @@ impl Inst {
             }
 
             &Inst::Call { ref info } => {
-                sink.add_call_site();
                 sink.add_reloc(Reloc::RiscvCallPlt, &info.dest, 0);
 
+                let start = sink.cur_offset();
                 Inst::construct_auipc_and_jalr(Some(writable_link_reg()), writable_link_reg(), 0)
                     .into_iter()
                     .for_each(|i| i.emit_uncompressed(sink, emit_info, state, start_off));
@@ -1127,17 +1206,48 @@ impl Inst {
                     sink.push_user_stack_map(state, offset, s);
                 }
 
+                if let Some(try_call) = info.try_call_info.as_ref() {
+                    sink.add_try_call_site(
+                        Some(state.frame_layout.sp_to_fp()),
+                        try_call.exception_handlers(&state.frame_layout),
+                    );
+                } else {
+                    sink.add_call_site();
+                }
+
                 let callee_pop_size = i32::try_from(info.callee_pop_size).unwrap();
                 if callee_pop_size > 0 {
                     for inst in Riscv64MachineDeps::gen_sp_reg_adjust(-callee_pop_size) {
                         inst.emit(sink, emit_info, state);
                     }
                 }
+
+                if info.patchable {
+                    sink.add_patchable_call_site(sink.cur_offset() - start);
+                } else {
+                    // Load any stack-carried return values.
+                    info.emit_retval_loads::<Riscv64MachineDeps, _, _>(
+                        state.frame_layout().stackslots_size,
+                        |inst| inst.emit(sink, emit_info, state),
+                        |needed_space| Some(Inst::EmitIsland { needed_space }),
+                    );
+                }
+
+                // If this is a try-call, jump to the continuation
+                // (normal-return) block.
+                if let Some(try_call) = info.try_call_info.as_ref() {
+                    let jmp = Inst::Jal {
+                        label: try_call.continuation,
+                    };
+                    jmp.emit(sink, emit_info, state);
+                }
+
+                *start_off = sink.cur_offset();
             }
             &Inst::CallInd { ref info } => {
                 Inst::Jalr {
                     rd: writable_link_reg(),
-                    base: info.rn,
+                    base: info.dest,
                     offset: Imm12::ZERO,
                 }
                 .emit(sink, emit_info, state);
@@ -1147,7 +1257,14 @@ impl Inst {
                     sink.push_user_stack_map(state, offset, s);
                 }
 
-                sink.add_call_site();
+                if let Some(try_call) = info.try_call_info.as_ref() {
+                    sink.add_try_call_site(
+                        Some(state.frame_layout.sp_to_fp()),
+                        try_call.exception_handlers(&state.frame_layout),
+                    );
+                } else {
+                    sink.add_call_site();
+                }
 
                 let callee_pop_size = i32::try_from(info.callee_pop_size).unwrap();
                 if callee_pop_size > 0 {
@@ -1155,27 +1272,42 @@ impl Inst {
                         inst.emit(sink, emit_info, state);
                     }
                 }
+
+                // Load any stack-carried return values.
+                info.emit_retval_loads::<Riscv64MachineDeps, _, _>(
+                    state.frame_layout().stackslots_size,
+                    |inst| inst.emit(sink, emit_info, state),
+                    |needed_space| Some(Inst::EmitIsland { needed_space }),
+                );
+
+                // If this is a try-call, jump to the continuation
+                // (normal-return) block.
+                if let Some(try_call) = info.try_call_info.as_ref() {
+                    let jmp = Inst::Jal {
+                        label: try_call.continuation,
+                    };
+                    jmp.emit(sink, emit_info, state);
+                }
+
+                *start_off = sink.cur_offset();
             }
 
-            &Inst::ReturnCall {
-                ref callee,
-                ref info,
-            } => {
+            &Inst::ReturnCall { ref info } => {
                 emit_return_call_common_sequence(sink, emit_info, state, info);
 
                 sink.add_call_site();
-                sink.add_reloc(Reloc::RiscvCallPlt, &**callee, 0);
+                sink.add_reloc(Reloc::RiscvCallPlt, &info.dest, 0);
                 Inst::construct_auipc_and_jalr(None, writable_spilltmp_reg(), 0)
                     .into_iter()
                     .for_each(|i| i.emit_uncompressed(sink, emit_info, state, start_off));
             }
 
-            &Inst::ReturnCallInd { callee, ref info } => {
+            &Inst::ReturnCallInd { ref info } => {
                 emit_return_call_common_sequence(sink, emit_info, state, &info);
 
                 Inst::Jalr {
                     rd: writable_zero_reg(),
-                    base: callee,
+                    base: info.dest,
                     offset: Imm12::ZERO,
                 }
                 .emit(sink, emit_info, state);
@@ -1184,6 +1316,7 @@ impl Inst {
                 sink.use_label_at_offset(*start_off, label, LabelUse::Jal20);
                 sink.add_uncond_branch(*start_off, *start_off + 4, label);
                 sink.put4(0b1101111);
+                state.clobber_vstate();
             }
             &Inst::CondBr {
                 taken,
@@ -1218,7 +1351,7 @@ impl Inst {
                 match rm.class() {
                     RegClass::Int => Inst::AluRRImm12 {
                         alu_op: AluOPRRI::Addi,
-                        rd: rd,
+                        rd,
                         rs: rm,
                         imm12: Imm12::ZERO,
                     },
@@ -1226,7 +1359,7 @@ impl Inst {
                         alu_op: FpuOPRRR::Fsgnj,
                         width: FpuOPWidth::try_from(ty).unwrap(),
                         frm: FRM::RNE,
-                        rd: rd,
+                        rd,
                         rs1: rm,
                         rs2: rm,
                     },
@@ -1573,6 +1706,7 @@ impl Inst {
             }
             &Inst::Jalr { rd, base, offset } => {
                 sink.put4(enc_jalr(rd, base, offset));
+                state.clobber_vstate();
             }
             &Inst::EBreak => {
                 sink.put4(0x00100073);
@@ -1875,76 +2009,128 @@ impl Inst {
                 .emit(sink, emit_info, state);
             }
 
-            &Inst::LoadExtName {
+            &Inst::LoadExtNameGot { rd, ref name } => {
+                // Load a PC-relative address into a register.
+                // RISC-V does this slightly differently from other arches. We emit a relocation
+                // with a label, instead of the symbol itself.
+                //
+                // See: https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc#pc-relative-symbol-addresses
+                //
+                // Emit the following code:
+                // label:
+                //   auipc rd, 0              # R_RISCV_GOT_HI20 (symbol_name)
+                //   ld    rd, rd, 0          # R_RISCV_PCREL_LO12_I (label)
+
+                // Create the label that is going to be published to the final binary object.
+                let auipc_label = sink.get_label();
+                sink.bind_label(auipc_label, &mut state.ctrl_plane);
+
+                // Get the current PC.
+                sink.add_reloc(Reloc::RiscvGotHi20, &**name, 0);
+                Inst::Auipc {
+                    rd,
+                    imm: Imm20::from_i32(0),
+                }
+                .emit_uncompressed(sink, emit_info, state, start_off);
+
+                // The `ld` here, points to the `auipc` label instead of directly to the symbol.
+                sink.add_reloc(Reloc::RiscvPCRelLo12I, &auipc_label, 0);
+                Inst::Load {
+                    rd,
+                    op: LoadOP::Ld,
+                    flags: MemFlags::trusted(),
+                    from: AMode::RegOffset(rd.to_reg(), 0),
+                }
+                .emit_uncompressed(sink, emit_info, state, start_off);
+            }
+
+            &Inst::LoadExtNameFar {
                 rd,
                 ref name,
                 offset,
             } => {
-                if emit_info.shared_flag.is_pic() {
-                    // Load a PC-relative address into a register.
-                    // RISC-V does this slightly differently from other arches. We emit a relocation
-                    // with a label, instead of the symbol itself.
-                    //
-                    // See: https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc#pc-relative-symbol-addresses
-                    //
-                    // Emit the following code:
-                    // label:
-                    //   auipc rd, 0              # R_RISCV_GOT_HI20 (symbol_name)
-                    //   ld    rd, rd, 0          # R_RISCV_PCREL_LO12_I (label)
+                // In the non PIC sequence we relocate the absolute address into
+                // a preallocated space, load it into a register and jump over
+                // it.
+                //
+                // Emit the following code:
+                //   ld rd, label_data
+                //   j label_end
+                // label_data:
+                //   <8 byte space>           # ABS8
+                // label_end:
 
-                    // Create the label that is going to be published to the final binary object.
-                    let auipc_label = sink.get_label();
-                    sink.bind_label(auipc_label, &mut state.ctrl_plane);
+                let label_data = sink.get_label();
+                let label_end = sink.get_label();
 
-                    // Get the current PC.
-                    sink.add_reloc(Reloc::RiscvGotHi20, &**name, 0);
-                    Inst::Auipc {
-                        rd: rd,
-                        imm: Imm20::from_i32(0),
-                    }
-                    .emit_uncompressed(sink, emit_info, state, start_off);
-
-                    // The `ld` here, points to the `auipc` label instead of directly to the symbol.
-                    sink.add_reloc(Reloc::RiscvPCRelLo12I, &auipc_label, 0);
-                    Inst::Load {
-                        rd,
-                        op: LoadOP::Ld,
-                        flags: MemFlags::trusted(),
-                        from: AMode::RegOffset(rd.to_reg(), 0),
-                    }
-                    .emit_uncompressed(sink, emit_info, state, start_off);
-                } else {
-                    // In the non PIC sequence we relocate the absolute address into
-                    // a prealocatted space, load it into a register and jump over it.
-                    //
-                    // Emit the following code:
-                    //   ld rd, label_data
-                    //   j label_end
-                    // label_data:
-                    //   <8 byte space>           # ABS8
-                    // label_end:
-
-                    let label_data = sink.get_label();
-                    let label_end = sink.get_label();
-
-                    // Load the value from a label
-                    Inst::Load {
-                        rd,
-                        op: LoadOP::Ld,
-                        flags: MemFlags::trusted(),
-                        from: AMode::Label(label_data),
-                    }
-                    .emit(sink, emit_info, state);
-
-                    // Jump over the data
-                    Inst::gen_jump(label_end).emit(sink, emit_info, state);
-
-                    sink.bind_label(label_data, &mut state.ctrl_plane);
-                    sink.add_reloc(Reloc::Abs8, name.as_ref(), offset);
-                    sink.put8(0);
-
-                    sink.bind_label(label_end, &mut state.ctrl_plane);
+                // Load the value from a label
+                Inst::Load {
+                    rd,
+                    op: LoadOP::Ld,
+                    flags: MemFlags::trusted(),
+                    from: AMode::Label(label_data),
                 }
+                .emit(sink, emit_info, state);
+
+                // Jump over the data
+                Inst::gen_jump(label_end).emit(sink, emit_info, state);
+
+                sink.bind_label(label_data, &mut state.ctrl_plane);
+                sink.add_reloc(Reloc::Abs8, name.as_ref(), offset);
+                sink.put8(0);
+
+                sink.bind_label(label_end, &mut state.ctrl_plane);
+            }
+
+            &Inst::LoadExtNameNear {
+                rd,
+                ref name,
+                offset,
+            } => {
+                // Emit the following code:
+                // label:
+                //   auipc rd, 0              # R_RISCV_PCREL_HI20 (symbol_name)
+                //   ld    rd, rd, 0          # R_RISCV_PCREL_LO12_I (label)
+
+                let auipc_label = sink.get_label();
+                sink.bind_label(auipc_label, &mut state.ctrl_plane);
+
+                // Get the current PC.
+                sink.add_reloc(Reloc::RiscvPCRelHi20, &**name, offset);
+                Inst::Auipc {
+                    rd,
+                    imm: Imm20::from_i32(0),
+                }
+                .emit_uncompressed(sink, emit_info, state, start_off);
+
+                sink.add_reloc(Reloc::RiscvPCRelLo12I, &auipc_label, 0);
+                Inst::AluRRImm12 {
+                    alu_op: AluOPRRI::Addi,
+                    rd,
+                    rs: rd.to_reg(),
+                    imm12: Imm12::ZERO,
+                }
+                .emit_uncompressed(sink, emit_info, state, start_off);
+            }
+
+            &Inst::LabelAddress { dst, label } => {
+                let offset = sink.cur_offset();
+                Inst::Auipc {
+                    rd: dst,
+                    imm: Imm20::from_i32(0),
+                }
+                .emit_uncompressed(sink, emit_info, state, start_off);
+                sink.use_label_at_offset(offset, label, LabelUse::PCRelHi20);
+
+                let offset = sink.cur_offset();
+                Inst::AluRRImm12 {
+                    alu_op: AluOPRRI::Addi,
+                    rd: dst,
+                    rs: dst.to_reg(),
+                    imm12: Imm12::ZERO,
+                }
+                .emit_uncompressed(sink, emit_info, state, start_off);
+                sink.use_label_at_offset(offset, label, LabelUse::PCRelLo12I);
             }
 
             &Inst::ElfTlsGetAddr { rd, ref name } => {
@@ -1970,7 +2156,7 @@ impl Inst {
                 // Get the current PC.
                 sink.add_reloc(Reloc::RiscvTlsGdHi20, &**name, 0);
                 Inst::Auipc {
-                    rd: rd,
+                    rd,
                     imm: Imm20::from_i32(0),
                 }
                 .emit_uncompressed(sink, emit_info, state, start_off);
@@ -1979,22 +2165,17 @@ impl Inst {
                 sink.add_reloc(Reloc::RiscvPCRelLo12I, &auipc_label, 0);
                 Inst::AluRRImm12 {
                     alu_op: AluOPRRI::Addi,
-                    rd: rd,
+                    rd,
                     rs: rd.to_reg(),
                     imm12: Imm12::from_i16(0),
                 }
                 .emit_uncompressed(sink, emit_info, state, start_off);
 
                 Inst::Call {
-                    info: Box::new(CallInfo {
-                        dest: ExternalName::LibCall(LibCall::ElfTlsGetAddr),
-                        uses: smallvec![],
-                        defs: smallvec![],
-                        caller_callconv: CallConv::SystemV,
-                        callee_callconv: CallConv::SystemV,
-                        callee_pop_size: 0,
-                        clobbers: PRegSet::empty(),
-                    }),
+                    info: Box::new(CallInfo::empty(
+                        ExternalName::LibCall(LibCall::ElfTlsGetAddr),
+                        CallConv::SystemV,
+                    )),
                 }
                 .emit_uncompressed(sink, emit_info, state, start_off);
             }
@@ -2032,7 +2213,7 @@ impl Inst {
                 .emit(sink, emit_info, state);
                 // load.
                 Inst::Load {
-                    rd: rd,
+                    rd,
                     op: LoadOP::from_type(ty),
                     flags: MemFlags::new(),
                     from: AMode::RegOffset(p, 0),
@@ -2294,7 +2475,7 @@ impl Inst {
                     .emit(sink, emit_info, state);
                     Inst::AluRRR {
                         alu_op: AluOPRRR::Or,
-                        rd: rd,
+                        rd,
                         rs1: rd.to_reg(),
                         rs2: tmp2.to_reg(),
                     }
@@ -2585,15 +2766,28 @@ impl Inst {
                     to.nf(),
                 ));
             }
-        };
+
+            Inst::EmitIsland { needed_space } => {
+                if sink.island_needed(*needed_space) {
+                    let jump_around_label = sink.get_label();
+                    Inst::gen_jump(jump_around_label).emit(sink, emit_info, state);
+                    sink.emit_island(needed_space + 4, &mut state.ctrl_plane);
+                    sink.bind_label(jump_around_label, &mut state.ctrl_plane);
+                }
+            }
+
+            Inst::SequencePoint { .. } => {
+                // Nothing.
+            }
+        }
     }
 }
 
-fn emit_return_call_common_sequence(
+fn emit_return_call_common_sequence<T>(
     sink: &mut MachBuffer<Inst>,
     emit_info: &EmitInfo,
     state: &mut EmitState,
-    info: &ReturnCallInfo,
+    info: &ReturnCallInfo<T>,
 ) {
     // The return call sequence can potentially emit a lot of instructions (up to 634 bytes!)
     // So lets emit an island here if we need it.
@@ -2623,11 +2817,11 @@ fn emit_return_call_common_sequence(
 }
 
 /// This should not be called directly, Instead prefer to call [emit_return_call_common_sequence].
-fn return_call_emit_impl(
+fn return_call_emit_impl<T>(
     sink: &mut MachBuffer<Inst>,
     emit_info: &EmitInfo,
     state: &mut EmitState,
-    info: &ReturnCallInfo,
+    info: &ReturnCallInfo<T>,
 ) {
     let sp_to_fp_offset = {
         let frame_layout = state.frame_layout();

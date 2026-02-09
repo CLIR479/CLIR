@@ -142,7 +142,7 @@ pub fn select_random_value<T>(vec: &Vec<T>, head_ratio: f32) -> Option<&T> {
 
     let mut rng = rand::thread_rng();
 
-    let select_head = rng.gen_range(0.0..1.0) < head_ratio;
+    let select_head = rng.gen_range(0.0..1.0) > head_ratio;
 
     if select_head {
         let head_count = (vec.len() as f32 * head_ratio).round() as usize;
@@ -165,7 +165,7 @@ pub fn get_random_cond_value(
         get_dominator_values_with_type(dominator_blocks, block_dominator_values, ir::types::I32);
     random_values_i32.sort_by(|a, b| b.as_u32().cmp(&a.as_u32()));
 
-    let random_value = select_random_value(&random_values_i32, 0.4).unwrap();
+    let random_value = select_random_value(&random_values_i32, 0.1).unwrap();
     return *random_value;
 }
 
@@ -248,9 +248,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let mut mem_flag_little = ir::MemFlags::new();
                     mem_flag_little.set_endianness(Endianness::Little);
                     let new_value =
@@ -306,7 +306,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let operand_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+            let operand_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
             let new_value =
                 cur.ins()
@@ -338,9 +338,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().swizzle(first_value, second_value);
                     return Some((
@@ -353,10 +353,11 @@ pub fn populate_block_instructions(
                 }
             }
         }
-
-        #[cfg(feature = "x86-64")]
         Opcode::X86Pshufb => {
             let operand_types = mode.operand_types.as_ref().unwrap();
+            if operand_types.is_empty() {
+                return None;
+            }
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
 
             let mut random_values_with_same_type = get_dominator_values_with_type(
@@ -376,9 +377,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().x86_pshufb(first_value, second_value);
                     return Some((
@@ -413,9 +414,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().smin(first_value, second_value);
                     return Some((
@@ -449,9 +450,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().umin(first_value, second_value);
                     return Some((
@@ -485,9 +486,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().smax(first_value, second_value);
                     return Some((
@@ -521,9 +522,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().umax(first_value, second_value);
                     return Some((
@@ -558,9 +559,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().avg_round(first_value, second_value);
                     return Some((
@@ -595,9 +596,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().uadd_sat(first_value, second_value);
                     return Some((
@@ -632,9 +633,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().sadd_sat(first_value, second_value);
                     return Some((
@@ -669,9 +670,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().usub_sat(first_value, second_value);
                     return Some((
@@ -706,9 +707,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().ssub_sat(first_value, second_value);
                     return Some((
@@ -743,9 +744,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().iadd(first_value, second_value);
                     return Some((
@@ -779,9 +780,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().isub(first_value, second_value);
                     return Some((
@@ -815,9 +816,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().imul(first_value, second_value);
                     return Some((
@@ -852,9 +853,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().umulhi(first_value, second_value);
                     return Some((
@@ -889,9 +890,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().smulhi(first_value, second_value);
                     return Some((
@@ -926,9 +927,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().sqmul_round_sat(first_value, second_value);
                     return Some((
@@ -941,10 +942,11 @@ pub fn populate_block_instructions(
                 }
             }
         }
-
-        #[cfg(feature = "x86-64")]
         Opcode::X86Pmaddubsw => {
             let operand_types = mode.operand_types.as_ref().unwrap();
+            if operand_types.is_empty() {
+                return None;
+            }
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
 
             let mut random_values_with_same_type = get_dominator_values_with_type(
@@ -964,9 +966,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().x86_pmaddubsw(first_value, second_value);
                     return Some((
@@ -1001,9 +1003,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().udiv(first_value, second_value);
                     return Some((
@@ -1038,9 +1040,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().sdiv(first_value, second_value);
                     return Some((
@@ -1075,9 +1077,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().urem(first_value, second_value);
                     return Some((
@@ -1112,9 +1114,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().srem(first_value, second_value);
                     return Some((
@@ -1127,8 +1129,6 @@ pub fn populate_block_instructions(
                 }
             }
         }
-
-        #[cfg(not(any(feature = "riscv", feature = "s390x")))]
         Opcode::UaddOverflow => {
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -1150,9 +1150,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let (new_value, _) = cur.ins().uadd_overflow(first_value, second_value);
                     return Some((
@@ -1165,8 +1165,6 @@ pub fn populate_block_instructions(
                 }
             }
         }
-
-        #[cfg(not(any(feature = "riscv", feature = "s390x")))]
         Opcode::SaddOverflow => {
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -1188,9 +1186,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let (new_value, _) = cur.ins().sadd_overflow(first_value, second_value);
                     return Some((
@@ -1203,8 +1201,6 @@ pub fn populate_block_instructions(
                 }
             }
         }
-
-        #[cfg(not(any(feature = "riscv", feature = "s390x")))]
         Opcode::UsubOverflow => {
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -1226,9 +1222,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let (new_value, _) = cur.ins().usub_overflow(first_value, second_value);
                     return Some((
@@ -1241,8 +1237,6 @@ pub fn populate_block_instructions(
                 }
             }
         }
-
-        #[cfg(not(any(feature = "riscv", feature = "s390x")))]
         Opcode::SsubOverflow => {
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -1264,9 +1258,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let (new_value, _) = cur.ins().ssub_overflow(first_value, second_value);
                     return Some((
@@ -1279,8 +1273,6 @@ pub fn populate_block_instructions(
                 }
             }
         }
-
-        #[cfg(not(any(feature = "riscv", feature = "s390x")))]
         Opcode::UmulOverflow => {
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -1302,9 +1294,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let (new_value, _) = cur.ins().umul_overflow(first_value, second_value);
                     return Some((
@@ -1318,7 +1310,6 @@ pub fn populate_block_instructions(
             }
         }
 
-        #[cfg(not(any(feature = "riscv", feature = "s390x")))]
         Opcode::SmulOverflow => {
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -1340,9 +1331,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let (new_value, _) = cur.ins().smul_overflow(first_value, second_value);
                     return Some((
@@ -1377,9 +1368,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().band(first_value, second_value);
                     return Some((
@@ -1414,9 +1405,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().bor(first_value, second_value);
                     return Some((
@@ -1451,9 +1442,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().bxor(first_value, second_value);
                     return Some((
@@ -1488,9 +1479,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().band_not(first_value, second_value);
                     return Some((
@@ -1525,9 +1516,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().bor_not(first_value, second_value);
                     return Some((
@@ -1562,9 +1553,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().bxor_not(first_value, second_value);
                     return Some((
@@ -1590,14 +1581,14 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 arg0_value_type,
             );
-            let rotled_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let rotled_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let dominator_values = get_dominator_values_with_type(
                 dominator_blocks,
                 block_dominator_values,
                 arg1_value_type,
             );
-            let bits_num = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bits_num = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().rotl(rotled_value, bits_num);
             return Some((
@@ -1621,14 +1612,14 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 arg0_value_type,
             );
-            let rotred_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let rotred_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let dominator_values = get_dominator_values_with_type(
                 dominator_blocks,
                 block_dominator_values,
                 arg1_value_type,
             );
-            let bits_num = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bits_num = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().rotr(rotred_value, bits_num);
             return Some((
@@ -1652,14 +1643,14 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 arg0_value_type,
             );
-            let ishled_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let ishled_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let dominator_values = get_dominator_values_with_type(
                 dominator_blocks,
                 block_dominator_values,
                 arg1_value_type,
             );
-            let bits_num = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bits_num = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().ishl(ishled_value, bits_num);
             return Some((
@@ -1683,14 +1674,14 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 arg0_value_type,
             );
-            let ushred_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let ushred_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let dominator_values = get_dominator_values_with_type(
                 dominator_blocks,
                 block_dominator_values,
                 arg1_value_type,
             );
-            let bits_num = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bits_num = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().ushr(ushred_value, bits_num);
             return Some((
@@ -1714,14 +1705,14 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 arg0_value_type,
             );
-            let sshred_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let sshred_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let dominator_values = get_dominator_values_with_type(
                 dominator_blocks,
                 block_dominator_values,
                 arg1_value_type,
             );
-            let bits_num = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bits_num = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().sshr(sshred_value, bits_num);
             return Some((
@@ -1754,9 +1745,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().fadd(first_value, second_value);
                     return Some((
@@ -1791,9 +1782,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().fsub(first_value, second_value);
                     return Some((
@@ -1828,9 +1819,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().fmul(first_value, second_value);
                     return Some((
@@ -1865,9 +1856,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().fdiv(first_value, second_value);
                     return Some((
@@ -1902,9 +1893,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().fcopysign(first_value, second_value);
                     return Some((
@@ -1939,9 +1930,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().fmin(first_value, second_value);
                     return Some((
@@ -1976,9 +1967,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().fmax(first_value, second_value);
                     return Some((
@@ -2003,9 +1994,9 @@ pub fn populate_block_instructions(
             );
 
             if random_values_with_same_type.len() >= 2 {
-                let first_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                let first_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                 let second_value =
-                    *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                    *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                 let new_value = cur.ins().snarrow(first_value, second_value);
                 match value_type {
@@ -2080,9 +2071,9 @@ pub fn populate_block_instructions(
             );
 
             if random_values_with_same_type.len() >= 2 {
-                let first_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                let first_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                 let second_value =
-                    *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                    *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                 let new_value = cur.ins().unarrow(first_value, second_value);
 
                 match value_type {
@@ -2142,9 +2133,9 @@ pub fn populate_block_instructions(
             );
 
             if random_values_with_same_type.len() >= 2 {
-                let first_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                let first_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                 let second_value =
-                    *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                    *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                 let new_value = cur.ins().uunarrow(first_value, second_value);
                 match value_type {
@@ -2222,9 +2213,9 @@ pub fn populate_block_instructions(
                 return None;
             }
             if random_values_with_same_type.len() >= 2 {
-                let first_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                let first_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                 let second_value =
-                    *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                    *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                 let new_value = cur.ins().iadd_pairwise(first_value, second_value);
                 return Some((
@@ -2254,8 +2245,8 @@ pub fn populate_block_instructions(
                 value_type,
             );
             if iconcated_values.len() >= 2 {
-                let first_value = *select_random_value(&iconcated_values, 0.4).unwrap();
-                let second_value = *select_random_value(&iconcated_values, 0.4).unwrap();
+                let first_value = *select_random_value(&iconcated_values, 0.1).unwrap();
+                let second_value = *select_random_value(&iconcated_values, 0.1).unwrap();
 
                 let new_value = cur.ins().iconcat(first_value, second_value);
 
@@ -2299,7 +2290,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let iadd_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let iadd_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().iadd_imm(
                 iadd_immed_values,
@@ -2320,7 +2311,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let imul_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let imul_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().imul_imm(
                 imul_immed_values,
@@ -2341,7 +2332,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let udiv_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let udiv_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().udiv_imm(
                 udiv_immed_values,
@@ -2362,7 +2353,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let sdiv_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let sdiv_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().sdiv_imm(
                 sdiv_immed_values,
@@ -2383,7 +2374,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let urem_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let urem_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().urem_imm(
                 urem_immed_values,
@@ -2403,7 +2394,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let srem_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let srem_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().srem_imm(
                 srem_immed_values,
@@ -2424,7 +2415,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let irsub_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let irsub_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().irsub_imm(
                 irsub_immed_values,
@@ -2445,7 +2436,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let band_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let band_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().band_imm(
                 band_immed_values,
@@ -2466,7 +2457,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let bor_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bor_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().bor_imm(
                 bor_immed_values,
@@ -2487,7 +2478,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let bxor_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bxor_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().bxor_imm(
                 bxor_immed_values,
@@ -2508,7 +2499,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let rotl_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let rotl_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().rotl_imm(
                 rotl_immed_values,
@@ -2529,7 +2520,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let rotr_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let rotr_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().rotr_imm(
                 rotr_immed_values,
@@ -2550,7 +2541,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let ishl_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let ishl_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().ishl_imm(
                 ishl_immed_values,
@@ -2571,7 +2562,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let ushr_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let ushr_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().ushr_imm(
                 ushr_immed_values,
@@ -2592,7 +2583,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let sshr_immed_values = *select_random_value(&dominator_values, 0.4).unwrap();
+            let sshr_immed_values = *select_random_value(&dominator_values, 0.1).unwrap();
 
             let new_value = cur.ins().sshr_imm(
                 sshr_immed_values,
@@ -2706,8 +2697,8 @@ pub fn populate_block_instructions(
             };
 
             if fcmped_values.len() >= 2 {
-                let first_value = *select_random_value(&fcmped_values, 0.4).unwrap();
-                let second_value = *select_random_value(&fcmped_values, 0.4).unwrap();
+                let first_value = *select_random_value(&fcmped_values, 0.1).unwrap();
+                let second_value = *select_random_value(&fcmped_values, 0.1).unwrap();
 
                 let new_value = cur.ins().fcmp(fcmp_cond, first_value, second_value);
                 match value_type {
@@ -2795,10 +2786,10 @@ pub fn populate_block_instructions(
                 value_type,
             );
             if uadded_values.len() >= 2 {
-                let first_value = *select_random_value(&uadded_values, 0.4).unwrap();
-                let second_value = *select_random_value(&uadded_values, 0.4).unwrap();
+                let first_value = *select_random_value(&uadded_values, 0.1).unwrap();
+                let second_value = *select_random_value(&uadded_values, 0.1).unwrap();
 
-                let trap_code = TrapCode::StackOverflow;
+                let trap_code = TrapCode::STACK_OVERFLOW;
 
                 let new_value = cur
                     .ins()
@@ -2812,7 +2803,7 @@ pub fn populate_block_instructions(
                 ));
             } else if uadded_values.len() == 1 {
                 let ref_value = uadded_values.pop().unwrap();
-                let trap_code = TrapCode::StackOverflow;
+                let trap_code = TrapCode::STACK_OVERFLOW;
 
                 let new_value = cur
                     .ins()
@@ -2825,16 +2816,6 @@ pub fn populate_block_instructions(
         }
 
         Opcode::Icmp => {
-            /*
-
-
-
-
-
-
-
-
-            */
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
 
@@ -2847,9 +2828,9 @@ pub fn populate_block_instructions(
                 return None;
             }
             if random_values_with_same_type.len() >= 2 {
-                let first_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                let first_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                 let second_value =
-                    *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                    *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                 let new_value = cur.ins().icmp(random_intcc(), first_value, second_value);
 
@@ -2936,7 +2917,7 @@ pub fn populate_block_instructions(
             );
             let random_i64_value = Imm64::new(rng.gen_range(i64::MIN..=i64::MAX) as i64);
 
-            let first_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+            let first_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
             let new_value = cur.ins().icmp_imm(
                 *cond_all.choose(&mut rng).unwrap(),
@@ -3233,7 +3214,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let casted_value = *select_random_value(&candidate_values, 0.4).unwrap();
+            let casted_value = *select_random_value(&candidate_values, 0.1).unwrap();
             let cast_type = bitcast_type_mapping(value_type);
 
             let mut mem_flag_little = ir::MemFlags::new();
@@ -3273,19 +3254,24 @@ pub fn populate_block_instructions(
         Opcode::Debugtrap => {
             return None;
             cur.ins().debugtrap();
-            return None;
         }
 
         Opcode::GetFramePointer => {
-            return None;
+            let addr_type = I64;
+            let new_value = cur.ins().get_frame_pointer(addr_type);
+            return Some((Some(TypedValue::new(new_value, addr_type)), None));
         }
 
         Opcode::GetStackPointer => {
-            return None;
+            let addr_type = I64;
+            let new_value = cur.ins().get_stack_pointer(addr_type);
+            return Some((Some(TypedValue::new(new_value, addr_type)), None));
         }
 
         Opcode::GetReturnAddress => {
-            return None;
+            let addr_type = I64;
+            let new_value = cur.ins().get_return_address(addr_type);
+            return Some((Some(TypedValue::new(new_value, addr_type)), None));
         }
 
         Opcode::Nop => {
@@ -3294,8 +3280,8 @@ pub fn populate_block_instructions(
         }
 
         Opcode::Fence => {
-            return None;
             cur.ins().fence();
+            return None;
         }
 
         Opcode::Shuffle => {
@@ -3320,9 +3306,9 @@ pub fn populate_block_instructions(
             };
 
             if random_values_with_same_type.len() >= 2 {
-                let first_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                let first_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                 let second_value =
-                    *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                    *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                 let new_value = cur.ins().shuffle(first_value, second_value, mask_imm);
 
@@ -3377,8 +3363,6 @@ pub fn populate_block_instructions(
 
             return None;
         }
-
-        #[cfg(not(feature = "s390x"))]
         Opcode::StackStore => {
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -3391,7 +3375,7 @@ pub fn populate_block_instructions(
             if random_values_with_same_type.len() == 0 {
                 return None;
             }
-            let ref_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+            let ref_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
             let random_stack_slot = cur
                 .func
@@ -3428,7 +3412,7 @@ pub fn populate_block_instructions(
             if random_values_with_same_type.len() == 0 {
                 return None;
             }
-            let ref_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+            let ref_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
             let mut mem_flag_little = ir::MemFlags::new();
             mem_flag_little.set_endianness(Endianness::Little);
             cur.ins()
@@ -3456,7 +3440,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let ref_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+            let ref_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
             let mut mem_flag_little = ir::MemFlags::new();
             mem_flag_little.set_endianness(Endianness::Little);
             cur.ins()
@@ -3484,7 +3468,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let ref_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+            let ref_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
             let mut mem_flag_little = ir::MemFlags::new();
             mem_flag_little.set_endianness(Endianness::Little);
             cur.ins()
@@ -3512,7 +3496,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let ref_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+            let ref_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
             let mut mem_flag_little = ir::MemFlags::new();
             mem_flag_little.set_endianness(Endianness::Little);
             cur.ins()
@@ -3540,7 +3524,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let ref_value = *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+            let ref_value = *select_random_value(&random_values_with_same_type, 0.1).unwrap();
             let mut mem_flag_little = ir::MemFlags::new();
             mem_flag_little.set_endianness(Endianness::Little);
             cur.ins().atomic_store(mem_flag_little, ref_value, addr);
@@ -3561,7 +3545,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 control_value_type,
             );
-            let control_value = *select_random_value(&control_values_with_same_type, 0.4).unwrap();
+            let control_value = *select_random_value(&control_values_with_same_type, 0.1).unwrap();
 
             let value_types = mode.arg0_types.as_ref().unwrap();
             let value_type = value_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -3571,8 +3555,8 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let ref_value1 = *select_random_value(&ref_values_with_same_type, 0.4).unwrap();
-            let ref_value2 = *select_random_value(&ref_values_with_same_type, 0.4).unwrap();
+            let ref_value1 = *select_random_value(&ref_values_with_same_type, 0.1).unwrap();
+            let ref_value2 = *select_random_value(&ref_values_with_same_type, 0.1).unwrap();
             let new_value = cur.ins().select(control_value, ref_value1, ref_value2);
             return Some((
                 Some(TypedValue::new(new_value, value_type)),
@@ -3595,7 +3579,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 control_value_type,
             );
-            let control_value = *select_random_value(&control_values_with_same_type, 0.4).unwrap();
+            let control_value = *select_random_value(&control_values_with_same_type, 0.1).unwrap();
 
             let value_types = mode.arg0_types.as_ref().unwrap();
             let value_type = value_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -3605,8 +3589,8 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let ref_value1 = *select_random_value(&ref_values_with_same_type, 0.4).unwrap();
-            let ref_value2 = *select_random_value(&ref_values_with_same_type, 0.4).unwrap();
+            let ref_value1 = *select_random_value(&ref_values_with_same_type, 0.1).unwrap();
+            let ref_value2 = *select_random_value(&ref_values_with_same_type, 0.1).unwrap();
             let new_value = cur
                 .ins()
                 .select_spectre_guard(control_value, ref_value1, ref_value2);
@@ -3631,9 +3615,9 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 control_value_type,
             );
-            let control_value = *select_random_value(&control_values_with_same_type, 0.4).unwrap();
-            let ref_value1 = *select_random_value(&control_values_with_same_type, 0.4).unwrap();
-            let ref_value2 = *select_random_value(&control_values_with_same_type, 0.4).unwrap();
+            let control_value = *select_random_value(&control_values_with_same_type, 0.1).unwrap();
+            let ref_value1 = *select_random_value(&control_values_with_same_type, 0.1).unwrap();
+            let ref_value2 = *select_random_value(&control_values_with_same_type, 0.1).unwrap();
             let new_value = cur.ins().bitselect(control_value, ref_value1, ref_value2);
             return Some((
                 Some(TypedValue::new(new_value, control_value_type)),
@@ -3644,9 +3628,7 @@ pub fn populate_block_instructions(
                 ]),
             ));
         }
-        Opcode::X86Blendv => {
-            return None;
-        }
+
         Opcode::Fma => {
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -3717,8 +3699,7 @@ pub fn populate_block_instructions(
         }
         Opcode::Trap => {
             return None;
-            cur.ins().trap(TrapCode::StackOverflow);
-            return None;
+            cur.ins().trap(TrapCode::STACK_OVERFLOW);
         }
 
         Opcode::Splat => {
@@ -3742,9 +3723,24 @@ pub fn populate_block_instructions(
             }
         }
         Opcode::SetPinnedReg => {
+            let random_stack_slot = cur
+                .func
+                .sized_stack_slots
+                .iter()
+                .choose(&mut rng)
+                .unwrap()
+                .0;
+            let addr = cur
+                .ins()
+                .stack_addr(I64, random_stack_slot, Offset32::new(0));
+            cur.ins().set_pinned_reg(addr);
             return None;
         }
-
+        Opcode::GetPinnedReg => {
+            let addr_type = I64;
+            let new_value = cur.ins().get_pinned_reg(addr_type);
+            return Some((Some(TypedValue::new(new_value, addr_type)), None));
+        }
         Opcode::VanyTrue => {
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -3754,7 +3750,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let vanyed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let vanyed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let boolean_value = cur.ins().vany_true(vanyed_value);
             return Some((
                 Some(TypedValue::new(boolean_value, I8)),
@@ -3771,7 +3767,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let valled_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let valled_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let boolean_value = cur.ins().vall_true(valled_value);
             return Some((
                 Some(TypedValue::new(boolean_value, I8)),
@@ -3791,7 +3787,7 @@ pub fn populate_block_instructions(
             if dominator_values.len() == 0 {
                 return None;
             }
-            let vhighed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let vhighed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             match value_type {
                 I8X16 => {
                     let new_value = cur.ins().vhigh_bits(ir::types::I8, vhighed_value);
@@ -3838,7 +3834,7 @@ pub fn populate_block_instructions(
             if dominator_values.len() == 0 {
                 return None;
             }
-            let neged_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let neged_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().ineg(neged_value);
             return Some((
                 Some(TypedValue::new(new_value, value_type)),
@@ -3857,7 +3853,7 @@ pub fn populate_block_instructions(
             if dominator_values.len() == 0 {
                 return None;
             }
-            let iabsed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let iabsed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().iabs(iabsed_value);
 
             return Some((
@@ -3877,7 +3873,7 @@ pub fn populate_block_instructions(
             if dominator_values.len() == 0 {
                 return None;
             }
-            let bnoted_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bnoted_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().bnot(bnoted_value);
             return Some((
                 Some(TypedValue::new(new_value, value_type)),
@@ -3896,7 +3892,7 @@ pub fn populate_block_instructions(
             if dominator_values.len() == 0 {
                 return None;
             }
-            let bitreved_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bitreved_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().bitrev(bitreved_value);
 
             return Some((
@@ -3916,7 +3912,7 @@ pub fn populate_block_instructions(
             if dominator_values.len() == 0 {
                 return None;
             }
-            let clzed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let clzed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().clz(clzed_value);
 
             return Some((
@@ -3924,7 +3920,6 @@ pub fn populate_block_instructions(
                 Some(vec![TypedValue::new(clzed_value, value_type)]),
             ));
         }
-        #[cfg(not(feature = "x86-64"))]
         Opcode::Cls => {
             let operand_types = mode.operand_types.as_ref().unwrap();
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
@@ -3937,7 +3932,7 @@ pub fn populate_block_instructions(
             if dominator_values.len() == 0 {
                 return None;
             }
-            let clsed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let clsed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().clz(clsed_value);
 
             return Some((
@@ -3957,7 +3952,7 @@ pub fn populate_block_instructions(
             if dominator_values.len() == 0 {
                 return None;
             }
-            let ctzed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let ctzed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().ctz(ctzed_value);
 
             return Some((
@@ -3977,7 +3972,7 @@ pub fn populate_block_instructions(
             if dominator_values.len() == 0 {
                 return None;
             }
-            let bswaped_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bswaped_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().bswap(bswaped_value);
 
             return Some((
@@ -3997,7 +3992,7 @@ pub fn populate_block_instructions(
             if dominator_values.len() == 0 {
                 return None;
             }
-            let popcnted_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let popcnted_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().popcnt(popcnted_value);
 
             return Some((
@@ -4014,7 +4009,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let sqrted_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let sqrted_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().sqrt(sqrted_value);
 
             return Some((
@@ -4031,7 +4026,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let fneged_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fneged_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().fneg(fneged_value);
 
             return Some((
@@ -4048,7 +4043,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let fabsed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fabsed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().fabs(fabsed_value);
 
             return Some((
@@ -4065,7 +4060,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let ceiled_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let ceiled_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().ceil(ceiled_value);
 
             return Some((
@@ -4082,7 +4077,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let floored_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let floored_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().floor(floored_value);
 
             return Some((
@@ -4099,7 +4094,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let trunced_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let trunced_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().trunc(trunced_value);
 
             return Some((
@@ -4116,7 +4111,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let nearested_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let nearested_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().nearest(nearested_value);
 
             return Some((
@@ -4159,7 +4154,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 param_value_type,
             );
-            let bmasked_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let bmasked_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().bmask(target_value_type, bmasked_value);
 
             return Some((
@@ -4182,7 +4177,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 from_value_type,
             );
-            let ireduced_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let ireduced_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().ireduce(to_value_type, ireduced_value);
 
             return Some((
@@ -4206,7 +4201,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 from_value_type,
             );
-            let swidenlowed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let swidenlowed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().swiden_low(swidenlowed_value);
 
             return Some((
@@ -4230,7 +4225,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 from_value_type,
             );
-            let swidenhighed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let swidenhighed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().swiden_high(swidenhighed_value);
 
             return Some((
@@ -4254,7 +4249,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 from_value_type,
             );
-            let uwidenlowed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let uwidenlowed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().uwiden_low(uwidenlowed_value);
 
             return Some((
@@ -4278,7 +4273,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 from_value_type,
             );
-            let uwidenhighed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let uwidenhighed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().uwiden_high(uwidenhighed_value);
 
             return Some((
@@ -4308,7 +4303,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 from_value_type,
             );
-            let uextended_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let uextended_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().uextend(to_value_type, uextended_value);
 
             return Some((
@@ -4332,7 +4327,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 from_value_type,
             );
-            let sextended_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let sextended_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().sextend(to_value_type, sextended_value);
 
             return Some((
@@ -4346,7 +4341,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 ir::types::F32,
             );
-            let fpromoted_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fpromoted_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().fpromote(F64, fpromoted_value);
 
             return Some((
@@ -4360,7 +4355,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 ir::types::F64,
             );
-            let fdemoted_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fdemoted_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().fdemote(ir::types::F32, fdemoted_value);
 
             return Some((
@@ -4371,7 +4366,7 @@ pub fn populate_block_instructions(
         Opcode::Fvdemote => {
             let dominator_values =
                 get_dominator_values_with_type(dominator_blocks, block_dominator_values, F64X2);
-            let fvdemoted_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fvdemoted_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().fvdemote(fvdemoted_value);
 
             return Some((
@@ -4382,7 +4377,7 @@ pub fn populate_block_instructions(
         Opcode::FvpromoteLow => {
             let dominator_values =
                 get_dominator_values_with_type(dominator_blocks, block_dominator_values, F32X4);
-            let fvpromotelowed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fvpromotelowed_value = *select_random_value(&dominator_values, 0.1).unwrap();
             let new_value = cur.ins().fvpromote_low(fvpromotelowed_value);
 
             return Some((
@@ -4399,7 +4394,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let fcvttouinted_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fcvttouinted_value = *select_random_value(&dominator_values, 0.1).unwrap();
             match value_type {
                 F32 => {
                     let new_value = cur.ins().fcvt_to_uint(ir::types::I32, fcvttouinted_value);
@@ -4429,7 +4424,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let fcvttosinted_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fcvttosinted_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             match value_type {
                 F32 => {
@@ -4460,7 +4455,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let fcvttouintsated_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fcvttouintsated_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             match value_type {
                 F32 => {
@@ -4505,7 +4500,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let fcvttosintsated_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fcvttosintsated_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             match value_type {
                 F32 => {
@@ -4543,6 +4538,9 @@ pub fn populate_block_instructions(
         }
         Opcode::X86Cvtt2dq => {
             let operand_types = mode.operand_types.as_ref().unwrap();
+            if operand_types.is_empty() {
+                return None;
+            }
             let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
 
             let dominator_values = get_dominator_values_with_type(
@@ -4550,7 +4548,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let x86cvtt2dqed_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let x86cvtt2dqed_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             match value_type {
                 F32X4 => {
@@ -4581,7 +4579,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let fcvtfromuinted_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fcvtfromuinted_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             match value_type {
                 I32 => {
@@ -4626,7 +4624,7 @@ pub fn populate_block_instructions(
                 block_dominator_values,
                 value_type,
             );
-            let fcvtfromsinted_value = *select_random_value(&dominator_values, 0.4).unwrap();
+            let fcvtfromsinted_value = *select_random_value(&dominator_values, 0.1).unwrap();
 
             match value_type {
                 I32 => {
@@ -4663,10 +4661,32 @@ pub fn populate_block_instructions(
             }
         }
         Opcode::Isplit => {
-            return None;
+            let operand_types = mode.operand_types.as_ref().unwrap();
+
+            let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
+
+            let split_values = get_dominator_values_with_type(
+                dominator_blocks,
+                block_dominator_values,
+                value_type,
+            );
+            if split_values.is_empty() {
+                return None;
+            }
+
+            let out_type = match value_type.half_width() {
+                Some(t) => t,
+                None => return None,
+            };
+
+            let x = *select_random_value(&split_values, 0.1).unwrap();
+            let (lo, _hi) = cur.ins().isplit(x);
+            return Some((
+                Some(TypedValue::new(lo, out_type)),
+                Some(vec![TypedValue::new(x, value_type)]),
+            ));
         }
         Opcode::F128const => {
-            return None;
             let random_u128: u128 = rng.gen();
             let ieee128_value: Ieee128 = Ieee128::with_bits(random_u128);
             let f128_constant = cur.func.dfg.constants.insert(ieee128_value.into());
@@ -4750,9 +4770,9 @@ pub fn populate_block_instructions(
                 }
                 _ => {
                     let first_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
                     let second_value =
-                        *select_random_value(&random_values_with_same_type, 0.4).unwrap();
+                        *select_random_value(&random_values_with_same_type, 0.1).unwrap();
 
                     let new_value = cur.ins().x86_pmulhrsw(first_value, second_value);
                     return Some((
@@ -4768,9 +4788,135 @@ pub fn populate_block_instructions(
         Opcode::ReturnCall => {
             return None;
         }
+        Opcode::TlsValue => {
+            return None;
+        }
+        Opcode::SequencePoint => {
+            cur.ins().sequence_point();
+            return None;
+        }
+        Opcode::SsubOverflowBin => {
+            let operand_types = mode.operand_types.as_ref().unwrap();
+            let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
+
+            let mut values = get_dominator_values_with_type(
+                dominator_blocks,
+                block_dominator_values,
+                value_type,
+            );
+            let mut borrow_flags =
+                get_dominator_values_with_type(dominator_blocks, block_dominator_values, I8);
+
+            if values.is_empty() || borrow_flags.is_empty() {
+                return None;
+            }
+
+            let x = *select_random_value(&values, 0.1).unwrap();
+            let y = *select_random_value(&values, 0.1).unwrap();
+            let b_in = *select_random_value(&borrow_flags, 0.1).unwrap();
+
+            let (new_value, _b_out) = cur.ins().ssub_overflow_bin(x, y, b_in);
+            return Some((
+                Some(TypedValue::new(new_value, value_type)),
+                Some(vec![
+                    TypedValue::new(x, value_type),
+                    TypedValue::new(y, value_type),
+                    TypedValue::new(b_in, I8),
+                ]),
+            ));
+        }
+        Opcode::UaddOverflowCin => {
+            let operand_types = mode.operand_types.as_ref().unwrap();
+            let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
+
+            let mut values = get_dominator_values_with_type(
+                dominator_blocks,
+                block_dominator_values,
+                value_type,
+            );
+            let mut carry_flags =
+                get_dominator_values_with_type(dominator_blocks, block_dominator_values, I8);
+
+            if values.is_empty() || carry_flags.is_empty() {
+                return None;
+            }
+
+            let x = *select_random_value(&values, 0.1).unwrap();
+            let y = *select_random_value(&values, 0.1).unwrap();
+            let c_in = *select_random_value(&carry_flags, 0.1).unwrap();
+
+            let (new_value, _c_out) = cur.ins().uadd_overflow_cin(x, y, c_in);
+            return Some((
+                Some(TypedValue::new(new_value, value_type)),
+                Some(vec![
+                    TypedValue::new(x, value_type),
+                    TypedValue::new(y, value_type),
+                    TypedValue::new(c_in, I8),
+                ]),
+            ));
+        }
+        Opcode::SaddOverflowCin => {
+            let operand_types = mode.operand_types.as_ref().unwrap();
+            let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
+
+            let mut values = get_dominator_values_with_type(
+                dominator_blocks,
+                block_dominator_values,
+                value_type,
+            );
+            let mut carry_flags =
+                get_dominator_values_with_type(dominator_blocks, block_dominator_values, I8);
+
+            if values.is_empty() || carry_flags.is_empty() {
+                return None;
+            }
+
+            let x = *select_random_value(&values, 0.1).unwrap();
+            let y = *select_random_value(&values, 0.1).unwrap();
+            let c_in = *select_random_value(&carry_flags, 0.1).unwrap();
+
+            let (new_value, _c_out) = cur.ins().sadd_overflow_cin(x, y, c_in);
+            return Some((
+                Some(TypedValue::new(new_value, value_type)),
+                Some(vec![
+                    TypedValue::new(x, value_type),
+                    TypedValue::new(y, value_type),
+                    TypedValue::new(c_in, I8),
+                ]),
+            ));
+        }
+        Opcode::UsubOverflowBin => {
+            let operand_types = mode.operand_types.as_ref().unwrap();
+            let value_type = operand_types.choose(&mut rng).unwrap().to_cranelift_type();
+
+            let mut values = get_dominator_values_with_type(
+                dominator_blocks,
+                block_dominator_values,
+                value_type,
+            );
+            let mut borrow_flags =
+                get_dominator_values_with_type(dominator_blocks, block_dominator_values, I8);
+
+            if values.is_empty() || borrow_flags.is_empty() {
+                return None;
+            }
+
+            let x = *select_random_value(&values, 0.1).unwrap();
+            let y = *select_random_value(&values, 0.1).unwrap();
+            let b_in = *select_random_value(&borrow_flags, 0.1).unwrap();
+
+            let (new_value, _b_out) = cur.ins().usub_overflow_bin(x, y, b_in);
+            return Some((
+                Some(TypedValue::new(new_value, value_type)),
+                Some(vec![
+                    TypedValue::new(x, value_type),
+                    TypedValue::new(y, value_type),
+                    TypedValue::new(b_in, I8),
+                ]),
+            ));
+        }
         _ => {
             return None;
-            panic!("unrecognized instr")
         }
     };
 

@@ -1,8 +1,8 @@
 /// Execute the wiggle guest conversion code to exercise it
 mod convert_just_errno {
-    use anyhow::Result;
     use wiggle::GuestMemory;
-    use wiggle_test::{impl_errno, HostMemory, WasiCtx};
+    use wiggle::error::Result;
+    use wiggle_test::{HostMemory, WasiCtx, impl_errno};
 
     /// The `errors` argument to the wiggle gives us a hook to map a rich error
     /// type like this one (typical of wiggle use cases in wasi-common and beyond)
@@ -93,13 +93,13 @@ mod convert_just_errno {
 /// we use two distinct error types.
 mod convert_multiple_error_types {
     pub use super::convert_just_errno::RichError;
-    use anyhow::Result;
     use wiggle::GuestMemory;
-    use wiggle_test::{impl_errno, WasiCtx};
+    use wiggle::error::Result;
+    use wiggle_test::{WasiCtx, impl_errno};
 
     /// Test that we can map multiple types of errors.
     #[derive(Debug, thiserror::Error)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "testing codegen below")]
     pub enum AnotherRichError {
         #[error("I've had this many cups of coffee and can't even think straight: {0}")]
         TooMuchCoffee(usize),
@@ -152,7 +152,7 @@ mod convert_multiple_error_types {
         fn bar(&mut self, _: &mut GuestMemory<'_>, _: u32) -> Result<(), AnotherRichError> {
             unimplemented!()
         }
-        fn baz(&mut self, _: &mut GuestMemory<'_>, _: u32) -> anyhow::Error {
+        fn baz(&mut self, _: &mut GuestMemory<'_>, _: u32) -> wiggle::error::Error {
             unimplemented!()
         }
     }

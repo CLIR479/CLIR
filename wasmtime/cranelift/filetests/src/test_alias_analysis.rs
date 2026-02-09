@@ -6,7 +6,7 @@
 //!
 //! The resulting function is sent to `filecheck`.
 
-use crate::subtest::{run_filecheck, Context, SubTest};
+use crate::subtest::{Context, SubTest, run_filecheck};
 use cranelift_codegen::ir::Function;
 use cranelift_reader::TestCommand;
 use std::borrow::Cow;
@@ -16,7 +16,7 @@ struct TestAliasAnalysis;
 pub fn subtest(parsed: &TestCommand) -> anyhow::Result<Box<dyn SubTest>> {
     assert_eq!(parsed.command, "alias-analysis");
     if !parsed.options.is_empty() {
-        anyhow::bail!("No options allowed on {}", parsed);
+        anyhow::bail!("No options allowed on {parsed}");
     }
     Ok(Box::new(TestAliasAnalysis))
 }

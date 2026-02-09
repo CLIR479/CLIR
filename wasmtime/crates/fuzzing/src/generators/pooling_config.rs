@@ -1,11 +1,11 @@
 //! Generate instance limits for the pooling allocation strategy.
 
 use arbitrary::{Arbitrary, Unstructured};
-use wasmtime::MpkEnabled;
+use wasmtime::Enabled;
 
 /// Configuration for `wasmtime::PoolingAllocationStrategy`.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "self-describing field names")]
 pub struct PoolingAllocationConfig {
     pub total_component_instances: u32,
     pub total_core_instances: u32,
@@ -14,7 +14,7 @@ pub struct PoolingAllocationConfig {
     pub total_stacks: u32,
 
     pub max_memory_size: usize,
-    pub table_elements: u32,
+    pub table_elements: usize,
 
     pub component_instance_size: usize,
     pub max_memories_per_component: u32,
@@ -30,47 +30,46 @@ pub struct PoolingAllocationConfig {
     pub decommit_batch_size: usize,
     pub max_unused_warm_slots: u32,
 
-    pub async_stack_zeroing: bool,
     pub async_stack_keep_resident: usize,
 
-    pub memory_protection_keys: MpkEnabled,
+    pub memory_protection_keys: Enabled,
     pub max_memory_protection_keys: usize,
+
+    pub pagemap_scan: Enabled,
 }
 
 impl PoolingAllocationConfig {
     /// Convert the generated limits to Wasmtime limits.
-    pub fn to_wasmtime(&self) -> wasmtime::PoolingAllocationConfig {
-        let mut cfg = wasmtime::PoolingAllocationConfig::default();
+    pub fn configure(&self, cfg: &mut wasmtime_cli_flags::CommonOptions) {
+        cfg.opts.pooling_total_component_instances = Some(self.total_component_instances);
+        cfg.opts.pooling_total_core_instances = Some(self.total_core_instances);
+        cfg.opts.pooling_total_memories = Some(self.total_memories);
+        cfg.opts.pooling_total_tables = Some(self.total_tables);
+        cfg.opts.pooling_total_stacks = Some(self.total_stacks);
 
-        cfg.total_component_instances(self.total_component_instances);
-        cfg.total_core_instances(self.total_core_instances);
-        cfg.total_memories(self.total_memories);
-        cfg.total_tables(self.total_tables);
-        cfg.total_stacks(self.total_stacks);
+        cfg.opts.pooling_max_memory_size = Some(self.max_memory_size);
+        cfg.opts.pooling_table_elements = Some(self.table_elements);
 
-        cfg.max_memory_size(self.max_memory_size);
-        cfg.table_elements(self.table_elements);
+        cfg.opts.pooling_max_component_instance_size = Some(self.component_instance_size);
+        cfg.opts.pooling_max_memories_per_component = Some(self.max_memories_per_component);
+        cfg.opts.pooling_max_tables_per_component = Some(self.max_tables_per_component);
 
-        cfg.max_component_instance_size(self.component_instance_size);
-        cfg.max_memories_per_component(self.max_memories_per_component);
-        cfg.max_tables_per_component(self.max_tables_per_component);
+        cfg.opts.pooling_max_core_instance_size = Some(self.core_instance_size);
+        cfg.opts.pooling_max_memories_per_module = Some(self.max_memories_per_module);
+        cfg.opts.pooling_max_tables_per_module = Some(self.max_tables_per_module);
 
-        cfg.max_core_instance_size(self.core_instance_size);
-        cfg.max_memories_per_module(self.max_memories_per_module);
-        cfg.max_tables_per_module(self.max_tables_per_module);
+        cfg.opts.pooling_table_keep_resident = Some(self.table_keep_resident);
+        cfg.opts.pooling_memory_keep_resident = Some(self.linear_memory_keep_resident);
 
-        cfg.table_keep_resident(self.table_keep_resident);
-        cfg.linear_memory_keep_resident(self.linear_memory_keep_resident);
+        cfg.opts.pooling_decommit_batch_size = Some(self.decommit_batch_size);
+        cfg.opts.pooling_max_unused_warm_slots = Some(self.max_unused_warm_slots);
 
-        cfg.decommit_batch_size(self.decommit_batch_size);
-        cfg.max_unused_warm_slots(self.max_unused_warm_slots);
+        cfg.opts.pooling_async_stack_keep_resident = Some(self.async_stack_keep_resident);
 
-        cfg.async_stack_zeroing(self.async_stack_zeroing);
-        cfg.async_stack_keep_resident(self.async_stack_keep_resident);
+        cfg.opts.pooling_memory_protection_keys = Some(self.memory_protection_keys);
+        cfg.opts.pooling_max_memory_protection_keys = Some(self.max_memory_protection_keys);
 
-        cfg.memory_protection_keys(self.memory_protection_keys);
-
-        cfg
+        cfg.opts.pooling_pagemap_scan = Some(self.pagemap_scan);
     }
 }
 
@@ -79,7 +78,7 @@ impl<'a> Arbitrary<'a> for PoolingAllocationConfig {
         const MAX_COUNT: u32 = 100;
         const MAX_TABLES: u32 = 100;
         const MAX_MEMORIES: u32 = 100;
-        const MAX_ELEMENTS: u32 = 1000;
+        const MAX_ELEMENTS: usize = 1000;
         const MAX_MEMORY_SIZE: usize = 10 * (1 << 20); // 10 MiB
         const MAX_SIZE: usize = 1 << 20; // 1 MiB
         const MAX_INSTANCE_MEMORIES: u32 = 10;
@@ -111,11 +110,12 @@ impl<'a> Arbitrary<'a> for PoolingAllocationConfig {
             decommit_batch_size: u.int_in_range(1..=1000)?,
             max_unused_warm_slots: u.int_in_range(0..=total_memories + 10)?,
 
-            async_stack_zeroing: u.arbitrary()?,
             async_stack_keep_resident: u.int_in_range(0..=1 << 20)?,
 
-            memory_protection_keys: *u.choose(&[MpkEnabled::Auto, MpkEnabled::Disable])?,
-            max_memory_protection_keys: u.int_in_range(0..=20)?,
+            memory_protection_keys: *u.choose(&[Enabled::Auto, Enabled::No])?,
+            max_memory_protection_keys: u.int_in_range(1..=20)?,
+
+            pagemap_scan: *u.choose(&[Enabled::Auto, Enabled::No])?,
         })
     }
 }

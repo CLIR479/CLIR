@@ -15,8 +15,8 @@ const SPEC_REPOSITORY_BRANCH: &'static str = "wasmtime_fuzzing";
 const SPEC_REPOSITORY_REV: &'static str = "c6bab4461e10229e557aae2e1027cadfce0161ce";
 
 fn main() {
-    println!("cargo:rustc-check-cf-constructor=cf-constructor(feature, values(\"has-libinterpret\"))");
-    println!("cargo:rustc-check-cf-constructor=cf-constructor(fuzzing)");
+    println!("cargo:rustc-check-cfg=cfg(feature, values(\"has-libinterpret\"))");
+    println!("cargo:rustc-check-cfg=cfg(fuzzing)");
     if cfg!(feature = "build-libinterpret") {
         build();
     }
@@ -47,7 +47,7 @@ fn build() {
 
     // Enabling this feature alerts the compiler to use the `with_library`
     // module.
-    println!("cargo:rustc-cf-constructor=feature=\"has-libinterpret\"");
+    println!("cargo:rustc-cfg=feature=\"has-libinterpret\"");
 }
 
 // Build the OCaml library into Cargo's `out` directory.

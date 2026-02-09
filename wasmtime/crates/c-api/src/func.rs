@@ -1,10 +1,9 @@
+use crate::{WasmtimeCaller, WasmtimeStoreData, wasm_trap_t};
 use crate::{
-    wasm_extern_t, wasm_functype_t, wasm_store_t, wasm_val_t, wasm_val_vec_t, wasmtime_error_t,
-    wasmtime_extern_t, wasmtime_val_t, wasmtime_val_union, WasmtimeStoreContext,
-    WasmtimeStoreContextMut,
+    WasmtimeStoreContext, WasmtimeStoreContextMut, wasm_extern_t, wasm_functype_t, wasm_store_t,
+    wasm_val_t, wasm_val_vec_t, wasmtime_error_t, wasmtime_extern_t, wasmtime_val_t,
+    wasmtime_val_union,
 };
-use crate::{wasm_trap_t, WasmtimeCaller, WasmtimeStoreData};
-use anyhow::{Error, Result};
 use std::any::Any;
 use std::ffi::c_void;
 use std::mem::{self, MaybeUninit};
@@ -12,8 +11,8 @@ use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
 use std::str;
 use wasmtime::{
-    AsContext, AsContextMut, Extern, Func, RootScope, StoreContext, StoreContextMut, Trap, Val,
-    ValRaw,
+    AsContext, AsContextMut, Error, Extern, Func, Result, RootScope, StoreContext, StoreContextMut,
+    Trap, Val, ValRaw,
 };
 
 #[derive(Clone)]
@@ -55,9 +54,9 @@ unsafe fn create_function(
     store: &mut wasm_store_t,
     ty: &wasm_functype_t,
     func: impl Fn(*const wasm_val_vec_t, *mut wasm_val_vec_t) -> Option<Box<wasm_trap_t>>
-        + Send
-        + Sync
-        + 'static,
+    + Send
+    + Sync
+    + 'static,
 ) -> Box<wasm_func_t> {
     let ty = ty.ty().ty(store.store.context().engine());
     let func = Func::new(
@@ -91,7 +90,7 @@ unsafe fn create_function(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_func_new(
     store: &mut wasm_store_t,
     ty: &wasm_functype_t,
@@ -100,7 +99,7 @@ pub unsafe extern "C" fn wasm_func_new(
     create_function(store, ty, move |params, results| callback(params, results))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_func_new_with_env(
     store: &mut wasm_store_t,
     ty: &wasm_functype_t,
@@ -131,7 +130,7 @@ pub(crate) fn translate_args<'a>(
     (a, b)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_func_call(
     func: &mut wasm_func_t,
     args: *const wasm_val_vec_t,
@@ -177,27 +176,27 @@ fn error_from_panic(panic: Box<dyn Any + Send>) -> Error {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_func_type(f: &wasm_func_t) -> Box<wasm_functype_t> {
     Box::new(wasm_functype_t::new(f.func().ty(f.ext.store.context())))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_func_param_arity(f: &wasm_func_t) -> usize {
     f.func().ty(f.ext.store.context()).params().len()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasm_func_result_arity(f: &wasm_func_t) -> usize {
     f.func().ty(f.ext.store.context()).results().len()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_func_as_extern(f: &mut wasm_func_t) -> &mut wasm_extern_t {
     &mut (*f).ext
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_func_as_extern_const(f: &wasm_func_t) -> &wasm_extern_t {
     &(*f).ext
 }
@@ -237,7 +236,7 @@ pub type wasmtime_func_unchecked_callback_t = extern "C" fn(
     usize,
 ) -> Option<Box<wasm_trap_t>>;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_func_new(
     store: WasmtimeStoreContextMut<'_>,
     ty: &wasm_functype_t,
@@ -307,7 +306,7 @@ pub(crate) unsafe fn c_callback_to_rust_fn(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_func_new_unchecked(
     store: WasmtimeStoreContextMut<'_>,
     ty: &wasm_functype_t,
@@ -325,19 +324,24 @@ pub(crate) unsafe fn c_unchecked_callback_to_rust_fn(
     callback: wasmtime_func_unchecked_callback_t,
     data: *mut c_void,
     finalizer: Option<extern "C" fn(*mut std::ffi::c_void)>,
-) -> impl Fn(WasmtimeCaller<'_>, &mut [ValRaw]) -> Result<()> {
+) -> impl Fn(WasmtimeCaller<'_>, &mut [MaybeUninit<ValRaw>]) -> Result<()> {
     let foreign = crate::ForeignData { data, finalizer };
     move |caller, values| {
         let _ = &foreign; // move entire foreign into this closure
         let mut caller = wasmtime_caller_t { caller };
-        match callback(foreign.data, &mut caller, values.as_mut_ptr(), values.len()) {
+        match callback(
+            foreign.data,
+            &mut caller,
+            values.as_mut_ptr().cast(),
+            values.len(),
+        ) {
             None => Ok(()),
             Some(trap) => Err(trap.error),
         }
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_func_call(
     mut store: WasmtimeStoreContextMut<'_>,
     func: &Func,
@@ -383,7 +387,7 @@ pub unsafe extern "C" fn wasmtime_func_call(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_func_call_unchecked(
     store: WasmtimeStoreContextMut<'_>,
     func: &Func,
@@ -391,7 +395,8 @@ pub unsafe extern "C" fn wasmtime_func_call_unchecked(
     args_and_results_len: usize,
     trap_ret: &mut *mut wasm_trap_t,
 ) -> Option<Box<wasmtime_error_t>> {
-    match func.call_unchecked(store, args_and_results, args_and_results_len) {
+    let slice = std::ptr::slice_from_raw_parts_mut(args_and_results, args_and_results_len);
+    match func.call_unchecked(store, slice) {
         Ok(()) => None,
         Err(trap) => store_err(trap, trap_ret),
     }
@@ -406,7 +411,7 @@ fn store_err(err: Error, trap_ret: &mut *mut wasm_trap_t) -> Option<Box<wasmtime
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_func_type(
     store: WasmtimeStoreContext<'_>,
     func: &Func,
@@ -414,14 +419,14 @@ pub extern "C" fn wasmtime_func_type(
     Box::new(wasm_functype_t::new(func.ty(store)))
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_caller_context<'a>(
     caller: &'a mut wasmtime_caller_t,
 ) -> WasmtimeStoreContextMut<'a> {
     caller.caller.as_context_mut()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_caller_export_get(
     caller: &mut wasmtime_caller_t,
     name: *const u8,
@@ -440,7 +445,7 @@ pub unsafe extern "C" fn wasmtime_caller_export_get(
     true
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_func_from_raw(
     store: WasmtimeStoreContextMut<'_>,
     raw: *mut c_void,
@@ -449,7 +454,7 @@ pub unsafe extern "C" fn wasmtime_func_from_raw(
     *func = Func::from_raw(store, raw).unwrap();
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn wasmtime_func_to_raw(
     store: WasmtimeStoreContextMut<'_>,
     func: &Func,

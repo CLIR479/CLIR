@@ -3,21 +3,21 @@
 use super::lower::isle::generated_code::{VecAMode, VecElementWidth, VecOpMasking};
 use crate::binemit::{Addend, CodeOffset, Reloc};
 pub use crate::ir::condcodes::IntCC;
-use crate::ir::types::{self, F128, F16, F32, F64, I128, I16, I32, I64, I8, I8X16};
+use crate::ir::types::{self, F16, F32, F64, F128, I8, I8X16, I16, I32, I64, I128};
 
 pub use crate::ir::{ExternalName, MemFlags, Type};
 use crate::isa::{CallConv, FunctionAlignment};
 use crate::machinst::*;
-use crate::{settings, CodegenError, CodegenResult};
+use crate::{CodegenError, CodegenResult, settings};
 
 pub use crate::ir::condcodes::FloatCC;
 
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use regalloc2::{PRegSet, RegClass};
-use smallvec::{smallvec, SmallVec};
-use std::boxed::Box;
-use std::fmt::Write;
-use std::string::{String, ToString};
+use core::fmt::Write;
+use regalloc2::RegClass;
+use smallvec::{SmallVec, smallvec};
 
 pub mod regs;
 pub use self::regs::*;
@@ -38,7 +38,7 @@ use crate::isa::riscv64::abi::Riscv64MachineDeps;
 #[cfg(test)]
 mod emit_tests;
 
-use std::fmt::{Display, Formatter};
+use core::fmt::{Display, Formatter};
 
 pub(crate) type VecU8 = Vec<u8>;
 
@@ -46,41 +46,16 @@ pub(crate) type VecU8 = Vec<u8>;
 // Instructions (top level): definition
 
 pub use crate::isa::riscv64::lower::isle::generated_code::{
-    AluOPRRI, AluOPRRR, AtomicOP, CsrImmOP, CsrRegOP, FClassResult, FFlagsException, FpuOPRR,
-    FpuOPRRR, FpuOPRRRR, LoadOP, MInst as Inst, StoreOP, CSR, FRM,
+    AluOPRRI, AluOPRRR, AtomicOP, CSR, CsrImmOP, CsrRegOP, FClassResult, FFlagsException, FRM,
+    FpuOPRR, FpuOPRRR, FpuOPRRRR, LoadOP, MInst as Inst, StoreOP,
 };
 use crate::isa::riscv64::lower::isle::generated_code::{CjOp, MInst, VecAluOpRRImm5, VecAluOpRRR};
-
-/// Additional information for (direct) Call instructions, left out of line to lower the size of
-/// the Inst enum.
-#[derive(Clone, Debug)]
-pub struct CallInfo {
-    pub dest: ExternalName,
-    pub uses: CallArgList,
-    pub defs: CallRetList,
-    pub caller_callconv: CallConv,
-    pub callee_callconv: CallConv,
-    pub clobbers: PRegSet,
-    pub callee_pop_size: u32,
-}
-
-/// Additional information for CallInd instructions, left out of line to lower the size of the Inst
-/// enum.
-#[derive(Clone, Debug)]
-pub struct CallIndInfo {
-    pub rn: Reg,
-    pub uses: CallArgList,
-    pub defs: CallRetList,
-    pub caller_callconv: CallConv,
-    pub callee_callconv: CallConv,
-    pub clobbers: PRegSet,
-    pub callee_pop_size: u32,
-}
 
 /// Additional information for `return_call[_ind]` instructions, left out of
 /// line to lower the size of the `Inst` enum.
 #[derive(Clone, Debug)]
-pub struct ReturnCallInfo {
+pub struct ReturnCallInfo<T> {
+    pub dest: T,
     pub uses: CallArgList,
     pub new_stack_arg_size: u32,
 }
@@ -110,7 +85,7 @@ impl CondBrTarget {
 }
 
 impl Display for CondBrTarget {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             CondBrTarget::Label(l) => write!(f, "{}", l.to_string()),
             CondBrTarget::Fallthrough => write!(f, "0"),
@@ -355,36 +330,50 @@ fn riscv64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_use(rn);
             collector.reg_def(rd);
         }
-        Inst::Call { info } => {
+        Inst::Call { info, .. } => {
             let CallInfo { uses, defs, .. } = &mut **info;
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
-            for CallRetPair { vreg, preg } in defs {
-                collector.reg_fixed_def(vreg, *preg);
+            for CallRetPair { vreg, location } in defs {
+                match location {
+                    RetLocation::Reg(preg, ..) => collector.reg_fixed_def(vreg, *preg),
+                    RetLocation::Stack(..) => collector.any_def(vreg),
+                }
             }
             collector.reg_clobbers(info.clobbers);
+            if let Some(try_call_info) = &mut info.try_call_info {
+                try_call_info.collect_operands(collector);
+            }
         }
         Inst::CallInd { info } => {
-            let CallIndInfo { rn, uses, defs, .. } = &mut **info;
-            collector.reg_use(rn);
+            let CallInfo {
+                dest, uses, defs, ..
+            } = &mut **info;
+            collector.reg_use(dest);
             for CallArgPair { vreg, preg } in uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
-            for CallRetPair { vreg, preg } in defs {
-                collector.reg_fixed_def(vreg, *preg);
+            for CallRetPair { vreg, location } in defs {
+                match location {
+                    RetLocation::Reg(preg, ..) => collector.reg_fixed_def(vreg, *preg),
+                    RetLocation::Stack(..) => collector.any_def(vreg),
+                }
             }
             collector.reg_clobbers(info.clobbers);
+            if let Some(try_call_info) = &mut info.try_call_info {
+                try_call_info.collect_operands(collector);
+            }
         }
-        Inst::ReturnCall { info, .. } => {
+        Inst::ReturnCall { info } => {
             for CallArgPair { vreg, preg } in &mut info.uses {
                 collector.reg_fixed_use(vreg, *preg);
             }
         }
-        Inst::ReturnCallInd { info, callee } => {
+        Inst::ReturnCallInd { info } => {
             // TODO(https://github.com/bytecodealliance/regalloc2/issues/145):
             // This shouldn't be a fixed register constraint.
-            collector.reg_fixed_use(callee, x_reg(5));
+            collector.reg_fixed_use(&mut info.dest, x_reg(5));
 
             for CallArgPair { vreg, preg } in &mut info.uses {
                 collector.reg_fixed_use(vreg, *preg);
@@ -401,13 +390,16 @@ fn riscv64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_use(rs1);
             collector.reg_use(rs2);
         }
-        Inst::LoadExtName { rd, .. } => {
+        Inst::LoadExtNameGot { rd, .. }
+        | Inst::LoadExtNameNear { rd, .. }
+        | Inst::LoadExtNameFar { rd, .. } => {
             collector.reg_def(rd);
         }
         Inst::ElfTlsGetAddr { rd, .. } => {
             // x10 is a0 which is both the first argument and the first return value.
             collector.reg_fixed_def(rd, a0());
-            let mut clobbers = Riscv64MachineDeps::get_regs_clobbered_by_call(CallConv::SystemV);
+            let mut clobbers =
+                Riscv64MachineDeps::get_regs_clobbered_by_call(CallConv::SystemV, false);
             clobbers.remove(px_reg(10));
             collector.reg_clobbers(clobbers);
         }
@@ -703,6 +695,11 @@ fn riscv64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             collector.reg_use(from);
             vec_mask_operands(mask, collector);
         }
+        Inst::EmitIsland { .. } => {}
+        Inst::LabelAddress { dst, .. } => {
+            collector.reg_def(dst);
+        }
+        Inst::SequencePoint { .. } => {}
     }
 }
 
@@ -765,14 +762,28 @@ impl MachInst for Inst {
         }
     }
 
+    fn call_type(&self) -> CallType {
+        match self {
+            Inst::Call { .. } | Inst::CallInd { .. } | Inst::ElfTlsGetAddr { .. } => {
+                CallType::Regular
+            }
+
+            Inst::ReturnCall { .. } | Inst::ReturnCallInd { .. } => CallType::TailCall,
+
+            _ => CallType::None,
+        }
+    }
+
     fn is_term(&self) -> MachTerminator {
         match self {
-            &Inst::Jal { .. } => MachTerminator::Uncond,
-            &Inst::CondBr { .. } => MachTerminator::Cond,
-            &Inst::Jalr { .. } => MachTerminator::Uncond,
+            &Inst::Jal { .. } => MachTerminator::Branch,
+            &Inst::CondBr { .. } => MachTerminator::Branch,
+            &Inst::Jalr { .. } => MachTerminator::Branch,
             &Inst::Rets { .. } => MachTerminator::Ret,
-            &Inst::BrTable { .. } => MachTerminator::Indirect,
+            &Inst::BrTable { .. } => MachTerminator::Branch,
             &Inst::ReturnCall { .. } | &Inst::ReturnCallInd { .. } => MachTerminator::RetCall,
+            &Inst::Call { ref info } if info.try_call_info.is_some() => MachTerminator::Branch,
+            &Inst::CallInd { ref info } if info.try_call_info.is_some() => MachTerminator::Branch,
             _ => MachTerminator::None,
         }
     }
@@ -799,6 +810,10 @@ impl MachInst for Inst {
         Inst::Nop4
     }
 
+    fn gen_nop_units() -> Vec<Vec<u8>> {
+        vec![vec![0x13, 0x00, 0x00, 0x00]]
+    }
+
     fn rc_for_type(ty: Type) -> CodegenResult<(&'static [RegClass], &'static [Type])> {
         match ty {
             I8 => Ok((&[RegClass::Int], &[I8])),
@@ -808,7 +823,8 @@ impl MachInst for Inst {
             F16 => Ok((&[RegClass::Float], &[F16])),
             F32 => Ok((&[RegClass::Float], &[F32])),
             F64 => Ok((&[RegClass::Float], &[F64])),
-            I128 => Ok((&[RegClass::Int, RegClass::Int], &[I64, I64])),
+            // FIXME(#8312): Add support for Q extension
+            F128 | I128 => Ok((&[RegClass::Int, RegClass::Int], &[I64, I64])),
             _ if ty.is_vector() => {
                 debug_assert!(ty.bits() <= 512);
 
@@ -888,6 +904,14 @@ pub fn reg_name(reg: Reg) -> String {
             format!("{reg:?}")
         }
     }
+}
+
+fn pretty_print_try_call(info: &TryCallInfo) -> String {
+    format!(
+        "; j {:?}; catch [{}]",
+        info.continuation,
+        info.pretty_print_dests()
+    )
 }
 
 impl Inst {
@@ -1111,16 +1135,10 @@ impl Inst {
             &Inst::Lui { rd, ref imm } => {
                 format!("{} {},{}", "lui", format_reg(rd.to_reg()), imm.as_i32())
             }
-            &Inst::Fli { rd, ty, imm } => {
+            &Inst::Fli { rd, width, imm } => {
                 let rd_s = format_reg(rd.to_reg());
                 let imm_s = imm.format();
-                let suffix = match ty {
-                    F32 => "s",
-                    F64 => "d",
-                    _ => unreachable!(),
-                };
-
-                format!("fli.{suffix} {rd_s},{imm_s}")
+                format!("fli.{width} {rd_s},{imm_s}")
             }
             &Inst::LoadInlineConst { rd, imm, .. } => {
                 let rd = format_reg(rd.to_reg());
@@ -1321,18 +1339,27 @@ impl Inst {
                     format!("slli {rd},{rn},{shift_bits}; {op} {rd},{rd},{shift_bits}")
                 };
             }
-            &MInst::Call { ref info } => format!("call {}", info.dest.display(None)),
-            &MInst::CallInd { ref info } => {
-                let rd = format_reg(info.rn);
-                format!("callind {rd}")
+            &MInst::Call { ref info } => {
+                let try_call = info
+                    .try_call_info
+                    .as_ref()
+                    .map(|tci| pretty_print_try_call(tci))
+                    .unwrap_or_default();
+                format!("call {}{try_call}", info.dest.display(None))
             }
-            &MInst::ReturnCall {
-                ref callee,
-                ref info,
-            } => {
+            &MInst::CallInd { ref info } => {
+                let rd = format_reg(info.dest);
+                let try_call = info
+                    .try_call_info
+                    .as_ref()
+                    .map(|tci| pretty_print_try_call(tci))
+                    .unwrap_or_default();
+                format!("callind {rd}{try_call}")
+            }
+            &MInst::ReturnCall { ref info } => {
                 let mut s = format!(
-                    "return_call {callee:?} new_stack_arg_size:{}",
-                    info.new_stack_arg_size
+                    "return_call {:?} new_stack_arg_size:{}",
+                    info.dest, info.new_stack_arg_size
                 );
                 for ret in &info.uses {
                     let preg = format_reg(ret.preg);
@@ -1341,8 +1368,8 @@ impl Inst {
                 }
                 s
             }
-            &MInst::ReturnCallInd { callee, ref info } => {
-                let callee = format_reg(callee);
+            &MInst::ReturnCallInd { ref info } => {
+                let callee = format_reg(info.dest);
                 let mut s = format!(
                     "return_call_ind {callee} new_stack_arg_size:{}",
                     info.new_stack_arg_size
@@ -1406,13 +1433,25 @@ impl Inst {
                     format!("{op_name} {rd},{src},({addr})")
                 }
             }
-            &MInst::LoadExtName {
+            &MInst::LoadExtNameGot { rd, ref name } => {
+                let rd = format_reg(rd.to_reg());
+                format!("load_ext_name_got {rd},{}", name.display(None))
+            }
+            &MInst::LoadExtNameNear {
                 rd,
                 ref name,
                 offset,
             } => {
                 let rd = format_reg(rd.to_reg());
-                format!("load_sym {},{}{:+}", rd, name.display(None), offset)
+                format!("load_ext_name_near {rd},{}{offset:+}", name.display(None))
+            }
+            &MInst::LoadExtNameFar {
+                rd,
+                ref name,
+                offset,
+            } => {
+                let rd = format_reg(rd.to_reg());
+                format!("load_ext_name_far {rd},{}{offset:+}", name.display(None))
             }
             &Inst::ElfTlsGetAddr { rd, ref name } => {
                 let rd = format_reg(rd.to_reg());
@@ -1614,8 +1653,8 @@ impl Inst {
                 eew,
                 to,
                 from,
-                ref mask,
-                ref vstate,
+                mask,
+                vstate,
                 ..
             } => {
                 let base = format_vec_amode(from);
@@ -1628,8 +1667,8 @@ impl Inst {
                 eew,
                 to,
                 from,
-                ref mask,
-                ref vstate,
+                mask,
+                vstate,
                 ..
             } => {
                 let dst = format_vec_amode(to);
@@ -1637,6 +1676,18 @@ impl Inst {
                 let mask = format_mask(mask);
 
                 format!("vs{eew}.v {vs3},{dst}{mask} {vstate}")
+            }
+            Inst::EmitIsland { needed_space } => {
+                format!("emit_island {needed_space}")
+            }
+
+            Inst::LabelAddress { dst, label } => {
+                let dst = format_reg(dst.to_reg());
+                format!("label_address {dst}, {label:?}")
+            }
+
+            Inst::SequencePoint {} => {
+                format!("sequence_point")
             }
         }
     }
@@ -1783,7 +1834,7 @@ impl MachInstLabelUse for LabelUse {
 }
 
 impl LabelUse {
-    #[allow(dead_code)] // in case it's needed in the future
+    #[expect(dead_code, reason = "in case it's needed in the future")]
     fn offset_in_range(self, offset: i64) -> bool {
         let min = -(self.max_neg_range() as i64);
         let max = self.max_pos_range() as i64;

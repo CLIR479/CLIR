@@ -1,14 +1,13 @@
-#![cfg(not(miri))]
-
-use anyhow::{anyhow, bail};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use std::task::{Context, Poll, Waker};
 use wasmtime::*;
 
 fn async_store() -> Store<()> {
-    Store::new(&Engine::new(Config::new().async_support(true)).unwrap(), ())
+    Store::new(&Engine::default(), ())
 }
 
 async fn run_smoke_test(store: &mut Store<()>, func: Func) {
@@ -139,6 +138,7 @@ async fn smoke_host_func_with_suspension() -> Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn recursive_call() {
     let mut store = async_store();
     let func_ty = FuncType::new(store.engine(), None, None);
@@ -186,6 +186,7 @@ async fn recursive_call() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn suspend_while_suspending() {
     let mut store = async_store();
 
@@ -206,7 +207,7 @@ async fn suspend_while_suspending() {
             let mut future = Box::pin(async_thunk.call_async(&mut caller, &[], &mut []));
             let poll = future
                 .as_mut()
-                .poll(&mut Context::from_waker(&noop_waker()));
+                .poll(&mut Context::from_waker(Waker::noop()));
             assert!(poll.is_ready());
             Ok(())
         });
@@ -248,7 +249,7 @@ async fn suspend_while_suspending() {
 
 #[tokio::test]
 async fn cancel_during_run() {
-    let mut store = Store::new(&Engine::new(Config::new().async_support(true)).unwrap(), 0);
+    let mut store = Store::new(&Engine::default(), 0);
 
     let func_ty = FuncType::new(store.engine(), None, None);
     let async_thunk = Func::new_async(&mut store, func_ty, move |mut caller, _params, _results| {
@@ -291,8 +292,9 @@ async fn cancel_during_run() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn iloop_with_fuel() {
-    let engine = Engine::new(Config::new().async_support(true).consume_fuel(true)).unwrap();
+    let engine = Engine::new(Config::new().consume_fuel(true)).unwrap();
     let mut store = Store::new(&engine, ());
     store.set_fuel(10_000).unwrap();
     store.fuel_async_yield_interval(Some(100)).unwrap();
@@ -314,8 +316,9 @@ async fn iloop_with_fuel() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn fuel_eventually_finishes() {
-    let engine = Engine::new(Config::new().async_support(true).consume_fuel(true)).unwrap();
+    let engine = Engine::new(Config::new().consume_fuel(true)).unwrap();
     let mut store = Store::new(&engine, ());
     store.set_fuel(u64::MAX).unwrap();
     store.fuel_async_yield_interval(Some(10)).unwrap();
@@ -350,11 +353,9 @@ async fn async_with_pooling_stacks() {
         .max_memory_size(1 << 16)
         .table_elements(0);
     let mut config = Config::new();
-    config.async_support(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pool));
-    config.dynamic_memory_guard_size(0);
-    config.static_memory_guard_size(0);
-    config.static_memory_maximum_size(1 << 16);
+    config.memory_guard_size(0);
+    config.memory_reservation(1 << 16);
 
     let engine = Engine::new(&config).unwrap();
     let mut store = Store::new(&engine, ());
@@ -375,11 +376,9 @@ async fn async_host_func_with_pooling_stacks() -> Result<()> {
         .max_memory_size(1 << 16)
         .table_elements(0);
     let mut config = Config::new();
-    config.async_support(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
-    config.dynamic_memory_guard_size(0);
-    config.static_memory_guard_size(0);
-    config.static_memory_maximum_size(1 << 16);
+    config.memory_guard_size(0);
+    config.memory_reservation(1 << 16);
 
     let mut store = Store::new(&Engine::new(&config)?, ());
     let mut linker = Linker::new(store.engine());
@@ -397,6 +396,7 @@ async fn async_host_func_with_pooling_stacks() -> Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn async_mpk_protection() -> Result<()> {
     let _ = env_logger::try_init();
 
@@ -409,9 +409,8 @@ async fn async_mpk_protection() -> Result<()> {
         .max_memory_size(1 << 16)
         .table_elements(0);
     let mut config = Config::new();
-    config.async_support(true);
     config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
-    config.static_memory_maximum_size(1 << 26);
+    config.memory_reservation(1 << 26);
     config.epoch_interruption(true);
     let engine = Engine::new(&config)?;
 
@@ -496,6 +495,7 @@ where
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn resume_separate_thread() {
     // This test will poll the following future on two threads. Simulating a
     // trap requires accessing TLS info, so that should be preserved correctly.
@@ -514,7 +514,7 @@ async fn resume_separate_thread() {
         let func = Func::wrap_async(&mut store, |_, _: ()| {
             Box::new(async {
                 tokio::task::yield_now().await;
-                Err::<(), _>(anyhow!("test"))
+                Err::<(), _>(format_err!("test"))
             })
         });
         let result = Instance::new_async(&mut store, &module, &[func.into()]).await;
@@ -524,6 +524,7 @@ async fn resume_separate_thread() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn resume_separate_thread2() {
     // This test will poll the following future on two threads. Catching a
     // signal requires looking up TLS information to determine whether it's a
@@ -555,6 +556,7 @@ async fn resume_separate_thread2() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn resume_separate_thread3() {
     let _ = env_logger::try_init();
 
@@ -595,7 +597,7 @@ async fn resume_separate_thread3() {
         let mut future = Box::pin(f);
         let poll = future
             .as_mut()
-            .poll(&mut Context::from_waker(&noop_waker()));
+            .poll(&mut Context::from_waker(Waker::noop()));
         assert!(poll.is_pending());
 
         // ... so at this point our call into wasm is suspended. The call into
@@ -616,6 +618,50 @@ async fn resume_separate_thread3() {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn resume_separate_thread_tls() {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    struct IncOnDrop;
+    impl Drop for IncOnDrop {
+        fn drop(&mut self) {
+            COUNTER.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    thread_local!(static FOO: IncOnDrop = IncOnDrop);
+
+    // This test will poll the following future on two threads.
+    // We verify that TLS destructors are run correctly.
+    execute_across_threads(async move {
+        let mut store = async_store();
+        let module = Module::new(
+            store.engine(),
+            "
+            (module
+                (import \"\" \"\" (func))
+                (start 0)
+            )
+            ",
+        )
+        .unwrap();
+        let func = Func::wrap_async(&mut store, |_, _: ()| {
+            Box::new(async {
+                tokio::task::yield_now().await;
+                FOO.with(|_f| {});
+                Err::<(), _>(format_err!("test"))
+            })
+        });
+        let result = Instance::new_async(&mut store, &module, &[func.into()]).await;
+        assert!(result.is_err());
+    })
+    .await;
+
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn recursive_async() -> Result<()> {
     let _ = env_logger::try_init();
     let mut store = async_store();
@@ -652,6 +698,7 @@ async fn recursive_async() -> Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn linker_module_command() -> Result<()> {
     let mut store = async_store();
     let mut linker = Linker::new(store.engine());
@@ -694,6 +741,7 @@ async fn linker_module_command() -> Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn linker_module_reactor() -> Result<()> {
     let mut store = async_store();
     let mut linker = Linker::new(store.engine());
@@ -782,18 +830,10 @@ where
     }
 }
 
-fn noop_waker() -> Waker {
-    const VTABLE: RawWakerVTable =
-        RawWakerVTable::new(|ptr| RawWaker::new(ptr, &VTABLE), |_| {}, |_| {}, |_| {});
-    const RAW: RawWaker = RawWaker::new(0 as *const (), &VTABLE);
-    unsafe { Waker::from_raw(RAW) }
-}
-
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn non_stacky_async_activations() -> Result<()> {
-    let mut config = Config::new();
-    config.async_support(true);
-    let engine = Engine::new(&config)?;
+    let engine = Engine::default();
     let mut store1: Store<Option<Pin<Box<dyn Future<Output = Result<()>> + Send>>>> =
         Store::new(&engine, None);
     let mut linker1 = Linker::new(&engine);
@@ -849,7 +889,7 @@ async fn non_stacky_async_activations() -> Result<()> {
 
             let module2 = module2.clone();
             let mut store2 = Store::new(caller.engine(), ());
-            let mut linker2 = Linker::new(caller.engine());
+            let mut linker2 = Linker::<()>::new(caller.engine());
             linker2
                 .func_wrap_async("", "yield", {
                     let stacks = stacks.clone();
@@ -878,7 +918,7 @@ async fn non_stacky_async_activations() -> Result<()> {
                             .await?;
 
                         capture_stack(&stacks, &store2);
-                        Ok(())
+                        wasmtime::error::Ok(())
                     }
                 }) as _)
                 .await
@@ -928,12 +968,11 @@ async fn non_stacky_async_activations() -> Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn gc_preserves_externref_on_historical_async_stacks() -> Result<()> {
     let _ = env_logger::try_init();
 
-    let mut config = Config::new();
-    config.async_support(true);
-    let engine = Engine::new(&config)?;
+    let engine = Engine::default();
 
     let module = Module::new(
         &engine,
@@ -965,12 +1004,17 @@ async fn gc_preserves_externref_on_historical_async_stacks() -> Result<()> {
 
     let mut store = Store::new(&engine, None);
     let mut linker = Linker::<Option<F>>::new(&engine);
-    linker.func_wrap("", "gc", |mut cx: Caller<'_, _>| cx.gc())?;
+    linker.func_wrap_async("", "gc", |mut cx: Caller<'_, _>, ()| {
+        Box::new(async move { cx.gc_async(None).await })
+    })?;
     linker.func_wrap(
         "",
         "test",
         |cx: Caller<'_, _>, val: i32, handle: Option<Rooted<ExternRef>>| -> Result<()> {
-            assert_eq!(handle.unwrap().data(&cx)?.downcast_ref(), Some(&val));
+            assert_eq!(
+                handle.unwrap().data(&cx)?.unwrap().downcast_ref(),
+                Some(&val)
+            );
             Ok(())
         },
     )?;
@@ -980,7 +1024,7 @@ async fn gc_preserves_externref_on_historical_async_stacks() -> Result<()> {
         |mut cx: Caller<'_, Option<F>>, (val,): (i32,)| {
             let func = cx.data().clone().unwrap();
             Box::new(async move {
-                let r = Some(ExternRef::new(&mut cx, val)?);
+                let r = Some(ExternRef::new_async(&mut cx, val).await?);
                 Ok(func.call_async(&mut cx, (val, r)).await)
             })
         },
@@ -989,26 +1033,27 @@ async fn gc_preserves_externref_on_historical_async_stacks() -> Result<()> {
     let func: F = instance.get_typed_func(&mut store, "run")?;
     *store.data_mut() = Some(func.clone());
 
-    let r = Some(ExternRef::new(&mut store, 5)?);
+    let r = Some(ExternRef::new_async(&mut store, 5).await?);
     func.call_async(&mut store, (5, r)).await?;
 
     Ok(())
 }
 
 #[tokio::test]
+#[cfg_attr(miri, ignore)]
 async fn async_gc_with_func_new_and_func_wrap() -> Result<()> {
     let _ = env_logger::try_init();
 
     let mut config = Config::new();
-    config.async_support(true);
+    config.wasm_gc(true);
     let engine = Engine::new(&config)?;
 
     let module = Module::new(
         &engine,
         r#"
             (module $m1
-                (import "" "a" (func $a (result externref)))
-                (import "" "b" (func $b (result externref)))
+                (import "" "a" (func $a (result externref structref arrayref)))
+                (import "" "b" (func $b (result externref structref arrayref)))
 
                 (table 2 funcref)
                 (elem (i32.const 0) func $a $b)
@@ -1023,10 +1068,14 @@ async fn async_gc_with_func_new_and_func_wrap() -> Result<()> {
                 (func $call (param i32)
                     (local $cnt i32)
                     (loop $l
-                        (drop (call_indirect (result externref) (local.get 0)))
+                        (call_indirect (result externref structref arrayref) (local.get 0))
+                        drop
+                        drop
+                        drop
+
                         (local.set $cnt (i32.add (local.get $cnt) (i32.const 1)))
 
-                        (if (i32.lt_u (local.get $cnt) (i32.const 1000))
+                        (if (i32.lt_u (local.get $cnt) (i32.const 5000))
                          (then (br $l)))
                     )
                 )
@@ -1034,14 +1083,51 @@ async fn async_gc_with_func_new_and_func_wrap() -> Result<()> {
         "#,
     )?;
 
-    let mut linker = Linker::new(&engine);
-    linker.func_wrap("", "a", |mut cx: Caller<'_, _>| {
-        Ok(Some(ExternRef::new(&mut cx, 100)?))
+    let mut linker = Linker::<()>::new(&engine);
+    linker.func_wrap_async("", "a", |mut cx: Caller<'_, _>, ()| {
+        Box::new(async move {
+            let externref = ExternRef::new_async(&mut cx, 100).await?;
+
+            let struct_ty = StructType::new(cx.engine(), [])?;
+            let struct_pre = StructRefPre::new(&mut cx, struct_ty);
+            let structref = StructRef::new_async(&mut cx, &struct_pre, &[]).await?;
+
+            let array_ty = ArrayType::new(
+                cx.engine(),
+                FieldType::new(Mutability::Var, ValType::I32.into()),
+            );
+            let array_pre = ArrayRefPre::new(&mut cx, array_ty);
+            let arrayref = ArrayRef::new_fixed_async(&mut cx, &array_pre, &[]).await?;
+
+            Ok((Some(externref), Some(structref), Some(arrayref)))
+        })
     })?;
-    let ty = FuncType::new(&engine, [], [ValType::EXTERNREF]);
-    linker.func_new("", "b", ty, |mut cx, _, results| {
-        results[0] = ExternRef::new(&mut cx, 100)?.into();
-        Ok(())
+    let ty = FuncType::new(
+        &engine,
+        [],
+        [ValType::EXTERNREF, ValType::STRUCTREF, ValType::ARRAYREF],
+    );
+    linker.func_new_async("", "b", ty, |mut cx, _, results| {
+        Box::new(async move {
+            results[0] = ExternRef::new_async(&mut cx, 100).await?.into();
+
+            let struct_ty = StructType::new(cx.engine(), [])?;
+            let struct_pre = StructRefPre::new(&mut cx, struct_ty);
+            results[1] = StructRef::new_async(&mut cx, &struct_pre, &[])
+                .await?
+                .into();
+
+            let array_ty = ArrayType::new(
+                cx.engine(),
+                FieldType::new(Mutability::Var, ValType::I32.into()),
+            );
+            let array_pre = ArrayRefPre::new(&mut cx, array_ty);
+            results[2] = ArrayRef::new_fixed_async(&mut cx, &array_pre, &[])
+                .await?
+                .into();
+
+            Ok(())
+        })
     })?;
 
     let mut store = Store::new(&engine, ());

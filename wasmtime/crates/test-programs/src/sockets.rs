@@ -17,6 +17,10 @@ use std::ops::Range;
 
 const TIMEOUT_NS: u64 = 1_000_000_000;
 
+pub fn supports_ipv6() -> bool {
+    std::env::var("DISABLE_IPV6").is_err()
+}
+
 impl Pollable {
     pub fn block_until(&self, timeout: &Pollable) -> Result<(), ErrorCode> {
         let ready = poll::poll(&[self, timeout]);
@@ -25,6 +29,19 @@ impl Pollable {
             0 => Ok(()),
             1 => Err(ErrorCode::Timeout),
             _ => unreachable!(),
+        }
+    }
+}
+
+impl InputStream {
+    pub fn blocking_read_to_end(&self) -> Result<Vec<u8>, crate::wasi::io::error::Error> {
+        let mut data = vec![];
+        loop {
+            match self.blocking_read(1024 * 1024) {
+                Ok(chunk) => data.extend(chunk),
+                Err(StreamError::Closed) => return Ok(data),
+                Err(StreamError::LastOperationFailed(e)) => return Err(e),
+            }
         }
     }
 }
@@ -300,11 +317,11 @@ impl IpSocketAddress {
     pub const fn new(ip: IpAddress, port: u16) -> IpSocketAddress {
         match ip {
             IpAddress::Ipv4(addr) => IpSocketAddress::Ipv4(Ipv4SocketAddress {
-                port: port,
+                port,
                 address: addr,
             }),
             IpAddress::Ipv6(addr) => IpSocketAddress::Ipv6(Ipv6SocketAddress {
-                port: port,
+                port,
                 address: addr,
                 flow_info: 0,
                 scope_id: 0,

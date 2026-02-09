@@ -5,7 +5,18 @@
 //! but we guarantee eventual consistency and fault tolerancy.
 //! Background tasks can be CPU intensive, but the worker thread has low priority.
 
-use super::{fs_write_atomic, CacheConfig};
+#![cfg_attr(
+    not(test),
+    expect(
+        clippy::useless_conversion,
+        reason = "cfg(test) and cfg(not(test)) have a different definition \
+                  of `SystemTime`, so conversions below are needed in \
+                  one mode but not the other, just ignore the lint in this \
+                  module in not(test) mode where the conversion isn't required",
+    )
+)]
+
+use super::{CacheConfig, fs_write_atomic};
 use log::{debug, info, trace, warn};
 use serde_derive::{Deserialize, Serialize};
 use std::cmp;
@@ -14,7 +25,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 #[cfg(test)]
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -99,8 +110,7 @@ impl Worker {
         if let Err(ref err) = sent_event {
             info!(
                 "Failed to send asynchronously message to worker thread, \
-                 event: {:?}, error: {}",
-                event, err
+                 event: {event:?}, error: {err}"
             );
         }
 
@@ -228,13 +238,7 @@ impl WorkerThread {
         // https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadpriority
         // https://docs.microsoft.com/en-us/windows/win32/procthread/scheduling-priorities
 
-        if unsafe {
-            SetThreadPriority(
-                GetCurrentThread(),
-                THREAD_MODE_BACKGROUND_BEGIN.try_into().unwrap(),
-            )
-        } == 0
-        {
+        if unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) } == 0 {
             warn!(
                 "Failed to lower worker thread priority. It might affect application performance."
             );
@@ -249,11 +253,12 @@ impl WorkerThread {
 
         match rustix::process::nice(NICE_DELTA_FOR_BACKGROUND_TASKS) {
             Ok(current_nice) => {
-                debug!("New nice value of worker thread: {}", current_nice);
+                debug!("New nice value of worker thread: {current_nice}");
             }
             Err(err) => {
                 warn!(
-                    "Failed to lower worker thread priority ({:?}). It might affect application performance.", err);
+                    "Failed to lower worker thread priority ({err:?}). It might affect application performance."
+                );
             }
         };
     }
@@ -388,6 +393,12 @@ impl WorkerThread {
         trace!("Task finished: recompress file: {}", path.display());
     }
 
+    fn directory(&self) -> &PathBuf {
+        self.cache_config
+            .directory()
+            .expect("CacheConfig should be validated before being passed to a WorkerThread")
+    }
+
     fn handle_on_cache_update(&self, path: PathBuf) {
         trace!("handle_on_cache_update() for path: {}", path.display());
 
@@ -411,7 +422,7 @@ impl WorkerThread {
         // acquire lock for cleanup task
         // Lock is a proof of recent cleanup task, so we don't want to delete them.
         // Expired locks will be deleted by the cleanup task.
-        let cleanup_file = self.cache_config.directory().join(".cleanup"); // some non existing marker file
+        let cleanup_file = self.directory().join(".cleanup"); // some non existing marker file
         if acquire_task_fs_lock(
             &cleanup_file,
             self.cache_config.cleanup_interval(),
@@ -683,7 +694,7 @@ impl WorkerThread {
                             "Failed to get metadata/mtime, deleting the file",
                             stats_path
                         );
-                        // .into() called for the SystemTimeStub if cf-constructor(test)
+                        // .into() called for the SystemTimeStub if cfg(test)
                         vec.push(CacheEntry::Recognized {
                             path: mod_path.to_path_buf(),
                             mtime: stats_mtime.into(),
@@ -700,7 +711,7 @@ impl WorkerThread {
                             "Failed to get metadata/mtime, deleting the file",
                             mod_path
                         );
-                        // .into() called for the SystemTimeStub if cf-constructor(test)
+                        // .into() called for the SystemTimeStub if cfg(test)
                         vec.push(CacheEntry::Recognized {
                             path: mod_path.to_path_buf(),
                             mtime: mod_mtime.into(),
@@ -717,12 +728,7 @@ impl WorkerThread {
         }
 
         let mut vec = Vec::new();
-        enter_dir(
-            &mut vec,
-            self.cache_config.directory(),
-            0,
-            &self.cache_config,
-        );
+        enter_dir(&mut vec, self.directory(), 0, &self.cache_config);
         vec
     }
 }

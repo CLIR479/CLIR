@@ -1,4 +1,4 @@
-use anyhow::Result;
+use wasmtime::Result;
 
 #[cfg(not(target_os = "linux"))]
 fn main() -> Result<()> {
@@ -8,23 +8,21 @@ fn main() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn main() -> Result<()> {
-    use anyhow::{anyhow, Context};
-    use libloading::os::unix::{Library, Symbol, RTLD_GLOBAL, RTLD_NOW};
+    use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW, Symbol};
     use object::{Object, ObjectSymbol};
-    use std::io::Write;
-    use wasmtime::{Config, Engine};
+    use wasmtime::{Config, Engine, bail, error::Context as _, format_err};
 
     let mut args = std::env::args();
     let _current_exe = args.next();
     let triple = args
         .next()
-        .ok_or_else(|| anyhow!("missing argument 1: triple"))?;
+        .ok_or_else(|| format_err!("missing argument 1: triple"))?;
     let embedding_so_path = args
         .next()
-        .ok_or_else(|| anyhow!("missing argument 2: path to libembedding.so"))?;
+        .ok_or_else(|| format_err!("missing argument 2: path to libembedding.so"))?;
     let platform_so_path = args
         .next()
-        .ok_or_else(|| anyhow!("missing argument 3: path to libwasmtime-platform.so"))?;
+        .ok_or_else(|| format_err!("missing argument 3: path to libwasmtime-platform.so"))?;
 
     // Path to the artifact which is the build of the embedding.
     //
@@ -65,6 +63,36 @@ fn main() -> Result<()> {
     // Note that `Config::target` is used here to enable cross-compilation.
     let mut config = Config::new();
     config.target(&triple)?;
+
+    // If signals-based-traps are disabled then that additionally means that
+    // some configuration knobs need to be turned to match the expectations of
+    // the guest program being loaded.
+    if !cfg!(feature = "custom") {
+        config.memory_init_cow(false);
+        config.memory_reservation(0);
+        config.memory_guard_size(0);
+        config.memory_reservation_for_growth(0);
+        config.signals_based_traps(false);
+    }
+
+    // For x86_64 targets be sure to enable relevant CPU features to avoid
+    // float-related libcalls which is required for the `x86_64-unknown-none`
+    // target.
+    //
+    // Note that the embedding will need to check that these features are
+    // actually available at runtime. CPU support for these features has
+    // existed since 2013 (Haswell) on Intel chips and 2012 (Piledriver) on
+    // AMD chips.
+    if cfg!(target_arch = "x86_64") {
+        unsafe {
+            config.cranelift_flag_enable("has_sse3");
+            config.cranelift_flag_enable("has_ssse3");
+            config.cranelift_flag_enable("has_sse41");
+            config.cranelift_flag_enable("has_sse42");
+            config.cranelift_flag_enable("has_fma");
+        }
+    }
+
     let engine = Engine::new(&config)?;
     let smoke = engine.precompile_module(b"(module)")?;
     let simple_add = engine.precompile_module(
@@ -81,6 +109,16 @@ fn main() -> Result<()> {
                 (import "host" "multiply" (func $multiply (param i32 i32) (result i32)))
                 (func (export "add_and_mul") (param i32 i32 i32) (result i32)
                     (i32.add (call $multiply (local.get 0) (local.get 1)) (local.get 2)))
+            )
+        "#,
+    )?;
+    let simple_floats = engine.precompile_module(
+        br#"
+            (module
+                (func (export "frob") (param f32 f32) (result f32)
+                    (f32.ceil (local.get 0))
+                    (f32.floor (local.get 1))
+                    f32.add)
             )
         "#,
     )?;
@@ -123,6 +161,8 @@ fn main() -> Result<()> {
                 usize,
                 *const u8,
                 usize,
+                *const u8,
+                usize,
             ) -> usize,
         > = lib
             .get(b"run")
@@ -138,10 +178,45 @@ fn main() -> Result<()> {
             simple_add.len(),
             simple_host_fn.as_ptr(),
             simple_host_fn.len(),
+            simple_floats.as_ptr(),
+            simple_floats.len(),
         );
         error_buf.set_len(len);
 
-        std::io::stderr().write_all(&error_buf).unwrap();
+        if len > 0 {
+            bail!("{}", String::from_utf8_lossy(&error_buf));
+        }
+
+        #[cfg(feature = "wasi")]
+        {
+            let wasi_component_path = args
+                .next()
+                .ok_or_else(|| format_err!("missing argument 4: path to wasi component"))?;
+            let wasi_component = std::fs::read(&wasi_component_path)?;
+            let wasi_component = engine.precompile_component(&wasi_component)?;
+
+            let run_wasi: Symbol<extern "C" fn(*mut u8, *mut usize, *const u8, usize) -> usize> =
+                lib.get(b"run_wasi")
+                    .context("failed to find the `run_wasi` symbol in the library")?;
+
+            const PRINT_CAPACITY: usize = 1024 * 1024;
+            let mut print_buf = Vec::with_capacity(PRINT_CAPACITY);
+            let mut print_len = PRINT_CAPACITY;
+            let status = run_wasi(
+                print_buf.as_mut_ptr(),
+                std::ptr::from_mut(&mut print_len),
+                wasi_component.as_ptr(),
+                wasi_component.len(),
+            );
+            print_buf.set_len(print_len);
+            let print_buf = String::from_utf8_lossy(&print_buf);
+
+            if status > 0 {
+                bail!("{print_buf}");
+            } else {
+                println!("{print_buf}");
+            }
+        }
     }
     Ok(())
 }

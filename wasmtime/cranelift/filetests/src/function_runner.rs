@@ -1,21 +1,28 @@
 //! Provides functionality for compiling and running CLIF IR for `run` tests.
-use anyhow::{anyhow, Result};
+use anyhow::{Context as _, Result, anyhow};
 use core::mem;
+use cranelift::prelude::Imm64;
+use cranelift_codegen::cursor::{Cursor, FuncCursor};
 use cranelift_codegen::data_value::DataValue;
 use cranelift_codegen::ir::{
-    ExternalName, Function, InstBuilder, Signature, UserExternalName, UserFuncName,
+    ExternalName, Function, InstBuilder, InstructionData, LibCall, Opcode, Signature,
+    UserExternalName, UserFuncName,
 };
 use cranelift_codegen::isa::{OwnedTargetIsa, TargetIsa};
-use cranelift_codegen::{ir, settings, CodegenError, Context};
+use cranelift_codegen::{CodegenError, Context, ir, settings};
 use cranelift_control::ControlPlane;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, ModuleError};
 use cranelift_native::builder_with_options;
 use cranelift_reader::TestFile;
+use pulley_interpreter::interp as pulley;
+use std::cell::Cell;
 use std::cmp::max;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ptr::NonNull;
+use target_lexicon::Architecture;
 use thiserror::Error;
 
 const TESTFILE_NAMESPACE: u32 = 0;
@@ -57,14 +64,16 @@ struct DefinedFunction {
 ///
 /// let code = "test run \n function %add(i32, i32) -> i32 {  block0(v0:i32, v1:i32):  v2 = iadd v0, v1  return v2 }".into();
 /// let func = parse_functions(code).unwrap().into_iter().nth(0).unwrap();
-/// let mut compiler = TestFileCompiler::with_default_host_isa().unwrap();
+/// let Ok(mut compiler) = TestFileCompiler::with_default_host_isa() else {
+///     return;
+/// };
 /// compiler.declare_function(&func).unwrap();
 /// compiler.define_function(func.clone(), ctrl_plane).unwrap();
 /// compiler.create_trampoline_for_function(&func, ctrl_plane).unwrap();
 /// let compiled = compiler.compile().unwrap();
 /// let trampoline = compiled.get_trampoline(&func).unwrap();
 ///
-/// let returned = trampoline.call(&vec![DataValue::I32(2), DataValue::I32(40)]);
+/// let returned = trampoline.call(&compiled, &vec![DataValue::I32(2), DataValue::I32(40)]);
 /// assert_eq!(vec![DataValue::I32(42)], returned);
 /// ```
 pub struct TestFileCompiler {
@@ -90,17 +99,7 @@ impl TestFileCompiler {
     /// [TestFileCompiler::with_host_isa]).
     pub fn new(isa: OwnedTargetIsa) -> Self {
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        let _ = &mut builder; // require mutability on all architectures
-        #[cfg(target_arch = "x86_64")]
-        {
-            builder.symbol_lookup_fn(Box::new(|name| {
-                if name == "__cranelift_x86_pshufb" {
-                    Some(__cranelift_x86_pshufb as *const u8)
-                } else {
-                    None
-                }
-            }));
-        }
+        builder.symbol_lookup_fn(Box::new(lookup_libcall));
 
         // On Unix platforms force `libm` to get linked into this executable
         // because tests that use libcalls rely on this library being present.
@@ -108,11 +107,11 @@ impl TestFileCompiler {
         // final binary doesn't link in `libm`.
         #[cfg(unix)]
         {
-            extern "C" {
-                fn ceilf(f: f32) -> f32;
+            unsafe extern "C" {
+                safe fn cosf(f: f32) -> f32;
             }
-            let f = 1.2_f32;
-            assert_eq!(f.ceil(), unsafe { ceilf(f) });
+            let f = std::hint::black_box(1.2_f32);
+            assert_eq!(f.cos(), cosf(f));
         }
 
         let module = JITModule::new(builder);
@@ -128,8 +127,9 @@ impl TestFileCompiler {
 
     /// Build a [TestFileCompiler] using the host machine's ISA and the passed flags.
     pub fn with_host_isa(flags: settings::Flags) -> Result<Self> {
-        let builder =
-            builder_with_options(true).expect("Unable to build a TargetIsa for the current host");
+        let builder = builder_with_options(true)
+            .map_err(anyhow::Error::msg)
+            .context("Unable to build a TargetIsa for the current host")?;
         let isa = builder.finish(flags)?;
         Ok(Self::new(isa))
     }
@@ -252,7 +252,13 @@ impl TestFileCompiler {
     }
 
     /// Defines the body of a function
-    pub fn define_function(&mut self, func: Function, ctrl_plane: &mut ControlPlane) -> Result<()> {
+    pub fn define_function(
+        &mut self,
+        mut func: Function,
+        ctrl_plane: &mut ControlPlane,
+    ) -> Result<()> {
+        Self::replace_hostcall_references(&mut func);
+
         let defined_func = self
             .defined_functions
             .get(&func.name)
@@ -266,6 +272,47 @@ impl TestFileCompiler {
         )?;
         self.module.clear_context(&mut self.ctx);
         Ok(())
+    }
+
+    fn replace_hostcall_references(func: &mut Function) {
+        // For every `func_addr` referring to a hostcall that we
+        // define, replace with an `iconst` with the actual
+        // address. Then modify the external func references to
+        // harmless libcall references (that will be unused so
+        // ignored).
+        let mut funcrefs_to_remove = HashSet::new();
+        let mut cursor = FuncCursor::new(func);
+        while let Some(_block) = cursor.next_block() {
+            while let Some(inst) = cursor.next_inst() {
+                match &cursor.func.dfg.insts[inst] {
+                    InstructionData::FuncAddr {
+                        opcode: Opcode::FuncAddr,
+                        func_ref,
+                    } => {
+                        let ext_func = &cursor.func.dfg.ext_funcs[*func_ref];
+                        let hostcall_addr = match &ext_func.name {
+                            ExternalName::TestCase(tc) if tc.raw() == b"__cranelift_throw" => {
+                                Some((__cranelift_throw as *const ()).addr())
+                            }
+                            _ => None,
+                        };
+
+                        if let Some(addr) = hostcall_addr {
+                            funcrefs_to_remove.insert(*func_ref);
+                            cursor.func.dfg.insts[inst] = InstructionData::UnaryImm {
+                                opcode: Opcode::Iconst,
+                                imm: Imm64::new(addr as i64),
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for to_remove in funcrefs_to_remove {
+            func.dfg.ext_funcs[to_remove].name = ExternalName::LibCall(LibCall::Probestack);
+        }
     }
 
     /// Creates and registers a trampoline for a function if none exists.
@@ -329,7 +376,7 @@ impl CompiledTestFile {
     /// Return a trampoline for calling.
     ///
     /// Returns None if [TestFileCompiler::create_trampoline_for_function] wasn't called for this function.
-    pub fn get_trampoline(&self, func: &Function) -> Option<Trampoline> {
+    pub fn get_trampoline(&self, func: &Function) -> Option<Trampoline<'_>> {
         let defined_func = self.defined_functions.get(&func.name)?;
         let trampoline_id = self
             .trampolines
@@ -353,6 +400,13 @@ impl Drop for CompiledTestFile {
     }
 }
 
+std::thread_local! {
+    /// TLS slot used to store a CompiledTestFile reference so that it
+    /// can be recovered when a hostcall (such as the exception-throw
+    /// handler) is invoked.
+    pub static COMPILED_TEST_FILE: Cell<*const CompiledTestFile> = Cell::new(std::ptr::null());
+}
+
 /// A callable trampoline
 pub struct Trampoline<'a> {
     module: &'a JITModule,
@@ -363,18 +417,55 @@ pub struct Trampoline<'a> {
 
 impl<'a> Trampoline<'a> {
     /// Call the target function of this trampoline, passing in [DataValue]s using a compiled trampoline.
-    pub fn call(&self, arguments: &[DataValue]) -> Vec<DataValue> {
+    pub fn call(&self, compiled: &CompiledTestFile, arguments: &[DataValue]) -> Vec<DataValue> {
         let mut values = UnboxedValues::make_arguments(arguments, &self.func_signature);
         let arguments_address = values.as_mut_ptr();
 
         let function_ptr = self.module.get_finalized_function(self.func_id);
         let trampoline_ptr = self.module.get_finalized_function(self.trampoline_id);
 
-        let callable_trampoline: fn(*const u8, *mut u128) -> () =
-            unsafe { mem::transmute(trampoline_ptr) };
-        callable_trampoline(function_ptr, arguments_address);
+        COMPILED_TEST_FILE.set(compiled as *const _);
+        unsafe {
+            self.call_raw(trampoline_ptr, function_ptr, arguments_address);
+        }
+        COMPILED_TEST_FILE.set(std::ptr::null());
 
         values.collect_returns(&self.func_signature)
+    }
+
+    unsafe fn call_raw(
+        &self,
+        trampoline_ptr: *const u8,
+        function_ptr: *const u8,
+        arguments_address: *mut u128,
+    ) {
+        match self.module.isa().triple().architecture {
+            // For the pulley target this is pulley bytecode, not machine code,
+            // so run the interpreter.
+            Architecture::Pulley32
+            | Architecture::Pulley64
+            | Architecture::Pulley32be
+            | Architecture::Pulley64be => {
+                let mut state = pulley::Vm::new();
+                unsafe {
+                    state.call(
+                        NonNull::new(trampoline_ptr.cast_mut()).unwrap(),
+                        &[
+                            pulley::XRegVal::new_ptr(function_ptr.cast_mut()).into(),
+                            pulley::XRegVal::new_ptr(arguments_address).into(),
+                        ],
+                        [],
+                    );
+                }
+            }
+
+            // Other targets natively execute this machine code.
+            _ => {
+                let callable_trampoline: fn(*const u8, *mut u128) -> () =
+                    unsafe { mem::transmute(trampoline_ptr) };
+                callable_trampoline(function_ptr, arguments_address);
+            }
+        }
     }
 }
 
@@ -525,10 +616,180 @@ fn make_trampoline(name: UserFuncName, signature: &ir::Signature, isa: &dyn Targ
     func
 }
 
+/// Hostcall invoked directly from a compiled function body to test
+/// exception throws.
+///
+/// This function does not return normally: it either uses the
+/// unwinder to jump directly to a Cranelift frame further up the
+/// stack, if a handler is found; or it panics, if not.
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "s390x",
+    target_arch = "riscv64"
+))]
+extern "C-unwind" fn __cranelift_throw(
+    entry_fp: usize,
+    exit_fp: usize,
+    exit_pc: usize,
+    tag: u32,
+    payload1: usize,
+    payload2: usize,
+) -> ! {
+    let compiled_test_file = unsafe { &*COMPILED_TEST_FILE.get() };
+    let unwind_host = wasmtime_unwinder::UnwindHost;
+    let frame_handler = |frame: &wasmtime_unwinder::Frame| -> Option<(usize, usize)> {
+        let (base, table) = compiled_test_file
+            .module
+            .as_ref()
+            .unwrap()
+            .lookup_wasmtime_exception_data(frame.pc())?;
+        let relative_pc = u32::try_from(
+            frame
+                .pc()
+                .checked_sub(base)
+                .expect("module lookup did not return a module base below the PC"),
+        )
+        .expect("module larger than 4GiB");
+
+        table
+            .lookup_pc_tag(relative_pc, tag)
+            .map(|(frame_offset, handler)| {
+                let handler_sp = frame
+                    .fp()
+                    .wrapping_sub(usize::try_from(frame_offset).unwrap());
+                let handler_pc = base
+                    .checked_add(usize::try_from(handler).unwrap())
+                    .expect("Handler address computation overflowed");
+                (handler_pc, handler_sp)
+            })
+    };
+    unsafe {
+        match wasmtime_unwinder::Handler::find(
+            &unwind_host,
+            frame_handler,
+            exit_pc,
+            exit_fp,
+            entry_fp,
+        ) {
+            Some(handler) => handler.resume_tailcc(payload1, payload2),
+            None => {
+                panic!("Expected a handler to exit for throw of tag {tag} at pc {exit_pc:x}");
+            }
+        }
+    }
+}
+
+#[cfg(not(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "s390x",
+    target_arch = "riscv64"
+)))]
+extern "C-unwind" fn __cranelift_throw(
+    _entry_fp: usize,
+    _exit_fp: usize,
+    _exit_pc: usize,
+    _tag: u32,
+    _payload1: usize,
+    _payload2: usize,
+) -> ! {
+    panic!("Throw not implemented on platforms without native backends.");
+}
+
+// Manually define all libcalls here to avoid relying on `libm` or diverging
+// behavior across platforms from libm-like functionality. Note that this also
+// serves as insurance that the libcall implementation in the Cranelift
+// interpreter is the same as the libcall implementation used by compiled code.
+// This is important for differential fuzzing where manual invocations of
+// libcalls are expected to return the same result, so here they get identical
+// implementations.
+fn lookup_libcall(name: &str) -> Option<*const u8> {
+    match name {
+        "ceil" => {
+            extern "C" fn ceil(a: f64) -> f64 {
+                a.ceil()
+            }
+            Some(ceil as *const u8)
+        }
+        "ceilf" => {
+            extern "C" fn ceilf(a: f32) -> f32 {
+                a.ceil()
+            }
+            Some(ceilf as *const u8)
+        }
+        "trunc" => {
+            extern "C" fn trunc(a: f64) -> f64 {
+                a.trunc()
+            }
+            Some(trunc as *const u8)
+        }
+        "truncf" => {
+            extern "C" fn truncf(a: f32) -> f32 {
+                a.trunc()
+            }
+            Some(truncf as *const u8)
+        }
+        "floor" => {
+            extern "C" fn floor(a: f64) -> f64 {
+                a.floor()
+            }
+            Some(floor as *const u8)
+        }
+        "floorf" => {
+            extern "C" fn floorf(a: f32) -> f32 {
+                a.floor()
+            }
+            Some(floorf as *const u8)
+        }
+        "nearbyint" => {
+            extern "C" fn nearbyint(a: f64) -> f64 {
+                a.round_ties_even()
+            }
+            Some(nearbyint as *const u8)
+        }
+        "nearbyintf" => {
+            extern "C" fn nearbyintf(a: f32) -> f32 {
+                a.round_ties_even()
+            }
+            Some(nearbyintf as *const u8)
+        }
+        "fma" => {
+            // The `fma` function for `x86_64-pc-windows-gnu` is incorrect. Use
+            // `libm`'s instead.  See:
+            // https://github.com/bytecodealliance/wasmtime/issues/4512
+            extern "C" fn fma(a: f64, b: f64, c: f64) -> f64 {
+                #[cfg(all(target_os = "windows", target_env = "gnu"))]
+                return libm::fma(a, b, c);
+                #[cfg(not(all(target_os = "windows", target_env = "gnu")))]
+                return a.mul_add(b, c);
+            }
+            Some(fma as *const u8)
+        }
+        "fmaf" => {
+            extern "C" fn fmaf(a: f32, b: f32, c: f32) -> f32 {
+                #[cfg(all(target_os = "windows", target_env = "gnu"))]
+                return libm::fmaf(a, b, c);
+                #[cfg(not(all(target_os = "windows", target_env = "gnu")))]
+                return a.mul_add(b, c);
+            }
+            Some(fmaf as *const u8)
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        "__cranelift_x86_pshufb" => Some(__cranelift_x86_pshufb as *const u8),
+
+        _ => panic!("unknown libcall {name}"),
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::__m128i;
 #[cfg(target_arch = "x86_64")]
-#[allow(improper_ctypes_definitions)]
+#[expect(
+    improper_ctypes_definitions,
+    reason = "manually verified to work for now"
+)]
 extern "C" fn __cranelift_x86_pshufb(a: __m128i, b: __m128i) -> __m128i {
     union U {
         reg: __m128i,
@@ -574,7 +835,7 @@ extern "C" fn __cranelift_x86_pshufb(a: __m128i, b: __m128i) -> __m128i {
 #[cfg(test)]
 mod test {
     use super::*;
-    use cranelift_reader::{parse_functions, parse_test, ParseOptions};
+    use cranelift_reader::{ParseOptions, parse_functions, parse_test};
 
     fn parse(code: &str) -> Function {
         parse_functions(code).unwrap().into_iter().nth(0).unwrap()
@@ -582,6 +843,10 @@ mod test {
 
     #[test]
     fn nop() {
+        // Skip this test when cranelift doesn't support the native platform.
+        if cranelift_native::builder().is_err() {
+            return;
+        }
         let code = String::from(
             "
             test run
@@ -610,12 +875,16 @@ mod test {
             .unwrap();
         let compiled = compiler.compile().unwrap();
         let trampoline = compiled.get_trampoline(&function).unwrap();
-        let returned = trampoline.call(&[]);
+        let returned = trampoline.call(&compiled, &[]);
         assert_eq!(returned, vec![DataValue::I8(-1)])
     }
 
     #[test]
     fn trampolines() {
+        // Skip this test when cranelift doesn't support the native platform.
+        if cranelift_native::builder().is_err() {
+            return;
+        }
         let function = parse(
             "
             function %test(f32, i8, i64x2, i8) -> f32x4, i64 {

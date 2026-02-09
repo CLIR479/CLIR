@@ -110,11 +110,10 @@ pub trait FuncWriter {
     }
 
     /// Default impl of `write_entity_definition`
-    #[allow(unused_variables)]
     fn super_entity_definition(
         &mut self,
         w: &mut dyn Write,
-        func: &Function,
+        _func: &Function,
         entity: AnyEntity,
         value: &dyn fmt::Display,
         maybe_fact: Option<&Fact>,
@@ -180,7 +179,7 @@ pub fn decorate_function<FW: FuncWriter>(
     func: &Function,
 ) -> fmt::Result {
     write!(w, "function ")?;
-    write_spec(w, func)?;
+    write_function_spec(w, func)?;
     writeln!(w, " {{")?;
     let aliases = alias_map(func);
     let mut any = func_w.write_preamble(w, func)?;
@@ -198,7 +197,8 @@ pub fn decorate_function<FW: FuncWriter>(
 //
 // Function spec.
 
-fn write_spec(w: &mut dyn Write, func: &Function) -> fmt::Result {
+/// Writes the spec (name and signature) of 'func' to 'w' as text.
+pub fn write_function_spec(w: &mut dyn Write, func: &Function) -> fmt::Result {
     write!(w, "{}{}", func.name, func.signature)
 }
 
@@ -259,8 +259,12 @@ fn decorate_block<FW: FuncWriter>(
     aliases: &SecondaryMap<Value, Vec<Value>>,
     block: Block,
 ) -> fmt::Result {
-    // Indent all instructions if any srclocs are present.
-    let indent = if func.rel_srclocs().is_empty() { 4 } else { 36 };
+    // Indent all instructions if any srclocs or debug tags are present.
+    let indent = if func.rel_srclocs().is_empty() && func.debug_tags.is_empty() {
+        4
+    } else {
+        36
+    };
 
     func_w.write_block_header(w, func, block, indent)?;
     for a in func.dfg.block_params(block).iter().cloned() {
@@ -336,7 +340,7 @@ fn write_instruction(
     func: &Function,
     aliases: &SecondaryMap<Value, Vec<Value>>,
     inst: Inst,
-    indent: usize,
+    mut indent: usize,
 ) -> fmt::Result {
     // Prefix containing source location, encoding, and value locations.
     let mut s = String::with_capacity(16);
@@ -346,6 +350,9 @@ fn write_instruction(
     if !srcloc.is_default() {
         write!(s, "{srcloc} ")?;
     }
+
+    // Write out any debug tags.
+    write_debug_tags(w, &func, inst, &mut indent)?;
 
     // Write out prefix and indent the instruction.
     write!(w, "{s:indent$}")?;
@@ -389,6 +396,7 @@ fn write_instruction(
 pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt::Result {
     let pool = &dfg.value_lists;
     let jump_tables = &dfg.jump_tables;
+    let exception_tables = &dfg.exception_tables;
     use crate::ir::instructions::InstructionData::*;
     let ctrl_ty = dfg.ctrl_typevar(inst);
     match dfg.insts[inst] {
@@ -479,6 +487,34 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
             )?;
             write_user_stack_map_entries(w, dfg, inst)
         }
+        TryCall {
+            func_ref,
+            ref args,
+            exception,
+            ..
+        } => {
+            write!(
+                w,
+                " {}({}), {}",
+                func_ref,
+                DisplayValues(args.as_slice(pool)),
+                exception_tables[exception].display(pool),
+            )
+        }
+        TryCallIndirect {
+            ref args,
+            exception,
+            ..
+        } => {
+            let args = args.as_slice(pool);
+            write!(
+                w,
+                " {}({}), {}",
+                args[0],
+                DisplayValues(&args[1..]),
+                exception_tables[exception].display(pool),
+            )
+        }
         FuncAddr { func_ref, .. } => write!(w, " {func_ref}"),
         StackLoad {
             stack_slot, offset, ..
@@ -508,6 +544,7 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
         } => write!(w, "{} {}, {}{}", flags, args[0], args[1], offset),
         Trap { code, .. } => write!(w, " {code}"),
         CondTrap { arg, code, .. } => write!(w, " {arg}, {code}"),
+        ExceptionHandlerAddress { block, imm, .. } => write!(w, " {block}, {imm}"),
     }?;
 
     let mut sep = "  ; ";
@@ -538,6 +575,26 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
             write!(w, "{sep}{arg} = {imm}")?;
             sep = ", ";
         }
+    }
+    Ok(())
+}
+
+fn write_debug_tags(
+    w: &mut dyn Write,
+    func: &Function,
+    inst: Inst,
+    indent: &mut usize,
+) -> fmt::Result {
+    let tags = func.debug_tags.get(inst);
+    if !tags.is_empty() {
+        let tags = tags
+            .iter()
+            .map(|tag| format!("{tag}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let s = format!("<{tags}> ");
+        write!(w, "{s}")?;
+        *indent = indent.saturating_sub(s.len());
     }
     Ok(())
 }

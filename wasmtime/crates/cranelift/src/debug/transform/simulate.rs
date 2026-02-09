@@ -1,15 +1,15 @@
-use super::expression::{CompiledExpression, FunctionFrameInfo};
-use super::utils::{add_internal_types, append_vmctx_info};
 use super::AddressTransform;
-use crate::debug::{Compilation, ModuleMemoryOffset};
-use anyhow::{Context, Error};
+use super::expression::{CompiledExpression, FunctionFrameInfo};
+use super::utils::append_vmctx_info;
+use crate::debug::Compilation;
+use crate::translate::get_vmctx_value_label;
 use cranelift_codegen::isa::TargetIsa;
-use cranelift_wasm::get_vmctx_value_label;
-use gimli::write;
 use gimli::LineEncoding;
+use gimli::write;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use wasmtime_environ::error::{Context, Error};
 use wasmtime_environ::{
     DebugInfoData, EntityRef, FunctionMetadata, PrimaryMap, StaticModuleIndex, WasmFileInfo,
     WasmValType,
@@ -47,6 +47,7 @@ fn generate_line_info(
         out_encoding,
         line_encoding,
         out_comp_dir,
+        None,
         out_comp_name,
         None,
     );
@@ -69,24 +70,32 @@ fn generate_line_info(
 
     for (symbol, map) in maps {
         let base_addr = map.offset;
-        out_program.begin_sequence(Some(write::Address::Symbol { symbol, addend: 0 }));
+        out_program.begin_sequence(Some(write::Address::Symbol {
+            symbol,
+            addend: base_addr as i64,
+        }));
+
+        // Always emit a row for offset zero - debuggers expect this.
+        out_program.row().address_offset = 0;
+        out_program.row().file = file_index;
+        out_program.row().line = 0; // Special line number for non-user code.
+        out_program.row().discriminator = 1;
+        out_program.row().is_statement = true;
+        out_program.generate_row();
+
+        let mut is_prologue_end = true;
         for addr_map in map.addresses.iter() {
             let address_offset = (addr_map.generated - base_addr) as u64;
             out_program.row().address_offset = address_offset;
-            out_program.row().op_index = 0;
-            out_program.row().file = file_index;
             let wasm_offset = w.code_section_offset + addr_map.wasm;
             out_program.row().line = wasm_offset;
-            out_program.row().column = 0;
             out_program.row().discriminator = 1;
-            out_program.row().is_statement = true;
-            out_program.row().basic_block = false;
-            out_program.row().prologue_end = false;
-            out_program.row().epilogue_begin = false;
-            out_program.row().isa = 0;
+            out_program.row().prologue_end = is_prologue_end;
             out_program.generate_row();
+
+            is_prologue_end = false;
         }
-        let end_addr = (map.offset + map.len - 1) as u64;
+        let end_addr = (base_addr + map.len - 1) as u64;
         out_program.end_sequence(end_addr);
     }
 
@@ -94,11 +103,7 @@ fn generate_line_info(
 }
 
 fn check_invalid_chars_in_name(s: &str) -> Option<&str> {
-    if s.contains('\x00') {
-        None
-    } else {
-        Some(s)
-    }
+    if s.contains('\x00') { None } else { Some(s) }
 }
 
 fn autogenerate_dwarf_wasm_path(di: &DebugInfoData) -> PathBuf {
@@ -114,7 +119,6 @@ fn autogenerate_dwarf_wasm_path(di: &DebugInfoData) -> PathBuf {
 }
 
 struct WasmTypesDieRefs {
-    vmctx: write::UnitEntryId,
     i32: write::UnitEntryId,
     i64: write::UnitEntryId,
     f32: write::UnitEntryId,
@@ -125,10 +129,7 @@ fn add_wasm_types(
     unit: &mut write::Unit,
     root_id: write::UnitEntryId,
     out_strings: &mut write::StringTable,
-    memory_offset: &ModuleMemoryOffset,
 ) -> WasmTypesDieRefs {
-    let (_wp_die_id, vmctx_die_id) = add_internal_types(unit, root_id, out_strings, memory_offset);
-
     macro_rules! def_type {
         ($id:literal, $size:literal, $enc:path) => {{
             let die_id = unit.add(root_id, gimli::DW_TAG_base_type);
@@ -149,7 +150,6 @@ fn add_wasm_types(
     let f64_die_id = def_type!("f64", 8, gimli::DW_ATE_float);
 
     WasmTypesDieRefs {
-        vmctx: vmctx_die_id,
         i32: i32_die_id,
         i64: i64_die_id,
         f32: f32_die_id,
@@ -196,6 +196,7 @@ fn generate_vars(
     addr_tr: &AddressTransform,
     frame_info: &FunctionFrameInfo,
     scope_ranges: &[(u64, u64)],
+    vmctx_ptr_die_ref: write::DebugInfoRef,
     wasm_types: &WasmTypesDieRefs,
     func_meta: &FunctionMetadata,
     locals_names: Option<&HashMap<u32, &str>>,
@@ -213,7 +214,7 @@ fn generate_vars(
             append_vmctx_info(
                 unit,
                 die_id,
-                wasm_types.vmctx,
+                vmctx_ptr_die_ref,
                 addr_tr,
                 Some(frame_info),
                 scope_ranges,
@@ -233,6 +234,7 @@ fn generate_vars(
             let loc_list_id = {
                 let locs = CompiledExpression::from_label(*label)
                     .build_with_locals(scope_ranges, addr_tr, Some(frame_info), isa)
+                    .expressions
                     .map(|i| {
                         i.map(|(begin, length, data)| write::Location::StartLength {
                             begin,
@@ -282,11 +284,13 @@ fn check_invalid_chars_in_path(path: PathBuf) -> Option<PathBuf> {
         .and_then(move |s| if s.contains('\x00') { None } else { Some(path) })
 }
 
+/// Generate "simulated" native DWARF for functions lacking WASM-level DWARF.
 pub fn generate_simulated_dwarf(
     compilation: &mut Compilation<'_>,
     addr_tr: &PrimaryMap<StaticModuleIndex, AddressTransform>,
     translated: &HashSet<usize>,
     out_encoding: gimli::Encoding,
+    vmctx_ptr_die_refs: &PrimaryMap<StaticModuleIndex, write::DebugInfoRef>,
     out_units: &mut write::UnitTable,
     out_strings: &mut write::StringTable,
     isa: &dyn TargetIsa,
@@ -303,11 +307,12 @@ pub fn generate_simulated_dwarf(
     };
 
     let (unit, root_id, file_id) = {
-        let comp_dir_id = out_strings.add(assert_dwarf_str!(path
-            .parent()
-            .context("path dir")?
-            .to_str()
-            .context("path dir encoding")?));
+        let comp_dir_id = out_strings.add(assert_dwarf_str!(
+            path.parent()
+                .context("path dir")?
+                .to_str()
+                .context("path dir encoding")?
+        ));
         let name = path
             .file_name()
             .context("path name")?
@@ -333,6 +338,10 @@ pub fn generate_simulated_dwarf(
 
         let id = out_strings.add(PRODUCER_NAME);
         root.set(gimli::DW_AT_producer, write::AttributeValue::StringRef(id));
+        root.set(
+            gimli::DW_AT_language,
+            write::AttributeValue::Language(gimli::DW_LANG_C11),
+        );
         root.set(gimli::DW_AT_name, write::AttributeValue::StringRef(name_id));
         root.set(
             gimli::DW_AT_stmt_list,
@@ -345,13 +354,8 @@ pub fn generate_simulated_dwarf(
         (unit, root_id, file_id)
     };
 
-    let mut module_wasm_types = PrimaryMap::new();
-    for (module, memory_offset) in compilation.module_memory_offsets.iter() {
-        let wasm_types = add_wasm_types(unit, root_id, out_strings, memory_offset);
-        let i = module_wasm_types.push(wasm_types);
-        assert_eq!(i, module);
-    }
-
+    let wasm_types = add_wasm_types(unit, root_id, out_strings);
+    let mut unit_ranges = vec![];
     for (module, index) in compilation.indexes().collect::<Vec<_>>() {
         let (symbol, _) = compilation.function(module, index);
         if translated.contains(&symbol) {
@@ -360,21 +364,22 @@ pub fn generate_simulated_dwarf(
 
         let addr_tr = &addr_tr[module];
         let map = &addr_tr.map()[index];
-        let start = map.offset as u64;
-        let end = start + map.len as u64;
         let die_id = unit.add(root_id, gimli::DW_TAG_subprogram);
         let die = unit.get_mut(die_id);
-        die.set(
-            gimli::DW_AT_low_pc,
-            write::AttributeValue::Address(write::Address::Symbol {
-                symbol,
-                addend: start as i64,
-            }),
-        );
+        let low_pc = write::Address::Symbol {
+            symbol,
+            addend: map.offset as i64,
+        };
+        let code_length = map.len as u64;
+        die.set(gimli::DW_AT_low_pc, write::AttributeValue::Address(low_pc));
         die.set(
             gimli::DW_AT_high_pc,
-            write::AttributeValue::Udata(end - start),
+            write::AttributeValue::Udata(code_length),
         );
+        unit_ranges.push(write::Range::StartLength {
+            begin: low_pc,
+            length: code_length,
+        });
 
         let translation = &compilation.translations[module];
         let func_index = translation.module.func_index(index);
@@ -411,13 +416,19 @@ pub fn generate_simulated_dwarf(
             addr_tr,
             &frame_info,
             &[(source_range.0, source_range.1)],
-            &module_wasm_types[module],
+            vmctx_ptr_die_refs[module],
+            &wasm_types,
             &di.wasm_file.funcs[index.as_u32() as usize],
             di.name_section.locals_names.get(&func_index),
             out_strings,
             isa,
         )?;
     }
+    let unit_ranges_id = unit.ranges.add(write::RangeList(unit_ranges));
+    unit.get_mut(root_id).set(
+        gimli::DW_AT_ranges,
+        write::AttributeValue::RangeListRef(unit_ranges_id),
+    );
 
     Ok(())
 }

@@ -27,6 +27,11 @@ For an example of how to use Cranelift to run WebAssembly code, see
 
 [Wasmtime]: https://github.com/bytecodealliance/wasmtime
 
+For various examples of how to use Cranelift to accomplish common compiler
+tasks, see the [Cranelift Examples] repository maintained by @simvux.
+
+[Cranelift Examples]: https://github.com/simvux/cranelift-examples
+
 Status
 ------
 
@@ -62,7 +67,7 @@ V8 (TurboFan), and ~14% slower than WAVM (LLVM). Its compilation speed, in the
 same paper, is measured as approximately an order of magnitude faster than WAVM
 (LLVM). We continue to work to improve both measures.
 
-[Rust compiler backend]: https://github.com/bjorn3/rustc_codegen_cranelift
+[Rust compiler backend]: https://github.com/rust-lang/rustc_codegen_cranelift
 [security policy]: https://bytecodealliance.org/security
 [recent paper]: https://arxiv.org/abs/2011.13127
 

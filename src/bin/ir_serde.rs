@@ -109,11 +109,6 @@ fn process_dirs_clif(dir: &Path) -> io::Result<()> {
                 let func = &mut ir_funcs[0];
 
                 traverse_blocks(func);
-
-                let is_leaf = func.is_leaf();
-                if is_leaf == false {
-                    println!("function {:?} has call instructions", &path)
-                }
             }
         }
     }

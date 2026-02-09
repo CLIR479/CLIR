@@ -81,30 +81,30 @@
 ;; function u0:0(i64 vmctx, i64) -> i32 tail {
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly gv0+8
-;;     gv2 = load.i64 notrap aligned gv1
+;;     gv2 = load.i64 notrap aligned gv1+16
 ;;     stack_limit = gv2
 ;;
 ;;                                 block0(v0: i64, v1: i64):
-;; @0043                               trap unreachable
+;; @0043                               trap user11
 ;; }
 ;;
 ;; function u0:1(i64 vmctx, i64) -> i32 tail {
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly gv0+8
-;;     gv2 = load.i64 notrap aligned gv1
+;;     gv2 = load.i64 notrap aligned gv1+16
 ;;     stack_limit = gv2
 ;;
 ;;                                 block0(v0: i64, v1: i64):
 ;; @004c                               jump block2
 ;;
 ;;                                 block2:
-;; @004e                               trap unreachable
+;; @004e                               trap user11
 ;; }
 ;;
 ;; function u0:2(i64 vmctx, i64) -> i32 tail {
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly gv0+8
-;;     gv2 = load.i64 notrap aligned gv1
+;;     gv2 = load.i64 notrap aligned gv1+16
 ;;     stack_limit = gv2
 ;;
 ;;                                 block0(v0: i64, v1: i64):
@@ -115,7 +115,7 @@
 ;; @006a                               jump block9
 ;;
 ;;                                 block9:
-;; @0074                               trap unreachable
+;; @0074                               trap user11
 ;;
 ;;                                 block13:
 ;; @0087                               jump block7
@@ -130,20 +130,20 @@
 ;; @008b                               jump block3
 ;;
 ;;                                 block3:
-;; @008c                               trap unreachable
+;; @008c                               trap user11
 ;; }
 ;;
 ;; function u0:3(i64 vmctx, i64) tail {
 ;;     gv0 = vmctx
 ;;     gv1 = load.i64 notrap aligned readonly gv0+8
-;;     gv2 = load.i64 notrap aligned gv1
+;;     gv2 = load.i64 notrap aligned gv1+16
 ;;     stack_limit = gv2
 ;;
 ;;                                 block0(v0: i64, v1: i64):
 ;; @0095                               v4 = iconst.i32 1
-;; @0097                               jump block2(v4)  ; v4 = 1
+;; @0097                               jump block2
 ;;
-;;                                 block2(v2: i32):
+;;                                 block2:
 ;; @009c                               jump block1
 ;;
 ;;                                 block1:

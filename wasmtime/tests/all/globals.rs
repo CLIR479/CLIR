@@ -1,7 +1,7 @@
 use wasmtime::*;
 
 #[test]
-fn smoke() -> anyhow::Result<()> {
+fn smoke() -> wasmtime::Result<()> {
     let mut store = Store::<()>::default();
     let g = Global::new(
         &mut store,
@@ -42,7 +42,7 @@ fn smoke() -> anyhow::Result<()> {
 }
 
 #[test]
-fn mutability() -> anyhow::Result<()> {
+fn mutability() -> wasmtime::Result<()> {
     let mut store = Store::<()>::default();
     let g = Global::new(
         &mut store,
@@ -60,7 +60,7 @@ fn mutability() -> anyhow::Result<()> {
 // implementation, but for now should hopefully be resilient enough to catch at
 // least some cases of heap corruption.
 #[test]
-fn use_after_drop() -> anyhow::Result<()> {
+fn use_after_drop() -> wasmtime::Result<()> {
     let mut store = Store::<()>::default();
     let module = Module::new(
         store.engine(),
@@ -90,7 +90,7 @@ fn use_after_drop() -> anyhow::Result<()> {
 }
 
 #[test]
-fn v128() -> anyhow::Result<()> {
+fn v128() -> wasmtime::Result<()> {
     let mut store = Store::<()>::default();
     let g = Global::new(
         &mut store,
@@ -348,5 +348,120 @@ fn i31ref_as_anyref_global_ty() -> Result<()> {
             assert!(ValType::eq(expected_ty.content(), actual_ty.content()));
         }
     }
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn instantiate_global_with_subtype() -> Result<()> {
+    let mut config = Config::new();
+    config.wasm_function_references(true);
+    config.wasm_gc(true);
+
+    let engine = Engine::new(&config)?;
+    let module = Module::new(
+        &engine,
+        r#"
+            (module
+                (type $func_ty (sub (func)))
+                (import "" "" (global (ref null $func_ty)))
+            )
+        "#,
+    )?;
+
+    {
+        let func_ty =
+            FuncType::with_finality_and_supertype(&engine, Finality::NonFinal, None, [], [])?;
+        let sub_func_ty = FuncType::with_finality_and_supertype(
+            &engine,
+            Finality::NonFinal,
+            Some(&func_ty),
+            [],
+            [],
+        )?;
+        let global_ty = GlobalType::new(
+            RefType::new(true, HeapType::ConcreteFunc(sub_func_ty.clone())).into(),
+            Mutability::Const,
+        );
+        assert!(
+            global_ty.content().matches(
+                module
+                    .imports()
+                    .nth(0)
+                    .unwrap()
+                    .ty()
+                    .unwrap_global()
+                    .content()
+            )
+        );
+
+        let mut store = Store::new(&engine, ());
+        let func = Func::new(&mut store, sub_func_ty, |_caller, _args, _rets| Ok(()));
+        let global = Global::new(&mut store, global_ty, func.into())?;
+
+        // This instantiation should succeed: the given global's type is a subtype
+        // of the import's global type.
+        let _ = Instance::new(&mut store, &module, &[global.into()])?;
+    }
+
+    {
+        let func_ty = FuncType::new(&engine, [], []);
+        let global_ty = GlobalType::new(
+            RefType::new(true, HeapType::ConcreteFunc(func_ty.clone())).into(),
+            Mutability::Const,
+        );
+        assert!(
+            !global_ty.content().matches(
+                module
+                    .imports()
+                    .nth(0)
+                    .unwrap()
+                    .ty()
+                    .unwrap_global()
+                    .content()
+            )
+        );
+
+        let mut store = Store::new(&engine, ());
+        let func = Func::new(&mut store, func_ty, |_caller, _args, _rets| Ok(()));
+        let global = Global::new(&mut store, global_ty, func.into())?;
+
+        // This instantiation should fail: the given global's type is *not* a
+        // subtype of the import's global type.
+        assert!(Instance::new(&mut store, &module, &[global.into()]).is_err());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn host_globals_keep_type_registration() -> Result<()> {
+    let engine = Engine::default();
+    let mut store = Store::new(&engine, ());
+
+    let ty = FuncType::new(&engine, [], []);
+
+    let g = Global::new(
+        &mut store,
+        GlobalType::new(
+            RefType::new(true, HeapType::ConcreteFunc(ty)).into(),
+            Mutability::Const,
+        ),
+        Val::FuncRef(None),
+    )?;
+
+    {
+        let _ty2 = FuncType::new(&engine, [ValType::I32], [ValType::I32]);
+        let ty = g.ty(&store);
+        let fty = ty.content().unwrap_ref().heap_type().unwrap_concrete_func();
+        assert!(fty.params().len() == 0);
+        assert!(fty.results().len() == 0);
+    }
+
+    let ty = g.ty(&store);
+    let fty = ty.content().unwrap_ref().heap_type().unwrap_concrete_func();
+    assert!(fty.params().len() == 0);
+    assert!(fty.results().len() == 0);
+
     Ok(())
 }

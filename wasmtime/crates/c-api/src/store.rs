@@ -1,4 +1,4 @@
-use crate::{wasm_engine_t, wasmtime_error_t, wasmtime_val_t, ForeignData};
+use crate::{ForeignData, wasm_engine_t, wasmtime_error_t, wasmtime_val_t};
 use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -48,7 +48,7 @@ pub struct wasm_store_t {
 
 wasmtime_c_api_macros::declare_own!(wasm_store_t);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasm_store_new(engine: &wasm_engine_t) -> Box<wasm_store_t> {
     let engine = &engine.engine;
     let store = Store::new(engine, ());
@@ -83,7 +83,7 @@ wasmtime_c_api_macros::declare_own!(wasmtime_store_t);
 pub struct WasmtimeStoreData {
     foreign: crate::ForeignData,
     #[cfg(feature = "wasi")]
-    pub(crate) wasi: Option<wasmtime_wasi::preview1::WasiP1Ctx>,
+    pub(crate) wasi: Option<wasmtime_wasi::p1::WasiP1Ctx>,
 
     /// Temporary storage for usage during a wasm->host call to store values
     /// in a slice we pass to the C API.
@@ -97,7 +97,14 @@ pub struct WasmtimeStoreData {
     pub store_limits: StoreLimits,
 }
 
-#[no_mangle]
+#[cfg(all(feature = "component-model", feature = "wasi"))]
+impl wasmtime_wasi::WasiView for WasmtimeStoreData {
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        self.wasi.as_mut().unwrap().ctx()
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_store_new(
     engine: &wasm_engine_t,
     data: *mut c_void,
@@ -122,7 +129,7 @@ pub type wasmtime_update_deadline_kind_t = u8;
 pub const WASMTIME_UPDATE_DEADLINE_CONTINUE: wasmtime_update_deadline_kind_t = 0;
 pub const WASMTIME_UPDATE_DEADLINE_YIELD: wasmtime_update_deadline_kind_t = 1;
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_store_epoch_deadline_callback(
     store: &mut wasmtime_store_t,
     func: extern "C" fn(
@@ -146,9 +153,7 @@ pub extern "C" fn wasmtime_store_epoch_deadline_callback(
             &mut kind as *mut wasmtime_update_deadline_kind_t,
         );
         match result {
-            Some(err) => Err(wasmtime::Error::from(<wasmtime_error_t as Into<
-                anyhow::Error,
-            >>::into(*err))),
+            Some(err) => Err((*err).into()),
             None if kind == WASMTIME_UPDATE_DEADLINE_CONTINUE => {
                 Ok(UpdateDeadline::Continue(delta))
             }
@@ -159,14 +164,14 @@ pub extern "C" fn wasmtime_store_epoch_deadline_callback(
     });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_store_context(
     store: &mut wasmtime_store_t,
 ) -> WasmtimeStoreContextMut<'_> {
     store.store.as_context_mut()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_store_limiter(
     store: &mut wasmtime_store_t,
     memory_size: i64,
@@ -180,7 +185,7 @@ pub extern "C" fn wasmtime_store_limiter(
         limiter = limiter.memory_size(memory_size as usize);
     }
     if table_elements >= 0 {
-        limiter = limiter.table_elements(table_elements as u32);
+        limiter = limiter.table_elements(table_elements as usize);
     }
     if instances >= 0 {
         limiter = limiter.instances(instances as usize);
@@ -195,12 +200,12 @@ pub extern "C" fn wasmtime_store_limiter(
     store.store.limiter(|data| &mut data.store_limits);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_context_get_data(store: WasmtimeStoreContext<'_>) -> *mut c_void {
     store.data().foreign.data
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_context_set_data(
     mut store: WasmtimeStoreContextMut<'_>,
     data: *mut c_void,
@@ -209,7 +214,7 @@ pub extern "C" fn wasmtime_context_set_data(
 }
 
 #[cfg(feature = "wasi")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_context_set_wasi(
     mut context: WasmtimeStoreContextMut<'_>,
     wasi: Box<crate::wasi_config_t>,
@@ -219,12 +224,14 @@ pub extern "C" fn wasmtime_context_set_wasi(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn wasmtime_context_gc(mut context: WasmtimeStoreContextMut<'_>) {
-    context.gc();
+#[unsafe(no_mangle)]
+pub extern "C" fn wasmtime_context_gc(
+    mut context: WasmtimeStoreContextMut<'_>,
+) -> Option<Box<wasmtime_error_t>> {
+    crate::handle_result(context.gc(None), |()| {})
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_context_set_fuel(
     mut store: WasmtimeStoreContextMut<'_>,
     fuel: u64,
@@ -232,7 +239,7 @@ pub extern "C" fn wasmtime_context_set_fuel(
     crate::handle_result(store.set_fuel(fuel), |()| {})
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_context_get_fuel(
     store: WasmtimeStoreContext<'_>,
     fuel: &mut u64,
@@ -242,7 +249,7 @@ pub extern "C" fn wasmtime_context_get_fuel(
     })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn wasmtime_context_set_epoch_deadline(
     mut store: WasmtimeStoreContextMut<'_>,
     ticks_beyond_current: u64,

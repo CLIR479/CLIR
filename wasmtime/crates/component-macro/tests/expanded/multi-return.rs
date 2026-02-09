@@ -187,7 +187,7 @@ pub mod foo {
         #[allow(clippy::all)]
         pub mod multi_return {
             #[allow(unused_imports)]
-            use wasmtime::component::__internal::anyhow;
+            use wasmtime::component::__internal::{anyhow, Box};
             pub trait Host {
                 fn mra(&mut self) -> ();
                 fn mrb(&mut self) -> ();
@@ -207,9 +207,9 @@ pub mod foo {
             {
                 type Host = O;
             }
-            pub fn add_to_linker_get_host<T>(
+            pub fn add_to_linker_get_host<T, G: for<'a> GetHost<&'a mut T, Host: Host>>(
                 linker: &mut wasmtime::component::Linker<T>,
-                host_getter: impl for<'a> GetHost<&'a mut T>,
+                host_getter: G,
             ) -> wasmtime::Result<()> {
                 let mut inst = linker.instance("foo:foo/multi-return")?;
                 inst.func_wrap(
@@ -289,7 +289,7 @@ pub mod exports {
             #[allow(clippy::all)]
             pub mod multi_return {
                 #[allow(unused_imports)]
-                use wasmtime::component::__internal::anyhow;
+                use wasmtime::component::__internal::{anyhow, Box};
                 pub struct Guest {
                     mra: wasmtime::component::Func,
                     mrb: wasmtime::component::Func,
@@ -318,7 +318,7 @@ pub mod exports {
                         let (_, instance) = component
                             .export_index(None, "foo:foo/multi-return")
                             .ok_or_else(|| {
-                                anyhow::anyhow!(
+                                wasmtime::format_err!(
                                     "no exported instance named `foo:foo/multi-return`"
                                 )
                             })?;
@@ -335,7 +335,7 @@ pub mod exports {
                         let instance_export = instance
                             .get_export(&mut store, None, "foo:foo/multi-return")
                             .ok_or_else(|| {
-                                anyhow::anyhow!(
+                                wasmtime::format_err!(
                                     "no exported instance named `foo:foo/multi-return`"
                                 )
                             })?;
@@ -351,7 +351,7 @@ pub mod exports {
                         let mut lookup = move |name| {
                             lookup(name)
                                 .ok_or_else(|| {
-                                    anyhow::anyhow!(
+                                    wasmtime::format_err!(
                                         "instance export `foo:foo/multi-return` does \
                 not have export `{name}`"
                                     )
@@ -401,7 +401,10 @@ pub mod exports {
                     pub fn call_mra<S: wasmtime::AsContextMut>(
                         &self,
                         mut store: S,
-                    ) -> wasmtime::Result<()> {
+                    ) -> wasmtime::Result<()>
+                    where
+                        <S as wasmtime::AsContext>::Data: Send,
+                    {
                         let callee = unsafe {
                             wasmtime::component::TypedFunc::<
                                 (),
@@ -415,7 +418,10 @@ pub mod exports {
                     pub fn call_mrb<S: wasmtime::AsContextMut>(
                         &self,
                         mut store: S,
-                    ) -> wasmtime::Result<()> {
+                    ) -> wasmtime::Result<()>
+                    where
+                        <S as wasmtime::AsContext>::Data: Send,
+                    {
                         let callee = unsafe {
                             wasmtime::component::TypedFunc::<
                                 (),
@@ -429,7 +435,10 @@ pub mod exports {
                     pub fn call_mrc<S: wasmtime::AsContextMut>(
                         &self,
                         mut store: S,
-                    ) -> wasmtime::Result<u32> {
+                    ) -> wasmtime::Result<u32>
+                    where
+                        <S as wasmtime::AsContext>::Data: Send,
+                    {
                         let callee = unsafe {
                             wasmtime::component::TypedFunc::<
                                 (),
@@ -443,7 +452,10 @@ pub mod exports {
                     pub fn call_mrd<S: wasmtime::AsContextMut>(
                         &self,
                         mut store: S,
-                    ) -> wasmtime::Result<u32> {
+                    ) -> wasmtime::Result<u32>
+                    where
+                        <S as wasmtime::AsContext>::Data: Send,
+                    {
                         let callee = unsafe {
                             wasmtime::component::TypedFunc::<
                                 (),
@@ -457,7 +469,10 @@ pub mod exports {
                     pub fn call_mre<S: wasmtime::AsContextMut>(
                         &self,
                         mut store: S,
-                    ) -> wasmtime::Result<(u32, f32)> {
+                    ) -> wasmtime::Result<(u32, f32)>
+                    where
+                        <S as wasmtime::AsContext>::Data: Send,
+                    {
                         let callee = unsafe {
                             wasmtime::component::TypedFunc::<
                                 (),

@@ -3,11 +3,12 @@
 use crate::generators::{self, CompilerStrategy, DiffValue, DiffValueType, WasmtimeConfig};
 use crate::oracles::dummy;
 use crate::oracles::engine::DiffInstance;
-use crate::oracles::{compile_module, engine::DiffEngine, StoreLimits};
+use crate::oracles::{StoreLimits, compile_module, engine::DiffEngine};
 use crate::single_module_fuzzer::KnownValid;
-use anyhow::{Context, Error, Result};
 use arbitrary::Unstructured;
-use wasmtime::{Extern, FuncType, Instance, Module, Store, Trap, Val};
+use wasmtime::{
+    Error, Extern, FuncType, Instance, Module, Result, Store, Trap, Val, error::Context as _,
+};
 
 /// A wrapper for using Wasmtime as a [`DiffEngine`].
 pub struct WasmtimeEngine {
@@ -24,17 +25,17 @@ impl WasmtimeEngine {
         config: &mut generators::Config,
         compiler_strategy: CompilerStrategy,
     ) -> arbitrary::Result<Self> {
-        if let CompilerStrategy::Winch = compiler_strategy {
-            config.disable_unimplemented_winch_proposals();
-        }
         let mut new_config = u.arbitrary::<WasmtimeConfig>()?;
         new_config.compiler_strategy = compiler_strategy;
+        new_config.update_module_config(&mut config.module_config, u)?;
         new_config.make_compatible_with(&config.wasmtime);
 
         let config = generators::Config {
             wasmtime: new_config,
             module_config: config.module_config.clone(),
         };
+        log::debug!("Created new Wasmtime differential engine with config: {config:?}");
+
         Ok(Self { config })
     }
 }
@@ -42,8 +43,9 @@ impl WasmtimeEngine {
 impl DiffEngine for WasmtimeEngine {
     fn name(&self) -> &'static str {
         match self.config.wasmtime.compiler_strategy {
-            CompilerStrategy::Cranelift => "wasmtime",
+            CompilerStrategy::CraneliftNative => "wasmtime",
             CompilerStrategy::Winch => "winch",
+            CompilerStrategy::CraneliftPulley => "pulley",
         }
     }
 
@@ -54,16 +56,17 @@ impl DiffEngine for WasmtimeEngine {
         Ok(Box::new(instance))
     }
 
-    fn assert_error_match(&self, trap: &Trap, err: &Error) {
-        let trap2 = err
+    fn assert_error_match(&self, lhs: &Error, rhs: &Trap) {
+        let lhs = lhs
             .downcast_ref::<Trap>()
-            .expect(&format!("not a trap: {err:?}"));
-        assert_eq!(trap, trap2, "{trap}\nis not equal to\n{trap2}");
+            .expect(&format!("not a trap: {lhs:?}"));
+
+        assert_eq!(lhs, rhs, "{lhs}\nis not equal to\n{rhs}");
     }
 
-    fn is_stack_overflow(&self, err: &Error) -> bool {
+    fn is_non_deterministic_error(&self, err: &Error) -> bool {
         match err.downcast_ref::<Trap>() {
-            Some(trap) => *trap == Trap::StackOverflow,
+            Some(trap) => super::wasmtime_trap_is_non_deterministic(trap),
             None => false,
         }
     }
@@ -119,11 +122,10 @@ impl WasmtimeInstance {
 
         globals
             .into_iter()
-            .map(|(name, global)| {
-                (
-                    name,
-                    global.ty(&self.store).content().clone().try_into().unwrap(),
-                )
+            .filter_map(|(name, global)| {
+                DiffValueType::try_from(global.ty(&self.store).content().clone())
+                    .map(|ty| (name, ty))
+                    .ok()
             })
             .collect()
     }
@@ -222,13 +224,21 @@ impl From<&DiffValue> for Val {
                 assert!(null);
                 Val::AnyRef(None)
             }
+            DiffValue::ExnRef { null } => {
+                assert!(null);
+                Val::ExnRef(None)
+            }
+            DiffValue::ContRef { null } => {
+                assert!(null);
+                Val::ExnRef(None)
+            }
         }
     }
 }
 
-impl Into<DiffValue> for Val {
-    fn into(self) -> DiffValue {
-        match self {
+impl From<Val> for DiffValue {
+    fn from(val: Val) -> DiffValue {
+        match val {
             Val::I32(n) => DiffValue::I32(n),
             Val::I64(n) => DiffValue::I64(n),
             Val::F32(n) => DiffValue::F32(n),
@@ -237,23 +247,37 @@ impl Into<DiffValue> for Val {
             Val::ExternRef(r) => DiffValue::ExternRef { null: r.is_none() },
             Val::FuncRef(r) => DiffValue::FuncRef { null: r.is_none() },
             Val::AnyRef(r) => DiffValue::AnyRef { null: r.is_none() },
+            Val::ExnRef(e) => DiffValue::ExnRef { null: e.is_none() },
+            Val::ContRef(c) => DiffValue::ContRef { null: c.is_none() },
         }
     }
 }
 
-#[test]
-fn smoke_cranelift() {
-    crate::oracles::engine::smoke_test_engine(|u, config| {
-        WasmtimeEngine::new(u, config, CompilerStrategy::Cranelift)
-    })
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[test]
-fn smoke_winch() {
-    if !cfg!(target_arch = "x86_64") {
-        return;
+    #[test]
+    fn smoke_cranelift_native() {
+        crate::oracles::engine::smoke_test_engine(|u, config| {
+            WasmtimeEngine::new(u, config, CompilerStrategy::CraneliftNative)
+        })
     }
-    crate::oracles::engine::smoke_test_engine(|u, config| {
-        WasmtimeEngine::new(u, config, CompilerStrategy::Winch)
-    })
+
+    #[test]
+    fn smoke_cranelift_pulley() {
+        crate::oracles::engine::smoke_test_engine(|u, config| {
+            WasmtimeEngine::new(u, config, CompilerStrategy::CraneliftPulley)
+        })
+    }
+
+    #[test]
+    fn smoke_winch() {
+        if !cfg!(target_arch = "x86_64") {
+            return;
+        }
+        crate::oracles::engine::smoke_test_engine(|u, config| {
+            WasmtimeEngine::new(u, config, CompilerStrategy::Winch)
+        })
+    }
 }

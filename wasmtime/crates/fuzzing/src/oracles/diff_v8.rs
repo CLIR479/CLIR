@@ -1,10 +1,9 @@
 use crate::generators::{Config, DiffValue, DiffValueType};
 use crate::oracles::engine::{DiffEngine, DiffInstance};
-use anyhow::{bail, Error, Result};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Once;
-use wasmtime::Trap;
+use wasmtime::{Error, Result, Trap, bail};
 
 pub struct V8Engine {
     isolate: Rc<RefCell<v8::OwnedIsolate>>,
@@ -32,6 +31,8 @@ impl V8Engine {
         config.min_memories = config.min_memories.min(1);
         config.max_memories = config.max_memories.min(1);
         config.memory64_enabled = false;
+        config.custom_page_sizes_enabled = false;
+        config.wide_arithmetic_enabled = false;
 
         Self {
             isolate: Rc::new(RefCell::new(v8::Isolate::new(Default::default()))),
@@ -50,7 +51,7 @@ impl DiffEngine for V8Engine {
         let mut isolate = self.isolate.borrow_mut();
         let isolate = &mut **isolate;
         let mut scope = v8::HandleScope::new(isolate);
-        let context = v8::Context::new(&mut scope);
+        let context = v8::Context::new(&mut scope, Default::default());
         let global = context.global(&mut scope);
         let mut scope = v8::ContextScope::new(&mut scope, context);
 
@@ -76,7 +77,7 @@ impl DiffEngine for V8Engine {
         }))
     }
 
-    fn assert_error_match(&self, wasmtime: &Trap, err: &Error) {
+    fn assert_error_match(&self, err: &Error, wasmtime: &Trap) {
         let v8 = err.to_string();
         let wasmtime_msg = wasmtime.to_string();
         let verify_wasmtime = |msg: &str| {
@@ -90,7 +91,7 @@ impl DiffEngine for V8Engine {
         };
         match wasmtime {
             Trap::MemoryOutOfBounds => {
-                return verify_v8(&["memory access out of bounds", "is out of bounds"])
+                return verify_v8(&["memory access out of bounds", "is out of bounds"]);
             }
             Trap::UnreachableCodeReached => {
                 return verify_v8(&[
@@ -108,7 +109,7 @@ impl DiffEngine for V8Engine {
                 ]);
             }
             Trap::IntegerDivisionByZero => {
-                return verify_v8(&["divide by zero", "remainder by zero"])
+                return verify_v8(&["divide by zero", "remainder by zero"]);
             }
             Trap::StackOverflow => {
                 return verify_v8(&[
@@ -128,22 +129,22 @@ impl DiffEngine for V8Engine {
                     "table initializer is out of bounds",
                     "table index is out of bounds",
                     "element segment out of bounds",
-                ])
+                ]);
             }
             Trap::BadSignature => return verify_v8(&["function signature mismatch"]),
             Trap::IntegerOverflow | Trap::BadConversionToInteger => {
                 return verify_v8(&[
                     "float unrepresentable in integer range",
                     "divide result unrepresentable",
-                ])
+                ]);
             }
-            other => log::debug!("unknown code {:?}", other),
+            other => log::debug!("unknown code {other:?}"),
         }
 
         verify_wasmtime("not possibly present in an error, just panic please");
     }
 
-    fn is_stack_overflow(&self, err: &Error) -> bool {
+    fn is_non_deterministic_error(&self, err: &Error) -> bool {
         err.to_string().contains("Maximum call stack size exceeded")
     }
 }
@@ -188,6 +189,8 @@ impl DiffInstance for V8Instance {
                 // JS doesn't support v128 parameters
                 DiffValue::V128(_) => return Ok(None),
                 DiffValue::AnyRef { .. } => unimplemented!(),
+                DiffValue::ExnRef { .. } => unimplemented!(),
+                DiffValue::ContRef { .. } => unimplemented!(),
             });
         }
         // JS doesn't support v128 return values
@@ -311,7 +314,9 @@ fn get_diff_value(
             null: val.is_null(),
         },
         DiffValueType::AnyRef => unimplemented!(),
+        DiffValueType::ExnRef => unimplemented!(),
         DiffValueType::V128 => unreachable!(),
+        DiffValueType::ContRef => unimplemented!(),
     }
 }
 

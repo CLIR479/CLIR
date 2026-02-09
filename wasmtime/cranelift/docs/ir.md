@@ -1,6 +1,6 @@
 # Cranelift IR Reference
 
-## Forward
+## Foreword
 
 This document is likely to be outdated and missing some important
 information. It is recommended to look at the list of instructions as
@@ -37,24 +37,24 @@ float average(const float *array, size_t count)
 }
 ```
 
-Here is the same function compiled into Cranelift IR:
+Here is the same function compiled into Cranelift IR (with 64 bit pointers):
 
 ```
 test verifier
 
-function %average(i32, i32) -> f32 system_v {
+function %average(i64, i64) -> f32 system_v {
     ss0 = explicit_slot 8         ; Stack slot for `sum`.
 
-block1(v0: i32, v1: i32):
+block1(v0: i64, v1: i64):
     v2 = f64const 0x0.0
     stack_store v2, ss0
     brif v1, block2, block5                  ; Handle count == 0.
 
 block2:
-    v3 = iconst.i32 0
+    v3 = iconst.i64 0
     jump block3(v3)
 
-block3(v4: i32):
+block3(v4: i64):
     v5 = imul_imm v4, 4
     v6 = iadd v0, v5
     v7 = load.f32 v6              ; array[i]
@@ -147,14 +147,14 @@ number, others don't care.
 - i64
 - i128
 
-Of these types, i32 and i64 are the most heavily-tested because of their use by 
-Wasmtime. There are no known bugs in i8, i16, and i128, but their use may not 
-be supported by all instructions in all backends (that is, they may cause 
+Of these types, i32 and i64 are the most heavily-tested because of their use by
+Wasmtime. There are no known bugs in i8, i16, and i128, but their use may not
+be supported by all instructions in all backends (that is, they may cause
 the compiler to crash during code generation with an error that an instruction
-is unsupported). 
+is unsupported).
 
-The function `valid_for_target` within the [fuzzgen function generator][fungen] 
-contains information about which instructions support which types. 
+The function `valid_for_target` within the [fuzzgen function generator][fungen]
+contains information about which instructions support which types.
 
 [fungen]: https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/fuzzgen/src/function_generator.rs
 
@@ -352,9 +352,7 @@ param        : type [paramext] [paramspecial]
 paramext     : "uext" | "sext"
 paramspecial : "sarg" ( num ) | "sret" | "vmctx" | "stack_limit"
 callconv     : "fast" | "cold" | "system_v" | "windows_fastcall"
-             | "wasmtime_system_v" | "wasmtime_fastcall"
-             | "apple_aarch64" | "wasmtime_apple_aarch64"
-             | "probestack"
+             | "apple_aarch64" | "probestack" | "winch"
 ```
 
 A function's calling convention determines exactly how arguments and return

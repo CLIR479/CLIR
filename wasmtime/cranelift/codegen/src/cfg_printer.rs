@@ -53,18 +53,10 @@ impl<'a> CFGPrinter<'a> {
             write!(w, "    {block} [shape=record, label=\"{{")?;
             crate::write::write_block_header(w, self.func, block, 4)?;
             // Add all outgoing branch instructions to the label.
-
-            // 我加的，打印block里面所有的指令
-            let mut block_instrs = self.func.layout.block_insts(block);
-            while let Some(inst) = block_instrs.next() {
+            if let Some(inst) = self.func.layout.last_inst(block) {
                 write!(w, " | <{inst}>")?;
                 PlainWriter.write_instruction(w, self.func, &aliases, inst, 0)?;
             }
-            //
-            // if let Some(inst) = self.func.layout.last_inst(block) {
-            //     write!(w, " | <{inst}>")?;
-            //     PlainWriter.write_instruction(w, self.func, &aliases, inst, 0)?;
-            // }
             writeln!(w, "}}\"]")?
         }
         Ok(())

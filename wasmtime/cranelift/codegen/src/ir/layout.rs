@@ -25,39 +25,17 @@ use core::cmp;
 ///
 #[derive(Debug, Clone, PartialEq, Hash)]
 pub struct Layout {
-    #[cfg(feature = "pub_fields")]
-    /// Linked list nodes for the layout order of blocks Forms a doubly linked list, terminated in
-    /// both ends by `None`.
-    pub blocks: SecondaryMap<Block, BlockNode>,
-
-    #[cfg(not(feature = "pub_fields"))]
     /// Linked list nodes for the layout order of blocks Forms a doubly linked list, terminated in
     /// both ends by `None`.
     blocks: SecondaryMap<Block, BlockNode>,
 
-    #[cfg(feature = "pub_fields")]
-    /// Linked list nodes for the layout order of instructions. Forms a double linked list per block,
-    /// terminated in both ends by `None`.
-    pub insts: SecondaryMap<Inst, InstNode>,
-
-    #[cfg(not(feature = "pub_fields"))]
     /// Linked list nodes for the layout order of instructions. Forms a double linked list per block,
     /// terminated in both ends by `None`.
     insts: SecondaryMap<Inst, InstNode>,
 
-    #[cfg(feature = "pub_fields")]
-    /// First block in the layout order, or `None` when no blocks have been laid out.
-    pub first_block: Option<Block>,
-
-    #[cfg(not(feature = "pub_fields"))]
     /// First block in the layout order, or `None` when no blocks have been laid out.
     first_block: Option<Block>,
 
-    #[cfg(feature = "pub_fields")]
-    /// Last block in the layout order, or `None` when no blocks have been laid out.
-    pub last_block: Option<Block>,
-
-    #[cfg(not(feature = "pub_fields"))]
     /// Last block in the layout order, or `None` when no blocks have been laid out.
     last_block: Option<Block>,
 }
@@ -114,23 +92,7 @@ fn midpoint(a: SequenceNumber, b: SequenceNumber) -> Option<SequenceNumber> {
     debug_assert!(a < b);
     // Avoid integer overflow.
     let m = a + (b - a) / 2;
-    if m > a {
-        Some(m)
-    } else {
-        None
-    }
-}
-
-#[test]
-fn test_midpoint() {
-    assert_eq!(midpoint(0, 1), None);
-    assert_eq!(midpoint(0, 2), Some(1));
-    assert_eq!(midpoint(0, 3), Some(1));
-    assert_eq!(midpoint(0, 4), Some(2));
-    assert_eq!(midpoint(1, 4), Some(2));
-    assert_eq!(midpoint(2, 4), Some(3));
-    assert_eq!(midpoint(3, 4), None);
-    assert_eq!(midpoint(3, 4), None);
+    if m > a { Some(m) } else { None }
 }
 
 impl Layout {
@@ -353,7 +315,7 @@ impl Layout {
     }
 
     /// Return an iterator over all blocks in layout order.
-    pub fn blocks(&self) -> Blocks {
+    pub fn blocks(&self) -> Blocks<'_> {
         Blocks {
             layout: self,
             next: self.first_block,
@@ -398,35 +360,11 @@ impl Layout {
 /// A single node in the linked-list of blocks.
 // **Note:** Whenever you add new fields here, don't forget to update the custom serializer for `Layout` too.
 #[derive(Clone, Debug, Default, PartialEq, Hash)]
-pub struct BlockNode {
-    #[cfg(feature = "pub_fields")]
-    pub prev: PackedOption<Block>,
-
-    #[cfg(not(feature = "pub_fields"))]
+struct BlockNode {
     prev: PackedOption<Block>,
-
-    #[cfg(feature = "pub_fields")]
-    pub next: PackedOption<Block>,
-
-    #[cfg(not(feature = "pub_fields"))]
     next: PackedOption<Block>,
-
-    #[cfg(feature = "pub_fields")]
-    pub first_inst: PackedOption<Inst>,
-
-    #[cfg(not(feature = "pub_fields"))]
     first_inst: PackedOption<Inst>,
-
-    #[cfg(feature = "pub_fields")]
-    pub last_inst: PackedOption<Inst>,
-
-    #[cfg(not(feature = "pub_fields"))]
     last_inst: PackedOption<Inst>,
-
-    #[cfg(feature = "pub_fields")]
-    pub cold: bool,
-
-    #[cfg(not(feature = "pub_fields"))]
     cold: bool,
 }
 
@@ -481,11 +419,10 @@ impl Layout {
     /// Append `inst` to the end of `block`.
     pub fn append_inst(&mut self, inst: Inst, block: Block) {
         debug_assert_eq!(self.inst_block(inst), None);
-        // 这里我修改了一下，取消了插入的指令所在的block必须在layout中的限制。
-        // debug_assert!(
-        //     self.is_block_inserted(block),
-        //     "Cannot append instructions to block not in layout"
-        // );
+        debug_assert!(
+            self.is_block_inserted(block),
+            "Cannot append instructions to block not in layout"
+        );
         {
             let block_node = &mut self.blocks[block];
             {
@@ -571,12 +508,18 @@ impl Layout {
     }
 
     /// Iterate over the instructions in `block` in layout order.
-    pub fn block_insts(&self, block: Block) -> Insts {
+    pub fn block_insts(&self, block: Block) -> Insts<'_> {
         Insts {
             layout: self,
             head: self.blocks[block].first_inst.into(),
             tail: self.blocks[block].last_inst.into(),
         }
+    }
+
+    /// Does the given block contain exactly one instruction?
+    pub fn block_contains_exactly_one_inst(&self, block: Block) -> bool {
+        let block = &self.blocks[block];
+        block.first_inst.is_some() && block.first_inst == block.last_inst
     }
 
     /// Split the block containing `before` in two.
@@ -810,12 +753,24 @@ mod serde {
 
 #[cfg(test)]
 mod tests {
-    use super::Layout;
+    use super::*;
     use crate::cursor::{Cursor, CursorPosition};
     use crate::entity::EntityRef;
     use crate::ir::{Block, Inst, SourceLoc};
     use alloc::vec::Vec;
     use core::cmp::Ordering;
+
+    #[test]
+    fn test_midpoint() {
+        assert_eq!(midpoint(0, 1), None);
+        assert_eq!(midpoint(0, 2), Some(1));
+        assert_eq!(midpoint(0, 3), Some(1));
+        assert_eq!(midpoint(0, 4), Some(2));
+        assert_eq!(midpoint(1, 4), Some(2));
+        assert_eq!(midpoint(2, 4), Some(3));
+        assert_eq!(midpoint(3, 4), None);
+        assert_eq!(midpoint(3, 4), None);
+    }
 
     struct LayoutCursor<'f> {
         /// Borrowed function layout. Public so it can be re-borrowed from this cursor.

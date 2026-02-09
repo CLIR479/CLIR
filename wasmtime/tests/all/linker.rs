@@ -1,10 +1,11 @@
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use wasmtime::*;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn link_undefined() -> Result<()> {
     let mut store = Store::<()>::default();
     let linker = Linker::new(store.engine());
@@ -23,6 +24,7 @@ fn link_undefined() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn test_unknown_import_error() -> Result<()> {
     let mut store = Store::<()>::default();
     let linker = Linker::new(store.engine());
@@ -48,9 +50,11 @@ fn link_twice_bad() -> Result<()> {
     // functions
     linker.func_wrap("f", "", || {})?;
     assert!(linker.func_wrap("f", "", || {}).is_err());
-    assert!(linker
-        .func_wrap("f", "", || -> Result<()> { loop {} })
-        .is_err());
+    assert!(
+        linker
+            .func_wrap("f", "", || -> Result<()> { loop {} })
+            .is_err()
+    );
 
     // globals
     let ty = GlobalType::new(ValType::I32, Mutability::Const);
@@ -269,6 +273,7 @@ fn no_leak_with_imports() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn get_host_function() -> Result<()> {
     let engine = Engine::default();
     let module = Module::new(&engine, r#"(module (import "mod" "f1" (func)))"#)?;
@@ -276,9 +281,11 @@ fn get_host_function() -> Result<()> {
     let mut linker = Linker::new(&engine);
     linker.func_wrap("mod", "f1", || {})?;
     let mut store = Store::new(&engine, ());
-    assert!(linker
-        .get_by_import(&mut store, &module.imports().nth(0).unwrap())
-        .is_some());
+    assert!(
+        linker
+            .get_by_import(&mut store, &module.imports().nth(0).unwrap())
+            .is_some()
+    );
 
     Ok(())
 }
@@ -331,6 +338,7 @@ fn alias_one() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn instance_pre() -> Result<()> {
     let engine = Engine::default();
     let mut linker = Linker::new(&engine);
@@ -417,7 +425,7 @@ fn test_default_value_unknown_import() -> Result<()> {
     let module = Module::new(store.engine(), WAT).expect("failed to create module");
     let mut linker = Linker::new(store.engine());
 
-    linker.define_unknown_imports_as_default_values(&module)?;
+    linker.define_unknown_imports_as_default_values(&mut store, &module)?;
     let instance = linker.instantiate(&mut store, &module)?;
 
     // "run" calls an import function which will not be defined, so it should
@@ -521,46 +529,81 @@ fn linker_instantiate_with_concrete_func_refs() -> Result<()> {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn linker_defines_func_subtype() -> Result<()> {
+    let _ = env_logger::try_init();
+
     let mut config = Config::new();
     config.wasm_function_references(true);
     config.wasm_gc(true);
     let engine = Engine::new(&config)?;
 
+    let ft0 = FuncType::with_finality_and_supertype(
+        &engine,
+        Finality::NonFinal,
+        None,
+        [ValType::NULLFUNCREF],
+        [],
+    )?;
+    let ft1 = FuncType::with_finality_and_supertype(
+        &engine,
+        Finality::NonFinal,
+        Some(&ft0),
+        [ValType::FUNCREF],
+        [],
+    )?;
+
+    let ft2 = FuncType::with_finality_and_supertype(
+        &engine,
+        Finality::NonFinal,
+        None,
+        [],
+        [ValType::FUNCREF],
+    )?;
+    let ft3 = FuncType::with_finality_and_supertype(
+        &engine,
+        Finality::NonFinal,
+        Some(&ft2),
+        [],
+        [ValType::NULLFUNCREF],
+    )?;
+
+    let nop = FuncType::new(&engine, [], []);
+    let ft4 = FuncType::with_finality_and_supertype(
+        &engine,
+        Finality::NonFinal,
+        None,
+        [ValType::NULLFUNCREF],
+        [ValType::FUNCREF],
+    )?;
+    let ft5 = FuncType::with_finality_and_supertype(
+        &engine,
+        Finality::NonFinal,
+        Some(&ft4),
+        [ValType::Ref(RefType::new(
+            true,
+            HeapType::ConcreteFunc(nop.clone()),
+        ))],
+        [ValType::Ref(RefType::new(
+            true,
+            HeapType::ConcreteFunc(nop.clone()),
+        ))],
+    )?;
+
     let mut linker = Linker::new(&engine);
-    linker.func_new(
-        "env",
-        "f",
-        FuncType::new(&engine, Some(ValType::FUNCREF), None),
-        |_caller, _args, _results| Ok(()),
-    )?;
-    linker.func_new(
-        "env",
-        "g",
-        FuncType::new(&engine, None, Some(ValType::NULLFUNCREF)),
-        |_caller, _args, _results| Ok(()),
-    )?;
-    let nop_ty = FuncType::new(&engine, None, None);
-    let ref_null_nop = ValType::from(RefType::new(true, HeapType::ConcreteFunc(nop_ty)));
-    linker.func_new(
-        "env",
-        "h",
-        FuncType::new(&engine, Some(ref_null_nop.clone()), Some(ref_null_nop)),
-        |_caller, _args, _results| Ok(()),
-    )?;
+    linker.func_new("env", "f", ft1, |_caller, _args, _results| Ok(()))?;
+    linker.func_new("env", "g", ft3, |_caller, _args, _results| Ok(()))?;
+    linker.func_new("env", "h", ft5, |_caller, _args, _results| Ok(()))?;
 
     let module = Module::new(
         &engine,
         r#"
             (module
-                ;; wasm's declared nullfuncref <: f's actual funcref
-                (import "env" "f" (func (param nullfuncref)))
+                (type $ft0 (sub (func (param nullfuncref))))
+                (type $ft2 (sub (func (result funcref))))
+                (type $ft4 (sub (func (param nullfuncref) (result funcref))))
 
-                ;; g's actual nullfuncref <: wasm's declared funcref
-                (import "env" "g" (func (result funcref)))
-
-                ;; wasm's declared nullfuncref param <: h's actual (ref null $nop) param, and
-                ;; h's actual (ref null $nop) result <: wasm's declared funcref result
-                (import "env" "h" (func (param nullfuncref) (result funcref)))
+                (import "env" "f" (func (type $ft0)))
+                (import "env" "g" (func (type $ft2)))
+                (import "env" "h" (func (type $ft4)))
             )
         "#,
     )?;

@@ -6,11 +6,11 @@
 /// has been created through a [`Linker`](wasmtime::component::Linker).
 ///
 /// For more information see [`TheWorld`] as well.
-pub struct TheWorldPre<T> {
+pub struct TheWorldPre<T: 'static> {
     instance_pre: wasmtime::component::InstancePre<T>,
     indices: TheWorldIndices,
 }
-impl<T> Clone for TheWorldPre<T> {
+impl<T: 'static> Clone for TheWorldPre<T> {
     fn clone(&self) -> Self {
         Self {
             instance_pre: self.instance_pre.clone(),
@@ -18,7 +18,7 @@ impl<T> Clone for TheWorldPre<T> {
         }
     }
 }
-impl<_T> TheWorldPre<_T> {
+impl<_T: 'static> TheWorldPre<_T> {
     /// Creates a new copy of `TheWorldPre` bindings which can then
     /// be used to instantiate into a particular store.
     ///
@@ -27,7 +27,7 @@ impl<_T> TheWorldPre<_T> {
     pub fn new(
         instance_pre: wasmtime::component::InstancePre<_T>,
     ) -> wasmtime::Result<Self> {
-        let indices = TheWorldIndices::new(instance_pre.component())?;
+        let indices = TheWorldIndices::new(&instance_pre)?;
         Ok(Self { instance_pre, indices })
     }
     pub fn engine(&self) -> &wasmtime::Engine {
@@ -49,6 +49,17 @@ impl<_T> TheWorldPre<_T> {
     ) -> wasmtime::Result<TheWorld> {
         let mut store = store.as_context_mut();
         let instance = self.instance_pre.instantiate(&mut store)?;
+        self.indices.load(&mut store, &instance)
+    }
+}
+impl<_T: Send + 'static> TheWorldPre<_T> {
+    /// Same as [`Self::instantiate`], except with `async`.
+    pub async fn instantiate_async(
+        &self,
+        mut store: impl wasmtime::AsContextMut<Data = _T>,
+    ) -> wasmtime::Result<TheWorld> {
+        let mut store = store.as_context_mut();
+        let instance = self.instance_pre.instantiate_async(&mut store).await?;
         self.indices.load(&mut store, &instance)
     }
 }
@@ -82,11 +93,6 @@ pub struct TheWorldIndices {
 /// * If you've instantiated the instance yourself already
 ///   then you can use [`TheWorld::new`].
 ///
-/// * You can also access the guts of instantiation through
-///   [`TheWorldIndices::new_instance`] followed
-///   by [`TheWorldIndices::load`] to crate an instance of this
-///   type.
-///
 /// These methods are all equivalent to one another and move
 /// around the tradeoff of what work is performed when.
 ///
@@ -97,36 +103,19 @@ pub struct TheWorld {
     interface0: exports::foo::foo::records::Guest,
 }
 const _: () = {
-    #[allow(unused_imports)]
-    use wasmtime::component::__internal::anyhow;
     impl TheWorldIndices {
         /// Creates a new copy of `TheWorldIndices` bindings which can then
         /// be used to instantiate into a particular store.
         ///
         /// This method may fail if the component does not have the
         /// required exports.
-        pub fn new(
-            component: &wasmtime::component::Component,
+        pub fn new<_T>(
+            _instance_pre: &wasmtime::component::InstancePre<_T>,
         ) -> wasmtime::Result<Self> {
-            let _component = component;
-            let interface0 = exports::foo::foo::records::GuestIndices::new(_component)?;
-            Ok(TheWorldIndices { interface0 })
-        }
-        /// Creates a new instance of [`TheWorldIndices`] from an
-        /// instantiated component.
-        ///
-        /// This method of creating a [`TheWorld`] will perform string
-        /// lookups for all exports when this method is called. This
-        /// will only succeed if the provided instance matches the
-        /// requirements of [`TheWorld`].
-        pub fn new_instance(
-            mut store: impl wasmtime::AsContextMut,
-            instance: &wasmtime::component::Instance,
-        ) -> wasmtime::Result<Self> {
-            let _instance = instance;
-            let interface0 = exports::foo::foo::records::GuestIndices::new_instance(
-                &mut store,
-                _instance,
+            let _component = _instance_pre.component();
+            let _instance_type = _instance_pre.instance_type();
+            let interface0 = exports::foo::foo::records::GuestIndices::new(
+                _instance_pre,
             )?;
             Ok(TheWorldIndices { interface0 })
         }
@@ -140,6 +129,7 @@ const _: () = {
             mut store: impl wasmtime::AsContextMut,
             instance: &wasmtime::component::Instance,
         ) -> wasmtime::Result<TheWorld> {
+            let _ = &mut store;
             let _instance = instance;
             let interface0 = self.interface0.load(&mut store, &_instance)?;
             Ok(TheWorld { interface0 })
@@ -149,30 +139,45 @@ const _: () = {
         /// Convenience wrapper around [`TheWorldPre::new`] and
         /// [`TheWorldPre::instantiate`].
         pub fn instantiate<_T>(
-            mut store: impl wasmtime::AsContextMut<Data = _T>,
+            store: impl wasmtime::AsContextMut<Data = _T>,
             component: &wasmtime::component::Component,
             linker: &wasmtime::component::Linker<_T>,
         ) -> wasmtime::Result<TheWorld> {
             let pre = linker.instantiate_pre(component)?;
             TheWorldPre::new(pre)?.instantiate(store)
         }
-        /// Convenience wrapper around [`TheWorldIndices::new_instance`] and
+        /// Convenience wrapper around [`TheWorldIndices::new`] and
         /// [`TheWorldIndices::load`].
         pub fn new(
             mut store: impl wasmtime::AsContextMut,
             instance: &wasmtime::component::Instance,
         ) -> wasmtime::Result<TheWorld> {
-            let indices = TheWorldIndices::new_instance(&mut store, instance)?;
-            indices.load(store, instance)
+            let indices = TheWorldIndices::new(&instance.instance_pre(&store))?;
+            indices.load(&mut store, instance)
         }
-        pub fn add_to_linker<T, U>(
+        /// Convenience wrapper around [`TheWorldPre::new`] and
+        /// [`TheWorldPre::instantiate_async`].
+        pub async fn instantiate_async<_T>(
+            store: impl wasmtime::AsContextMut<Data = _T>,
+            component: &wasmtime::component::Component,
+            linker: &wasmtime::component::Linker<_T>,
+        ) -> wasmtime::Result<TheWorld>
+        where
+            _T: Send,
+        {
+            let pre = linker.instantiate_pre(component)?;
+            TheWorldPre::new(pre)?.instantiate_async(store).await
+        }
+        pub fn add_to_linker<T, D>(
             linker: &mut wasmtime::component::Linker<T>,
-            get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
+            host_getter: fn(&mut T) -> D::Data<'_>,
         ) -> wasmtime::Result<()>
         where
-            U: foo::foo::records::Host,
+            D: foo::foo::records::HostWithStore,
+            for<'a> D::Data<'a>: foo::foo::records::Host,
+            T: 'static,
         {
-            foo::foo::records::add_to_linker(linker, get)?;
+            foo::foo::records::add_to_linker::<T, D>(linker, host_getter)?;
             Ok(())
         }
         pub fn foo_foo_records(&self) -> &exports::foo::foo::records::Guest {
@@ -185,7 +190,7 @@ pub mod foo {
         #[allow(clippy::all)]
         pub mod records {
             #[allow(unused_imports)]
-            use wasmtime::component::__internal::anyhow;
+            use wasmtime::component::__internal::Box;
             #[derive(wasmtime::component::ComponentType)]
             #[derive(wasmtime::component::Lift)]
             #[derive(wasmtime::component::Lower)]
@@ -314,6 +319,15 @@ pub mod foo {
                     4 == < Aggregates as wasmtime::component::ComponentType >::ALIGN32
                 );
             };
+            pub type TupleTypedef = (i32,);
+            const _: () = {
+                assert!(
+                    4 == < TupleTypedef as wasmtime::component::ComponentType >::SIZE32
+                );
+                assert!(
+                    4 == < TupleTypedef as wasmtime::component::ComponentType >::ALIGN32
+                );
+            };
             pub type IntTypedef = i32;
             const _: () = {
                 assert!(
@@ -332,6 +346,11 @@ pub mod foo {
                     4 == < TupleTypedef2 as wasmtime::component::ComponentType >::ALIGN32
                 );
             };
+            pub trait HostWithStore: wasmtime::component::HasData {}
+            impl<_T: ?Sized> HostWithStore for _T
+            where
+                _T: wasmtime::component::HasData,
+            {}
             pub trait Host {
                 fn tuple_arg(&mut self, x: (char, u32)) -> ();
                 fn tuple_result(&mut self) -> (char, u32);
@@ -345,22 +364,50 @@ pub mod foo {
                 fn aggregate_result(&mut self) -> Aggregates;
                 fn typedef_inout(&mut self, e: TupleTypedef2) -> i32;
             }
-            pub trait GetHost<
-                T,
-            >: Fn(T) -> <Self as GetHost<T>>::Host + Send + Sync + Copy + 'static {
-                type Host: Host;
+            impl<_T: Host + ?Sized> Host for &mut _T {
+                fn tuple_arg(&mut self, x: (char, u32)) -> () {
+                    Host::tuple_arg(*self, x)
+                }
+                fn tuple_result(&mut self) -> (char, u32) {
+                    Host::tuple_result(*self)
+                }
+                fn empty_arg(&mut self, x: Empty) -> () {
+                    Host::empty_arg(*self, x)
+                }
+                fn empty_result(&mut self) -> Empty {
+                    Host::empty_result(*self)
+                }
+                fn scalar_arg(&mut self, x: Scalars) -> () {
+                    Host::scalar_arg(*self, x)
+                }
+                fn scalar_result(&mut self) -> Scalars {
+                    Host::scalar_result(*self)
+                }
+                fn flags_arg(&mut self, x: ReallyFlags) -> () {
+                    Host::flags_arg(*self, x)
+                }
+                fn flags_result(&mut self) -> ReallyFlags {
+                    Host::flags_result(*self)
+                }
+                fn aggregate_arg(&mut self, x: Aggregates) -> () {
+                    Host::aggregate_arg(*self, x)
+                }
+                fn aggregate_result(&mut self) -> Aggregates {
+                    Host::aggregate_result(*self)
+                }
+                fn typedef_inout(&mut self, e: TupleTypedef2) -> i32 {
+                    Host::typedef_inout(*self, e)
+                }
             }
-            impl<F, T, O> GetHost<T> for F
-            where
-                F: Fn(T) -> O + Send + Sync + Copy + 'static,
-                O: Host,
-            {
-                type Host = O;
-            }
-            pub fn add_to_linker_get_host<T>(
+            pub fn add_to_linker<T, D>(
                 linker: &mut wasmtime::component::Linker<T>,
-                host_getter: impl for<'a> GetHost<&'a mut T>,
-            ) -> wasmtime::Result<()> {
+                host_getter: fn(&mut T) -> D::Data<'_>,
+            ) -> wasmtime::Result<()>
+            where
+                D: HostWithStore,
+                for<'a> D::Data<'a>: Host,
+                T: 'static,
+            {
                 let mut inst = linker.instance("foo:foo/records")?;
                 inst.func_wrap(
                     "tuple-arg",
@@ -470,50 +517,6 @@ pub mod foo {
                 )?;
                 Ok(())
             }
-            pub fn add_to_linker<T, U>(
-                linker: &mut wasmtime::component::Linker<T>,
-                get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-            ) -> wasmtime::Result<()>
-            where
-                U: Host,
-            {
-                add_to_linker_get_host(linker, get)
-            }
-            impl<_T: Host + ?Sized> Host for &mut _T {
-                fn tuple_arg(&mut self, x: (char, u32)) -> () {
-                    Host::tuple_arg(*self, x)
-                }
-                fn tuple_result(&mut self) -> (char, u32) {
-                    Host::tuple_result(*self)
-                }
-                fn empty_arg(&mut self, x: Empty) -> () {
-                    Host::empty_arg(*self, x)
-                }
-                fn empty_result(&mut self) -> Empty {
-                    Host::empty_result(*self)
-                }
-                fn scalar_arg(&mut self, x: Scalars) -> () {
-                    Host::scalar_arg(*self, x)
-                }
-                fn scalar_result(&mut self) -> Scalars {
-                    Host::scalar_result(*self)
-                }
-                fn flags_arg(&mut self, x: ReallyFlags) -> () {
-                    Host::flags_arg(*self, x)
-                }
-                fn flags_result(&mut self) -> ReallyFlags {
-                    Host::flags_result(*self)
-                }
-                fn aggregate_arg(&mut self, x: Aggregates) -> () {
-                    Host::aggregate_arg(*self, x)
-                }
-                fn aggregate_result(&mut self) -> Aggregates {
-                    Host::aggregate_result(*self)
-                }
-                fn typedef_inout(&mut self, e: TupleTypedef2) -> i32 {
-                    Host::typedef_inout(*self, e)
-                }
-            }
         }
     }
 }
@@ -523,7 +526,7 @@ pub mod exports {
             #[allow(clippy::all)]
             pub mod records {
                 #[allow(unused_imports)]
-                use wasmtime::component::__internal::anyhow;
+                use wasmtime::component::__internal::Box;
                 #[derive(wasmtime::component::ComponentType)]
                 #[derive(wasmtime::component::Lift)]
                 #[derive(wasmtime::component::Lower)]
@@ -676,6 +679,17 @@ pub mod exports {
                         >::ALIGN32
                     );
                 };
+                pub type TupleTypedef = (i32,);
+                const _: () = {
+                    assert!(
+                        4 == < TupleTypedef as wasmtime::component::ComponentType
+                        >::SIZE32
+                    );
+                    assert!(
+                        4 == < TupleTypedef as wasmtime::component::ComponentType
+                        >::ALIGN32
+                    );
+                };
                 pub type IntTypedef = i32;
                 const _: () = {
                     assert!(
@@ -697,6 +711,7 @@ pub mod exports {
                         >::ALIGN32
                     );
                 };
+                #[derive(Clone)]
                 pub struct Guest {
                     tuple_arg: wasmtime::component::Func,
                     tuple_result: wasmtime::component::Func,
@@ -731,48 +746,25 @@ pub mod exports {
                     ///
                     /// This constructor can be used to front-load string lookups to find exports
                     /// within a component.
-                    pub fn new(
-                        component: &wasmtime::component::Component,
+                    pub fn new<_T>(
+                        _instance_pre: &wasmtime::component::InstancePre<_T>,
                     ) -> wasmtime::Result<GuestIndices> {
-                        let (_, instance) = component
-                            .export_index(None, "foo:foo/records")
+                        let instance = _instance_pre
+                            .component()
+                            .get_export_index(None, "foo:foo/records")
                             .ok_or_else(|| {
-                                anyhow::anyhow!(
+                                wasmtime::format_err!(
                                     "no exported instance named `foo:foo/records`"
                                 )
                             })?;
-                        Self::_new(|name| {
-                            component.export_index(Some(&instance), name).map(|p| p.1)
-                        })
-                    }
-                    /// This constructor is similar to [`GuestIndices::new`] except that it
-                    /// performs string lookups after instantiation time.
-                    pub fn new_instance(
-                        mut store: impl wasmtime::AsContextMut,
-                        instance: &wasmtime::component::Instance,
-                    ) -> wasmtime::Result<GuestIndices> {
-                        let instance_export = instance
-                            .get_export(&mut store, None, "foo:foo/records")
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "no exported instance named `foo:foo/records`"
-                                )
-                            })?;
-                        Self::_new(|name| {
-                            instance.get_export(&mut store, Some(&instance_export), name)
-                        })
-                    }
-                    fn _new(
-                        mut lookup: impl FnMut(
-                            &str,
-                        ) -> Option<wasmtime::component::ComponentExportIndex>,
-                    ) -> wasmtime::Result<GuestIndices> {
                         let mut lookup = move |name| {
-                            lookup(name)
+                            _instance_pre
+                                .component()
+                                .get_export_index(Some(&instance), name)
                                 .ok_or_else(|| {
-                                    anyhow::anyhow!(
+                                    wasmtime::format_err!(
                                         "instance export `foo:foo/records` does \
-                not have export `{name}`"
+                                      not have export `{name}`"
                                     )
                                 })
                         };
@@ -807,9 +799,11 @@ pub mod exports {
                         mut store: impl wasmtime::AsContextMut,
                         instance: &wasmtime::component::Instance,
                     ) -> wasmtime::Result<Guest> {
+                        let _instance = instance;
+                        let _instance_pre = _instance.instance_pre(&store);
+                        let _instance_type = _instance_pre.instance_type();
                         let mut store = store.as_context_mut();
                         let _ = &mut store;
-                        let _instance = instance;
                         let tuple_arg = *_instance
                             .get_typed_func::<
                                 ((char, u32),),
@@ -901,7 +895,6 @@ pub mod exports {
                             >::new_unchecked(self.tuple_arg)
                         };
                         let () = callee.call(store.as_context_mut(), (arg0,))?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_tuple_result<S: wasmtime::AsContextMut>(
@@ -915,7 +908,6 @@ pub mod exports {
                             >::new_unchecked(self.tuple_result)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_empty_arg<S: wasmtime::AsContextMut>(
@@ -930,7 +922,6 @@ pub mod exports {
                             >::new_unchecked(self.empty_arg)
                         };
                         let () = callee.call(store.as_context_mut(), (arg0,))?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_empty_result<S: wasmtime::AsContextMut>(
@@ -944,7 +935,6 @@ pub mod exports {
                             >::new_unchecked(self.empty_result)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_scalar_arg<S: wasmtime::AsContextMut>(
@@ -959,7 +949,6 @@ pub mod exports {
                             >::new_unchecked(self.scalar_arg)
                         };
                         let () = callee.call(store.as_context_mut(), (arg0,))?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_scalar_result<S: wasmtime::AsContextMut>(
@@ -973,7 +962,6 @@ pub mod exports {
                             >::new_unchecked(self.scalar_result)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_flags_arg<S: wasmtime::AsContextMut>(
@@ -988,7 +976,6 @@ pub mod exports {
                             >::new_unchecked(self.flags_arg)
                         };
                         let () = callee.call(store.as_context_mut(), (arg0,))?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_flags_result<S: wasmtime::AsContextMut>(
@@ -1002,7 +989,6 @@ pub mod exports {
                             >::new_unchecked(self.flags_result)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_aggregate_arg<S: wasmtime::AsContextMut>(
@@ -1017,7 +1003,6 @@ pub mod exports {
                             >::new_unchecked(self.aggregate_arg)
                         };
                         let () = callee.call(store.as_context_mut(), (arg0,))?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_aggregate_result<S: wasmtime::AsContextMut>(
@@ -1031,7 +1016,6 @@ pub mod exports {
                             >::new_unchecked(self.aggregate_result)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_typedef_inout<S: wasmtime::AsContextMut>(
@@ -1046,7 +1030,6 @@ pub mod exports {
                             >::new_unchecked(self.typedef_inout)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), (arg0,))?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                 }

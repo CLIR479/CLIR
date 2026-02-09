@@ -15,25 +15,20 @@ const GENERIC_BUCKETS = 3;
 // compile-and-test crates.
 const SINGLE_CRATE_BUCKETS = ["wasmtime", "wasmtime-cli", "wasmtime-wasi"];
 
+const ubuntu = 'ubuntu-24.04';
+const windows = 'windows-2025';
+const macos = 'macos-15';
+
 // This is the small, fast-to-execute matrix we use for PRs before they enter
 // the merge queue. Same schema as `FULL_MATRIX`.
 const FAST_MATRIX = [
   {
-    "os": "ubuntu-latest",
     "name": "Test Linux x86_64",
+    "os": ubuntu,
     "filter": "linux-x64",
     "isa": "x64",
   },
 ];
-
-// Returns whether the given package supports a 32-bit architecture, used when
-// testing on i686 and armv7 below.
-function supports32Bit(pkg) {
-  if (pkg.indexOf("pulley") !== -1)
-    return true;
-
-  return pkg == 'wasmtime-fiber';
-}
 
 // This is the full, unsharded, and unfiltered matrix of what we test on
 // CI. This includes a number of platforms and a number of cross-compiled
@@ -59,90 +54,104 @@ function supports32Bit(pkg) {
 //   QEMU and installing cross compilers to execute a cross-compiled test suite
 //   on CI.
 //
+// * `sde` - if `true`, indicates this test should use Intel SDE for instruction
+//   emulation. SDE will be set up and configured as the test runner.
+//
 // * `rust` - the Rust version to install, and if unset this'll be set to
 //   `default`
 const FULL_MATRIX = [
   ...FAST_MATRIX,
   {
-    "os": "ubuntu-latest",
-    "name": "Test MSRV on Linux x86_64",
+    "name": "Test MSRV",
+    "os": ubuntu,
     "filter": "linux-x64",
     "isa": "x64",
     "rust": "msrv",
   },
   {
-    "os": "ubuntu-latest",
-    "name": "Test Linux x86_64 with MPK",
+    "name": "Test MPK",
+    "os": ubuntu,
     "filter": "linux-x64",
     "isa": "x64"
   },
   {
-    "os": "macos-13",
-    "name": "Test macOS x86_64",
-    "filter": "macos-x64",
+    "name": "Test ASAN",
+    "os": ubuntu,
+    "filter": "asan",
+    "rust": "wasmtime-ci-pinned-nightly",
+    "target": "x86_64-unknown-linux-gnu",
   },
   {
-    "os": "macos-14",
+    "name": "Test Intel SDE",
+    "os": ubuntu,
+    "filter": "sde",
+    "isa": "x64",
+    "sde": true,
+    "crates": "cranelift-tools",
+  },
+  {
+    "name": "Test macOS x86_64",
+    "os": macos,
+    "filter": "macos-x64",
+    "target": "x86_64-apple-darwin",
+  },
+  {
     "name": "Test macOS arm64",
+    "os": macos,
     "filter": "macos-arm64",
     "target": "aarch64-apple-darwin",
   },
   {
-    "os": "windows-latest",
-    "name": "Test Windows MSVC x86_64",
+    "name": "Test MSVC x86_64",
+    "os": windows,
     "filter": "windows-x64",
   },
   {
-    "os": "windows-latest",
+    "name": "Test MinGW x86_64",
+    "os": windows,
     "target": "x86_64-pc-windows-gnu",
-    "name": "Test Windows MinGW x86_64",
     "filter": "mingw-x64"
   },
   {
-    "os": "ubuntu-latest",
-    "target": "aarch64-unknown-linux-gnu",
-    "gcc_package": "gcc-aarch64-linux-gnu",
-    "gcc": "aarch64-linux-gnu-gcc",
-    "qemu": "qemu-aarch64 -L /usr/aarch64-linux-gnu",
-    "qemu_target": "aarch64-linux-user",
     "name": "Test Linux arm64",
+    "os": ubuntu + '-arm',
+    "target": "aarch64-unknown-linux-gnu",
     "filter": "linux-arm64",
     "isa": "aarch64",
   },
   {
-    "os": "ubuntu-latest",
+    "name": "Test Linux s390x",
+    // "os": 'ubuntu-24.04-s390x',
+    "os": ubuntu,
     "target": "s390x-unknown-linux-gnu",
+    "filter": "linux-s390x",
+    "isa": "s390x",
     "gcc_package": "gcc-s390x-linux-gnu",
     "gcc": "s390x-linux-gnu-gcc",
     "qemu": "qemu-s390x -L /usr/s390x-linux-gnu",
     "qemu_target": "s390x-linux-user",
-    "name": "Test Linux s390x",
-    "filter": "linux-s390x",
-    "isa": "s390x"
   },
   {
-    "os": "ubuntu-latest",
+    "name": "Test Linux riscv64",
+    "os": ubuntu,
     "target": "riscv64gc-unknown-linux-gnu",
     "gcc_package": "gcc-riscv64-linux-gnu",
     "gcc": "riscv64-linux-gnu-gcc",
-    "qemu": "qemu-riscv64 -cpu rv64,v=true,vlen=256,vext_spec=v1.0,Zfa=true,Zfh=true,zba=true,zbb=true,zbc=true,zbs=true,zbkb=true,zcb=true,x-zicond=true -L /usr/riscv64-linux-gnu",
+    "qemu": "qemu-riscv64 -cpu rv64,v=true,vlen=256,vext_spec=v1.0,zfa=true,zfh=true,zba=true,zbb=true,zbc=true,zbs=true,zbkb=true,zcb=true,zicond=true,zvfh=true -L /usr/riscv64-linux-gnu",
     "qemu_target": "riscv64-linux-user",
-    "name": "Test Linux riscv64",
     "filter": "linux-riscv64",
     "isa": "riscv64",
   },
   {
-    "name": "Tests on i686-unknown-linux-gnu",
-    "32-bit": true,
-    "os": "ubuntu-latest",
+    "name": "Tests Linux i686",
+    "os": ubuntu,
     "target": "i686-unknown-linux-gnu",
     "gcc_package": "gcc-i686-linux-gnu",
     "gcc": "i686-linux-gnu-gcc",
   },
   {
-    "name": "Tests on armv7-unknown-linux-gnueabihf",
-    "32-bit": true,
-    "os": "ubuntu-latest",
+    "name": "Tests Linux armv7",
+    "os": ubuntu,
     "target": "armv7-unknown-linux-gnueabihf",
     "gcc_package": "gcc-arm-linux-gnueabihf",
     "gcc": "arm-linux-gnueabihf-gcc",
@@ -225,28 +234,31 @@ async function shard(configs) {
   // created above.
   const sharded = [];
   for (const config of configs) {
-    // Special case 32-bit configs. Only some crates, according to
-    // `supports32Bit`, run on this target. At this time the set of supported
-    // crates is small enough that they're not sharded.
-    if (config["32-bit"] === true) {
+    // If crates is specified, don't shard, just use the specified crates
+    if (config.crates) {
       sharded.push(Object.assign(
         {},
         config,
         {
           bucket: members
-            .map(c => supports32Bit(c) ? `--package ${c}` : `--exclude ${c}`)
-            .join(" "),
+            .map(c => c === config.crates ? `--package ${c}` : `--exclude ${c}`)
+            .join(" ")
         }
       ));
       continue;
     }
 
+    let nbucket = 1;
     for (const bucket of buckets) {
+      let bucket_name = `${nbucket}/${buckets.length}`;
+      if (bucket.size === 1)
+        bucket_name = Array.from(bucket)[0];
+
       sharded.push(Object.assign(
         {},
         config,
         {
-          name: `${config.name} (${Array.from(bucket).join(', ')})`,
+          name: `${config.name} (${bucket_name})`,
           // We run tests via `cargo test --workspace`, so exclude crates that
           // aren't in this bucket, rather than naming only the crates that are
           // in this bucket.
@@ -255,6 +267,7 @@ async function shard(configs) {
             .join(" "),
         }
       ));
+      nbucket += 1;
     }
   }
   return sharded;
@@ -296,16 +309,6 @@ async function main() {
     // target any backend.
     if (names.includes(`cranelift/filetests/filetests/runtests`)) {
       if (config.isa !== undefined)
-        return true;
-    }
-
-    // For matrix entries that represent 32-bit only some crates support that,
-    // so whenever the crates are changed be sure to run 32-bit tests on PRs
-    // too.
-    if (config["32-bit"] === true) {
-      if (names.includes("pulley"))
-        return true;
-      if (names.includes("fiber"))
         return true;
     }
 

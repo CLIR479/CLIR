@@ -6,11 +6,11 @@
 /// has been created through a [`Linker`](wasmtime::component::Linker).
 ///
 /// For more information see [`MyWorld`] as well.
-pub struct MyWorldPre<T> {
+pub struct MyWorldPre<T: 'static> {
     instance_pre: wasmtime::component::InstancePre<T>,
     indices: MyWorldIndices,
 }
-impl<T> Clone for MyWorldPre<T> {
+impl<T: 'static> Clone for MyWorldPre<T> {
     fn clone(&self) -> Self {
         Self {
             instance_pre: self.instance_pre.clone(),
@@ -18,7 +18,7 @@ impl<T> Clone for MyWorldPre<T> {
         }
     }
 }
-impl<_T> MyWorldPre<_T> {
+impl<_T: 'static> MyWorldPre<_T> {
     /// Creates a new copy of `MyWorldPre` bindings which can then
     /// be used to instantiate into a particular store.
     ///
@@ -27,7 +27,7 @@ impl<_T> MyWorldPre<_T> {
     pub fn new(
         instance_pre: wasmtime::component::InstancePre<_T>,
     ) -> wasmtime::Result<Self> {
-        let indices = MyWorldIndices::new(instance_pre.component())?;
+        let indices = MyWorldIndices::new(&instance_pre)?;
         Ok(Self { instance_pre, indices })
     }
     pub fn engine(&self) -> &wasmtime::Engine {
@@ -49,6 +49,17 @@ impl<_T> MyWorldPre<_T> {
     ) -> wasmtime::Result<MyWorld> {
         let mut store = store.as_context_mut();
         let instance = self.instance_pre.instantiate(&mut store)?;
+        self.indices.load(&mut store, &instance)
+    }
+}
+impl<_T: Send + 'static> MyWorldPre<_T> {
+    /// Same as [`Self::instantiate`], except with `async`.
+    pub async fn instantiate_async(
+        &self,
+        mut store: impl wasmtime::AsContextMut<Data = _T>,
+    ) -> wasmtime::Result<MyWorld> {
+        let mut store = store.as_context_mut();
+        let instance = self.instance_pre.instantiate_async(&mut store).await?;
         self.indices.load(&mut store, &instance)
     }
 }
@@ -82,11 +93,6 @@ pub struct MyWorldIndices {
 /// * If you've instantiated the instance yourself already
 ///   then you can use [`MyWorld::new`].
 ///
-/// * You can also access the guts of instantiation through
-///   [`MyWorldIndices::new_instance`] followed
-///   by [`MyWorldIndices::load`] to crate an instance of this
-///   type.
-///
 /// These methods are all equivalent to one another and move
 /// around the tradeoff of what work is performed when.
 ///
@@ -97,36 +103,19 @@ pub struct MyWorld {
     interface0: exports::foo::foo::variants::Guest,
 }
 const _: () = {
-    #[allow(unused_imports)]
-    use wasmtime::component::__internal::anyhow;
     impl MyWorldIndices {
         /// Creates a new copy of `MyWorldIndices` bindings which can then
         /// be used to instantiate into a particular store.
         ///
         /// This method may fail if the component does not have the
         /// required exports.
-        pub fn new(
-            component: &wasmtime::component::Component,
+        pub fn new<_T>(
+            _instance_pre: &wasmtime::component::InstancePre<_T>,
         ) -> wasmtime::Result<Self> {
-            let _component = component;
-            let interface0 = exports::foo::foo::variants::GuestIndices::new(_component)?;
-            Ok(MyWorldIndices { interface0 })
-        }
-        /// Creates a new instance of [`MyWorldIndices`] from an
-        /// instantiated component.
-        ///
-        /// This method of creating a [`MyWorld`] will perform string
-        /// lookups for all exports when this method is called. This
-        /// will only succeed if the provided instance matches the
-        /// requirements of [`MyWorld`].
-        pub fn new_instance(
-            mut store: impl wasmtime::AsContextMut,
-            instance: &wasmtime::component::Instance,
-        ) -> wasmtime::Result<Self> {
-            let _instance = instance;
-            let interface0 = exports::foo::foo::variants::GuestIndices::new_instance(
-                &mut store,
-                _instance,
+            let _component = _instance_pre.component();
+            let _instance_type = _instance_pre.instance_type();
+            let interface0 = exports::foo::foo::variants::GuestIndices::new(
+                _instance_pre,
             )?;
             Ok(MyWorldIndices { interface0 })
         }
@@ -140,6 +129,7 @@ const _: () = {
             mut store: impl wasmtime::AsContextMut,
             instance: &wasmtime::component::Instance,
         ) -> wasmtime::Result<MyWorld> {
+            let _ = &mut store;
             let _instance = instance;
             let interface0 = self.interface0.load(&mut store, &_instance)?;
             Ok(MyWorld { interface0 })
@@ -149,30 +139,45 @@ const _: () = {
         /// Convenience wrapper around [`MyWorldPre::new`] and
         /// [`MyWorldPre::instantiate`].
         pub fn instantiate<_T>(
-            mut store: impl wasmtime::AsContextMut<Data = _T>,
+            store: impl wasmtime::AsContextMut<Data = _T>,
             component: &wasmtime::component::Component,
             linker: &wasmtime::component::Linker<_T>,
         ) -> wasmtime::Result<MyWorld> {
             let pre = linker.instantiate_pre(component)?;
             MyWorldPre::new(pre)?.instantiate(store)
         }
-        /// Convenience wrapper around [`MyWorldIndices::new_instance`] and
+        /// Convenience wrapper around [`MyWorldIndices::new`] and
         /// [`MyWorldIndices::load`].
         pub fn new(
             mut store: impl wasmtime::AsContextMut,
             instance: &wasmtime::component::Instance,
         ) -> wasmtime::Result<MyWorld> {
-            let indices = MyWorldIndices::new_instance(&mut store, instance)?;
-            indices.load(store, instance)
+            let indices = MyWorldIndices::new(&instance.instance_pre(&store))?;
+            indices.load(&mut store, instance)
         }
-        pub fn add_to_linker<T, U>(
+        /// Convenience wrapper around [`MyWorldPre::new`] and
+        /// [`MyWorldPre::instantiate_async`].
+        pub async fn instantiate_async<_T>(
+            store: impl wasmtime::AsContextMut<Data = _T>,
+            component: &wasmtime::component::Component,
+            linker: &wasmtime::component::Linker<_T>,
+        ) -> wasmtime::Result<MyWorld>
+        where
+            _T: Send,
+        {
+            let pre = linker.instantiate_pre(component)?;
+            MyWorldPre::new(pre)?.instantiate_async(store).await
+        }
+        pub fn add_to_linker<T, D>(
             linker: &mut wasmtime::component::Linker<T>,
-            get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
+            host_getter: fn(&mut T) -> D::Data<'_>,
         ) -> wasmtime::Result<()>
         where
-            U: foo::foo::variants::Host,
+            D: foo::foo::variants::HostWithStore,
+            for<'a> D::Data<'a>: foo::foo::variants::Host,
+            T: 'static,
         {
-            foo::foo::variants::add_to_linker(linker, get)?;
+            foo::foo::variants::add_to_linker::<T, D>(linker, host_getter)?;
             Ok(())
         }
         pub fn foo_foo_variants(&self) -> &exports::foo::foo::variants::Guest {
@@ -185,7 +190,7 @@ pub mod foo {
         #[allow(clippy::all)]
         pub mod variants {
             #[allow(unused_imports)]
-            use wasmtime::component::__internal::anyhow;
+            use wasmtime::component::__internal::Box;
             #[derive(wasmtime::component::ComponentType)]
             #[derive(wasmtime::component::Lift)]
             #[derive(wasmtime::component::Lower)]
@@ -435,7 +440,7 @@ pub mod foo {
                     write!(f, "{} (error {})", self.name(), * self as i32)
                 }
             }
-            impl std::error::Error for MyErrno {}
+            impl core::error::Error for MyErrno {}
             const _: () = {
                 assert!(1 == < MyErrno as wasmtime::component::ComponentType >::SIZE32);
                 assert!(1 == < MyErrno as wasmtime::component::ComponentType >::ALIGN32);
@@ -458,6 +463,11 @@ pub mod foo {
                 assert!(12 == < IsClone as wasmtime::component::ComponentType >::SIZE32);
                 assert!(4 == < IsClone as wasmtime::component::ComponentType >::ALIGN32);
             };
+            pub trait HostWithStore: wasmtime::component::HasData {}
+            impl<_T: ?Sized> HostWithStore for _T
+            where
+                _T: wasmtime::component::HasData,
+            {}
             pub trait Host {
                 fn e1_arg(&mut self, x: E1) -> ();
                 fn e1_result(&mut self) -> E1;
@@ -527,25 +537,126 @@ pub mod foo {
                 fn result_simple(&mut self) -> Result<u32, i32>;
                 fn is_clone_arg(&mut self, a: IsClone) -> ();
                 fn is_clone_return(&mut self) -> IsClone;
-                fn return_named_option(&mut self) -> Option<u8>;
-                fn return_named_result(&mut self) -> Result<u8, MyErrno>;
             }
-            pub trait GetHost<
-                T,
-            >: Fn(T) -> <Self as GetHost<T>>::Host + Send + Sync + Copy + 'static {
-                type Host: Host;
+            impl<_T: Host + ?Sized> Host for &mut _T {
+                fn e1_arg(&mut self, x: E1) -> () {
+                    Host::e1_arg(*self, x)
+                }
+                fn e1_result(&mut self) -> E1 {
+                    Host::e1_result(*self)
+                }
+                fn v1_arg(&mut self, x: V1) -> () {
+                    Host::v1_arg(*self, x)
+                }
+                fn v1_result(&mut self) -> V1 {
+                    Host::v1_result(*self)
+                }
+                fn bool_arg(&mut self, x: bool) -> () {
+                    Host::bool_arg(*self, x)
+                }
+                fn bool_result(&mut self) -> bool {
+                    Host::bool_result(*self)
+                }
+                fn option_arg(
+                    &mut self,
+                    a: Option<bool>,
+                    b: Option<()>,
+                    c: Option<u32>,
+                    d: Option<E1>,
+                    e: Option<f32>,
+                    g: Option<Option<bool>>,
+                ) -> () {
+                    Host::option_arg(*self, a, b, c, d, e, g)
+                }
+                fn option_result(
+                    &mut self,
+                ) -> (
+                    Option<bool>,
+                    Option<()>,
+                    Option<u32>,
+                    Option<E1>,
+                    Option<f32>,
+                    Option<Option<bool>>,
+                ) {
+                    Host::option_result(*self)
+                }
+                fn casts(
+                    &mut self,
+                    a: Casts1,
+                    b: Casts2,
+                    c: Casts3,
+                    d: Casts4,
+                    e: Casts5,
+                    f: Casts6,
+                ) -> (Casts1, Casts2, Casts3, Casts4, Casts5, Casts6) {
+                    Host::casts(*self, a, b, c, d, e, f)
+                }
+                fn result_arg(
+                    &mut self,
+                    a: Result<(), ()>,
+                    b: Result<(), E1>,
+                    c: Result<E1, ()>,
+                    d: Result<(), ()>,
+                    e: Result<u32, V1>,
+                    f: Result<
+                        wasmtime::component::__internal::String,
+                        wasmtime::component::__internal::Vec<u8>,
+                    >,
+                ) -> () {
+                    Host::result_arg(*self, a, b, c, d, e, f)
+                }
+                fn result_result(
+                    &mut self,
+                ) -> (
+                    Result<(), ()>,
+                    Result<(), E1>,
+                    Result<E1, ()>,
+                    Result<(), ()>,
+                    Result<u32, V1>,
+                    Result<
+                        wasmtime::component::__internal::String,
+                        wasmtime::component::__internal::Vec<u8>,
+                    >,
+                ) {
+                    Host::result_result(*self)
+                }
+                fn return_result_sugar(&mut self) -> Result<i32, MyErrno> {
+                    Host::return_result_sugar(*self)
+                }
+                fn return_result_sugar2(&mut self) -> Result<(), MyErrno> {
+                    Host::return_result_sugar2(*self)
+                }
+                fn return_result_sugar3(&mut self) -> Result<MyErrno, MyErrno> {
+                    Host::return_result_sugar3(*self)
+                }
+                fn return_result_sugar4(&mut self) -> Result<(i32, u32), MyErrno> {
+                    Host::return_result_sugar4(*self)
+                }
+                fn return_option_sugar(&mut self) -> Option<i32> {
+                    Host::return_option_sugar(*self)
+                }
+                fn return_option_sugar2(&mut self) -> Option<MyErrno> {
+                    Host::return_option_sugar2(*self)
+                }
+                fn result_simple(&mut self) -> Result<u32, i32> {
+                    Host::result_simple(*self)
+                }
+                fn is_clone_arg(&mut self, a: IsClone) -> () {
+                    Host::is_clone_arg(*self, a)
+                }
+                fn is_clone_return(&mut self) -> IsClone {
+                    Host::is_clone_return(*self)
+                }
             }
-            impl<F, T, O> GetHost<T> for F
-            where
-                F: Fn(T) -> O + Send + Sync + Copy + 'static,
-                O: Host,
-            {
-                type Host = O;
-            }
-            pub fn add_to_linker_get_host<T>(
+            pub fn add_to_linker<T, D>(
                 linker: &mut wasmtime::component::Linker<T>,
-                host_getter: impl for<'a> GetHost<&'a mut T>,
-            ) -> wasmtime::Result<()> {
+                host_getter: fn(&mut T) -> D::Data<'_>,
+            ) -> wasmtime::Result<()>
+            where
+                D: HostWithStore,
+                for<'a> D::Data<'a>: Host,
+                T: 'static,
+            {
                 let mut inst = linker.instance("foo:foo/variants")?;
                 inst.func_wrap(
                     "e1-arg",
@@ -776,148 +887,7 @@ pub mod foo {
                         Ok((r,))
                     },
                 )?;
-                inst.func_wrap(
-                    "return-named-option",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
-                        let r = Host::return_named_option(host);
-                        Ok((r,))
-                    },
-                )?;
-                inst.func_wrap(
-                    "return-named-result",
-                    move |mut caller: wasmtime::StoreContextMut<'_, T>, (): ()| {
-                        let host = &mut host_getter(caller.data_mut());
-                        let r = Host::return_named_result(host);
-                        Ok((r,))
-                    },
-                )?;
                 Ok(())
-            }
-            pub fn add_to_linker<T, U>(
-                linker: &mut wasmtime::component::Linker<T>,
-                get: impl Fn(&mut T) -> &mut U + Send + Sync + Copy + 'static,
-            ) -> wasmtime::Result<()>
-            where
-                U: Host,
-            {
-                add_to_linker_get_host(linker, get)
-            }
-            impl<_T: Host + ?Sized> Host for &mut _T {
-                fn e1_arg(&mut self, x: E1) -> () {
-                    Host::e1_arg(*self, x)
-                }
-                fn e1_result(&mut self) -> E1 {
-                    Host::e1_result(*self)
-                }
-                fn v1_arg(&mut self, x: V1) -> () {
-                    Host::v1_arg(*self, x)
-                }
-                fn v1_result(&mut self) -> V1 {
-                    Host::v1_result(*self)
-                }
-                fn bool_arg(&mut self, x: bool) -> () {
-                    Host::bool_arg(*self, x)
-                }
-                fn bool_result(&mut self) -> bool {
-                    Host::bool_result(*self)
-                }
-                fn option_arg(
-                    &mut self,
-                    a: Option<bool>,
-                    b: Option<()>,
-                    c: Option<u32>,
-                    d: Option<E1>,
-                    e: Option<f32>,
-                    g: Option<Option<bool>>,
-                ) -> () {
-                    Host::option_arg(*self, a, b, c, d, e, g)
-                }
-                fn option_result(
-                    &mut self,
-                ) -> (
-                    Option<bool>,
-                    Option<()>,
-                    Option<u32>,
-                    Option<E1>,
-                    Option<f32>,
-                    Option<Option<bool>>,
-                ) {
-                    Host::option_result(*self)
-                }
-                fn casts(
-                    &mut self,
-                    a: Casts1,
-                    b: Casts2,
-                    c: Casts3,
-                    d: Casts4,
-                    e: Casts5,
-                    f: Casts6,
-                ) -> (Casts1, Casts2, Casts3, Casts4, Casts5, Casts6) {
-                    Host::casts(*self, a, b, c, d, e, f)
-                }
-                fn result_arg(
-                    &mut self,
-                    a: Result<(), ()>,
-                    b: Result<(), E1>,
-                    c: Result<E1, ()>,
-                    d: Result<(), ()>,
-                    e: Result<u32, V1>,
-                    f: Result<
-                        wasmtime::component::__internal::String,
-                        wasmtime::component::__internal::Vec<u8>,
-                    >,
-                ) -> () {
-                    Host::result_arg(*self, a, b, c, d, e, f)
-                }
-                fn result_result(
-                    &mut self,
-                ) -> (
-                    Result<(), ()>,
-                    Result<(), E1>,
-                    Result<E1, ()>,
-                    Result<(), ()>,
-                    Result<u32, V1>,
-                    Result<
-                        wasmtime::component::__internal::String,
-                        wasmtime::component::__internal::Vec<u8>,
-                    >,
-                ) {
-                    Host::result_result(*self)
-                }
-                fn return_result_sugar(&mut self) -> Result<i32, MyErrno> {
-                    Host::return_result_sugar(*self)
-                }
-                fn return_result_sugar2(&mut self) -> Result<(), MyErrno> {
-                    Host::return_result_sugar2(*self)
-                }
-                fn return_result_sugar3(&mut self) -> Result<MyErrno, MyErrno> {
-                    Host::return_result_sugar3(*self)
-                }
-                fn return_result_sugar4(&mut self) -> Result<(i32, u32), MyErrno> {
-                    Host::return_result_sugar4(*self)
-                }
-                fn return_option_sugar(&mut self) -> Option<i32> {
-                    Host::return_option_sugar(*self)
-                }
-                fn return_option_sugar2(&mut self) -> Option<MyErrno> {
-                    Host::return_option_sugar2(*self)
-                }
-                fn result_simple(&mut self) -> Result<u32, i32> {
-                    Host::result_simple(*self)
-                }
-                fn is_clone_arg(&mut self, a: IsClone) -> () {
-                    Host::is_clone_arg(*self, a)
-                }
-                fn is_clone_return(&mut self) -> IsClone {
-                    Host::is_clone_return(*self)
-                }
-                fn return_named_option(&mut self) -> Option<u8> {
-                    Host::return_named_option(*self)
-                }
-                fn return_named_result(&mut self) -> Result<u8, MyErrno> {
-                    Host::return_named_result(*self)
-                }
             }
         }
     }
@@ -928,7 +898,7 @@ pub mod exports {
             #[allow(clippy::all)]
             pub mod variants {
                 #[allow(unused_imports)]
-                use wasmtime::component::__internal::anyhow;
+                use wasmtime::component::__internal::Box;
                 #[derive(wasmtime::component::ComponentType)]
                 #[derive(wasmtime::component::Lift)]
                 #[derive(wasmtime::component::Lower)]
@@ -1239,7 +1209,7 @@ pub mod exports {
                         write!(f, "{} (error {})", self.name(), * self as i32)
                     }
                 }
-                impl std::error::Error for MyErrno {}
+                impl core::error::Error for MyErrno {}
                 const _: () = {
                     assert!(
                         1 == < MyErrno as wasmtime::component::ComponentType >::SIZE32
@@ -1273,6 +1243,7 @@ pub mod exports {
                         4 == < IsClone as wasmtime::component::ComponentType >::ALIGN32
                     );
                 };
+                #[derive(Clone)]
                 pub struct Guest {
                     e1_arg: wasmtime::component::Func,
                     e1_result: wasmtime::component::Func,
@@ -1294,8 +1265,6 @@ pub mod exports {
                     result_simple: wasmtime::component::Func,
                     is_clone_arg: wasmtime::component::Func,
                     is_clone_return: wasmtime::component::Func,
-                    return_named_option: wasmtime::component::Func,
-                    return_named_result: wasmtime::component::Func,
                 }
                 #[derive(Clone)]
                 pub struct GuestIndices {
@@ -1319,8 +1288,6 @@ pub mod exports {
                     result_simple: wasmtime::component::ComponentExportIndex,
                     is_clone_arg: wasmtime::component::ComponentExportIndex,
                     is_clone_return: wasmtime::component::ComponentExportIndex,
-                    return_named_option: wasmtime::component::ComponentExportIndex,
-                    return_named_result: wasmtime::component::ComponentExportIndex,
                 }
                 impl GuestIndices {
                     /// Constructor for [`GuestIndices`] which takes a
@@ -1329,48 +1296,25 @@ pub mod exports {
                     ///
                     /// This constructor can be used to front-load string lookups to find exports
                     /// within a component.
-                    pub fn new(
-                        component: &wasmtime::component::Component,
+                    pub fn new<_T>(
+                        _instance_pre: &wasmtime::component::InstancePre<_T>,
                     ) -> wasmtime::Result<GuestIndices> {
-                        let (_, instance) = component
-                            .export_index(None, "foo:foo/variants")
+                        let instance = _instance_pre
+                            .component()
+                            .get_export_index(None, "foo:foo/variants")
                             .ok_or_else(|| {
-                                anyhow::anyhow!(
+                                wasmtime::format_err!(
                                     "no exported instance named `foo:foo/variants`"
                                 )
                             })?;
-                        Self::_new(|name| {
-                            component.export_index(Some(&instance), name).map(|p| p.1)
-                        })
-                    }
-                    /// This constructor is similar to [`GuestIndices::new`] except that it
-                    /// performs string lookups after instantiation time.
-                    pub fn new_instance(
-                        mut store: impl wasmtime::AsContextMut,
-                        instance: &wasmtime::component::Instance,
-                    ) -> wasmtime::Result<GuestIndices> {
-                        let instance_export = instance
-                            .get_export(&mut store, None, "foo:foo/variants")
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "no exported instance named `foo:foo/variants`"
-                                )
-                            })?;
-                        Self::_new(|name| {
-                            instance.get_export(&mut store, Some(&instance_export), name)
-                        })
-                    }
-                    fn _new(
-                        mut lookup: impl FnMut(
-                            &str,
-                        ) -> Option<wasmtime::component::ComponentExportIndex>,
-                    ) -> wasmtime::Result<GuestIndices> {
                         let mut lookup = move |name| {
-                            lookup(name)
+                            _instance_pre
+                                .component()
+                                .get_export_index(Some(&instance), name)
                                 .ok_or_else(|| {
-                                    anyhow::anyhow!(
+                                    wasmtime::format_err!(
                                         "instance export `foo:foo/variants` does \
-                    not have export `{name}`"
+                                                            not have export `{name}`"
                                     )
                                 })
                         };
@@ -1395,8 +1339,6 @@ pub mod exports {
                         let result_simple = lookup("result-simple")?;
                         let is_clone_arg = lookup("is-clone-arg")?;
                         let is_clone_return = lookup("is-clone-return")?;
-                        let return_named_option = lookup("return-named-option")?;
-                        let return_named_result = lookup("return-named-result")?;
                         Ok(GuestIndices {
                             e1_arg,
                             e1_result,
@@ -1418,8 +1360,6 @@ pub mod exports {
                             result_simple,
                             is_clone_arg,
                             is_clone_return,
-                            return_named_option,
-                            return_named_result,
                         })
                     }
                     pub fn load(
@@ -1427,9 +1367,11 @@ pub mod exports {
                         mut store: impl wasmtime::AsContextMut,
                         instance: &wasmtime::component::Instance,
                     ) -> wasmtime::Result<Guest> {
+                        let _instance = instance;
+                        let _instance_pre = _instance.instance_pre(&store);
+                        let _instance_type = _instance_pre.instance_type();
                         let mut store = store.as_context_mut();
                         let _ = &mut store;
-                        let _instance = instance;
                         let e1_arg = *_instance
                             .get_typed_func::<(E1,), ()>(&mut store, &self.e1_arg)?
                             .func();
@@ -1570,18 +1512,6 @@ pub mod exports {
                                 (IsClone,),
                             >(&mut store, &self.is_clone_return)?
                             .func();
-                        let return_named_option = *_instance
-                            .get_typed_func::<
-                                (),
-                                (Option<u8>,),
-                            >(&mut store, &self.return_named_option)?
-                            .func();
-                        let return_named_result = *_instance
-                            .get_typed_func::<
-                                (),
-                                (Result<u8, MyErrno>,),
-                            >(&mut store, &self.return_named_result)?
-                            .func();
                         Ok(Guest {
                             e1_arg,
                             e1_result,
@@ -1603,8 +1533,6 @@ pub mod exports {
                             result_simple,
                             is_clone_arg,
                             is_clone_return,
-                            return_named_option,
-                            return_named_result,
                         })
                     }
                 }
@@ -1621,7 +1549,6 @@ pub mod exports {
                             >::new_unchecked(self.e1_arg)
                         };
                         let () = callee.call(store.as_context_mut(), (arg0,))?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_e1_result<S: wasmtime::AsContextMut>(
@@ -1635,7 +1562,6 @@ pub mod exports {
                             >::new_unchecked(self.e1_result)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_v1_arg<S: wasmtime::AsContextMut>(
@@ -1650,7 +1576,6 @@ pub mod exports {
                             >::new_unchecked(self.v1_arg)
                         };
                         let () = callee.call(store.as_context_mut(), (arg0,))?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_v1_result<S: wasmtime::AsContextMut>(
@@ -1664,7 +1589,6 @@ pub mod exports {
                             >::new_unchecked(self.v1_result)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_bool_arg<S: wasmtime::AsContextMut>(
@@ -1679,7 +1603,6 @@ pub mod exports {
                             >::new_unchecked(self.bool_arg)
                         };
                         let () = callee.call(store.as_context_mut(), (arg0,))?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_bool_result<S: wasmtime::AsContextMut>(
@@ -1693,7 +1616,6 @@ pub mod exports {
                             >::new_unchecked(self.bool_result)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_option_arg<S: wasmtime::AsContextMut>(
@@ -1724,7 +1646,6 @@ pub mod exports {
                                 store.as_context_mut(),
                                 (arg0, arg1, arg2, arg3, arg4, arg5),
                             )?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_option_result<S: wasmtime::AsContextMut>(
@@ -1756,7 +1677,6 @@ pub mod exports {
                             >::new_unchecked(self.option_result)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_casts<S: wasmtime::AsContextMut>(
@@ -1782,7 +1702,6 @@ pub mod exports {
                                 store.as_context_mut(),
                                 (arg0, arg1, arg2, arg3, arg4, arg5),
                             )?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_result_arg<S: wasmtime::AsContextMut>(
@@ -1813,7 +1732,6 @@ pub mod exports {
                                 store.as_context_mut(),
                                 (arg0, arg1, arg2, arg3, arg4, arg5),
                             )?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_result_result<S: wasmtime::AsContextMut>(
@@ -1851,7 +1769,6 @@ pub mod exports {
                             >::new_unchecked(self.result_result)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_return_result_sugar<S: wasmtime::AsContextMut>(
@@ -1865,7 +1782,6 @@ pub mod exports {
                             >::new_unchecked(self.return_result_sugar)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_return_result_sugar2<S: wasmtime::AsContextMut>(
@@ -1879,7 +1795,6 @@ pub mod exports {
                             >::new_unchecked(self.return_result_sugar2)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_return_result_sugar3<S: wasmtime::AsContextMut>(
@@ -1893,7 +1808,6 @@ pub mod exports {
                             >::new_unchecked(self.return_result_sugar3)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_return_result_sugar4<S: wasmtime::AsContextMut>(
@@ -1907,7 +1821,6 @@ pub mod exports {
                             >::new_unchecked(self.return_result_sugar4)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_return_option_sugar<S: wasmtime::AsContextMut>(
@@ -1921,7 +1834,6 @@ pub mod exports {
                             >::new_unchecked(self.return_option_sugar)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_return_option_sugar2<S: wasmtime::AsContextMut>(
@@ -1935,7 +1847,6 @@ pub mod exports {
                             >::new_unchecked(self.return_option_sugar2)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_result_simple<S: wasmtime::AsContextMut>(
@@ -1949,7 +1860,6 @@ pub mod exports {
                             >::new_unchecked(self.result_simple)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                     pub fn call_is_clone_arg<S: wasmtime::AsContextMut>(
@@ -1964,7 +1874,6 @@ pub mod exports {
                             >::new_unchecked(self.is_clone_arg)
                         };
                         let () = callee.call(store.as_context_mut(), (arg0,))?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(())
                     }
                     pub fn call_is_clone_return<S: wasmtime::AsContextMut>(
@@ -1978,35 +1887,6 @@ pub mod exports {
                             >::new_unchecked(self.is_clone_return)
                         };
                         let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
-                        Ok(ret0)
-                    }
-                    pub fn call_return_named_option<S: wasmtime::AsContextMut>(
-                        &self,
-                        mut store: S,
-                    ) -> wasmtime::Result<Option<u8>> {
-                        let callee = unsafe {
-                            wasmtime::component::TypedFunc::<
-                                (),
-                                (Option<u8>,),
-                            >::new_unchecked(self.return_named_option)
-                        };
-                        let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
-                        Ok(ret0)
-                    }
-                    pub fn call_return_named_result<S: wasmtime::AsContextMut>(
-                        &self,
-                        mut store: S,
-                    ) -> wasmtime::Result<Result<u8, MyErrno>> {
-                        let callee = unsafe {
-                            wasmtime::component::TypedFunc::<
-                                (),
-                                (Result<u8, MyErrno>,),
-                            >::new_unchecked(self.return_named_result)
-                        };
-                        let (ret0,) = callee.call(store.as_context_mut(), ())?;
-                        callee.post_return(store.as_context_mut())?;
                         Ok(ret0)
                     }
                 }
